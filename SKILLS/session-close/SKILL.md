@@ -62,8 +62,13 @@ docs changed, any baton written, and the revive command if archived.
 **In tmux** (`$TMUX` set) — one command does both registry and tmux:
 
 ```bash
-# Archive (default): parks the registry row AND kills this tmux session.
-~/OPS/.claude-config/remote-sessions/archive-remote-claude.sh archive "$(tmux display-message -p '#S')"
+# Archive (default): parks the registry row, then kills this tmux session by its
+# RAW name. The chained kill matters: the registry stores the NORMALIZED name
+# (Title-Case-Hyphen), and rc_archive kills that — a hand-made session with
+# different casing (e.g. "harness") survives it, because tmux names are
+# case-sensitive. The second kill targets the actual live name; it no-ops if
+# rc_archive's kill already landed.
+~/OPS/.claude-config/remote-sessions/archive-remote-claude.sh archive "$(tmux display-message -p '#S')"; tmux kill-session -t "$(tmux display-message -p '#S')" 2>/dev/null
 ```
 
 ```bash
