@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# ac-backfill-shas — attach commit-SHA refs to historical done-tasks.
+#
+# ac-msg now auto-attaches HEAD SHA on shipped-class topics, but tasks
+# closed before that change have no SHA in their body. ac-drift-check
+# flags them as soft-signals. This script scans done-tasks lacking a
+# SHA ref, greps git log for commits matching the task slug or topic
+# keywords, and appends a ## Shipped section with the best matches.
+#
+# Heuristic — for each done task:
+#   1. Skip if body already contains a SHA-ish match.
+#   2. Build search terms from: task slug (last path segment of id),
+#      tag keywords, parent_task slug fragments.
+#   3. Run `git log --all --grep=<term> -E --pretty=...` and rank.
+#   4. Append top N matches to body under "## Shipped (backfill)".
+#
+# Optimistic — best-effort, expects review. Run --dry-run first.
+#
+# Usage:
+#   ac-backfill-shas --dry-run     # print proposed edits, no writes
+#   ac-backfill-shas               # write
+#   ac-backfill-shas --repo /path  # use a specific git repo for log search
+#                                   (default: cwd)
+#
+# Env:
+#   AC_ROOT   — required, per-project runtime root
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+
+TASKS="$AC_ROOT/runtime/tasks"
+TMP="$AC_ROOT/runtime/tmp"
+REPO=""
+DRY=0
+TOP_N=3
+
+die() { echo "ac-backfill-shas: $*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --repo)    REPO="$2"; shift 2 ;;
+    --top)     TOP_N="$2"; shift 2 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) die "unknown: $1" ;;
+  esac
+done
+
+# Locate a git repo: explicit --repo wins; else cwd if it's a repo.
+if [[ -z "$REPO" ]]; then
+  REPO=$(git rev-parse --show-toplevel 2>/dev/null || true)
+fi
+[[ -z "$REPO" ]] && die "no git repo (cwd is not a repo, no --repo given)"
+[[ -d "$REPO/.git" || -f "$REPO/.git" ]] || die "not a git repo: $REPO"
+
+get_field() {
+  local file="$1" key="$2"
+  awk -v k="^${key}:" '
+    /^---$/ { f++; if (f==2) exit; next }
+    f==1 && $0 ~ k { sub(/^[a-z_]+:[[:space:]]*/, ""); print; exit }
+  ' "$file"
+}
+
+has_sha_ref() {
+  # True if file body contains a SHA-ish ref (matches ac-drift-check regex).
+  grep -qE '[A-Za-z0-9_/.-]+#[a-f0-9]{7,}|[a-f0-9]{40}' "$1"
+}
+
+# Build a list of search terms (one per line) from a task spec.
+#  1. Full slug (e.g., "contradiction-guard-pim-keywords")
+#  2. Slug minus the first leading segment (e.g., "guard-pim-keywords",
+#     drops "contradiction" prefix). Helps when commits use a shorter
+#     phrasing of the same topic.
+#  3. Each consecutive 2-word fragment from the slug
+#     (e.g., "contradiction-guard", "guard-pim", "pim-keywords") —
+#     only fragments where both words are >=4 chars (avoids "to-do"
+#     style noise).
+search_terms() {
+  local file="$1"
+  local id slug
+  id=$(get_field "$file" id)
+  slug="${id##*__}"
+  echo "$slug"
+  # Strip first segment if slug has 3+ segments.
+  local stripped="${slug#*-}"
+  if [[ "$stripped" != "$slug" && "$stripped" == *-* ]]; then
+    echo "$stripped"
+  fi
+  # Pairs of consecutive words.
+  IFS='-' read -ra parts <<< "$slug"
+  local i
+  for (( i=0; i<${#parts[@]}-1; i++ )); do
+    local a="${parts[i]}" b="${parts[i+1]}"
+    if (( ${#a} >= 4 && ${#b} >= 4 )); then
+      echo "${a}-${b}"
+    fi
+  done
+}
+
+backfill_one() {
+  local file="$1"
+  local id slug pattern
+  id=$(get_field "$file" id)
+
+  if has_sha_ref "$file"; then
+    echo "skip: $id (already has SHA ref)"
+    return 0
+  fi
+
+  # Build search terms; longer/most-specific first so de-dup keeps best match.
+  local terms
+  terms=$(search_terms "$file" | sort -u | awk '{print length, $0}' | sort -rn | awk '{print $2}')
+
+  if [[ -z "$terms" ]]; then
+    echo "miss: $id (no search terms generated)"
+    return 0
+  fi
+
+  # Subject-only match: pre-list commits then grep each term; tag which
+  # term matched. De-dup by commit SHA, keep TOP_N.
+  local matches
+  matches=$(
+    cd "$REPO"
+    # Full 40-char SHA so ac-drift-check regex matches.
+    log=$(git log --all --pretty=format:'%H|%s' --no-merges 2>/dev/null)
+    while IFS= read -r t; do
+      [[ -z "$t" ]] && continue
+      printf '%s\n' "$log" \
+        | { grep -iF -- "$t" || true; } \
+        | awk -v term="$t" -F'|' 'NF>=2 {print $1 "|" $2 "|" term}'
+    done <<< "$terms" \
+      | sort -u -t'|' -k1,1 \
+      | head -"$TOP_N"
+  )
+
+  if [[ -z "$matches" ]]; then
+    echo "miss: $id (no subject matched: $(echo "$terms" | tr '\n' ',' | sed 's/,$//'))"
+    return 0
+  fi
+
+  echo "match: $id"
+  printf '%s\n' "$matches" | awk -F'|' '{ printf "    %s — %s  (matched: %s)\n", $1, $2, $3 }'
+
+  if (( DRY )); then
+    return 0
+  fi
+
+  # Append a ## Shipped section.
+  local tmpf="$TMP/$(basename "$file")"
+  mkdir -p "$TMP"
+  cp -- "$file" "$tmpf"
+  {
+    printf '\n## Shipped (backfill)\n\n'
+    printf 'Commit refs attached by ac-backfill-shas (best-effort match by slug/topic):\n\n'
+    while IFS='|' read -r sha subj; do
+      printf -- '- `%s` — %s\n' "$sha" "$subj"
+    done <<< "$matches"
+    printf '\nReview: if any of these commits do not actually belong to this task, edit them out.\n'
+  } >> "$tmpf"
+  mv -- "$tmpf" "$file"
+}
+
+shopt -s nullglob
+for t in "$TASKS"/*.md; do
+  status=$(get_field "$t" status)
+  [[ "$status" != "done" ]] && continue
+  backfill_one "$t"
+done
+
+if (( DRY )); then
+  echo ""
+  echo "dry-run complete. Re-run without --dry-run to write."
+fi

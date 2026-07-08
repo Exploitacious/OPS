@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# ac-drift-check — nightly kata + doctrine drift detection for OPS repo.
+#
+# Runs the project-kata six-line check against this repo:
+#   1. Root holds only canonical files + dotfiles?
+#   2. README/CLAUDE.md under 500-line soft cap?
+#   3. Any new tracked files in non-standard places?
+#   4. CHANGELOG has matching entry for each commit touching documented surface in last 24h?
+#   5. New docs added to docs/ without indexing? (docs/ doesn't exist here by design)
+#   6. New file in docs/ missing "what this is" / "see also"? (n/a)
+#
+# Plus doctrine-specific checks:
+#   - Operator-directions filed today have current dates?
+#   - Tasks marked status=done have referenced commit SHAs in body?
+#   - Decisions added today are in CHANGELOG?
+#
+# Output: a runtime/improvements/<date>__drift-alert.md if any fails.
+# Otherwise silent.
+#
+# Run from cron: 0 8 * * * (08:00 daily, off-:00 by accident here; bump to :03 in actual cron).
+
+set -uo pipefail
+
+OPS_ROOT="${OPS_ROOT:-$HOME/OPS}"
+AC_FLEET="${AC_FLEET:-$OPS_ROOT/WORKFORCE}"
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+WORKFORCE="$AC_ROOT"  # back-compat alias for path-refs below
+TODAY="$(date -u +%Y-%m-%d)"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REPORT="$AC_ROOT/runtime/improvements/${TODAY}__drift-alert.md"
+
+ISSUES=()
+
+# 1. Root canonical-files check
+ALLOWED_ROOT="README.md CLAUDE.md CHANGELOG.md IDEAS.md .gitattributes .gitignore"
+mapfile -t ROOT_FILES < <(cd "$OPS_ROOT" && ls -1A | grep -vE '^(CONTEXT|WORKFORCE|PROJECTS|NOTES|\.claude.*|\.git)$')
+for f in "${ROOT_FILES[@]}"; do
+  case " $ALLOWED_ROOT " in *" $f "*) ;; *) ISSUES+=("root sprawl: unexpected file at OPS/ root: $f") ;; esac
+done
+
+# 2. Soft cap on README + CLAUDE.md
+for f in README.md CLAUDE.md; do
+  [ -f "$OPS_ROOT/$f" ] || continue
+  lines=$(wc -l < "$OPS_ROOT/$f")
+  if [ "$lines" -gt 500 ]; then
+    ISSUES+=("soft-cap exceeded: $f at $lines lines (cap 500) — consider splitting")
+  fi
+done
+
+# 3. CHANGELOG covers commits in last 24h touching CONTEXT/, README, CLAUDE.md, fleet system
+cd "$OPS_ROOT"
+mapfile -t LAST_DAY < <(git log --since='24 hours ago' --pretty=format:'%H %s' --name-only 2>/dev/null | grep -E '^(README\.md|CLAUDE\.md|CONTEXT/|WORKFORCE/personalities/|WORKFORCE/protocol/|WORKFORCE/bin/)' | sort -u)
+if [ ${#LAST_DAY[@]} -gt 0 ] && ! grep -q "^## .*$TODAY\|## \[Unreleased\]" "$OPS_ROOT/CHANGELOG.md" 2>/dev/null; then
+  ISSUES+=("CHANGELOG missing today's section despite ${#LAST_DAY[@]} doc-surface touches in last 24h")
+fi
+
+# 4. Doctrine sanity — operator-directions filed today must have today's date in frontmatter
+mapfile -t TODAY_DIRECTIONS < <(find "$WORKFORCE/runtime/operator-directions" -name "${TODAY}__*.md" 2>/dev/null)
+for d in "${TODAY_DIRECTIONS[@]}"; do
+  if ! grep -qE "^date: ${TODAY}$" "$d"; then
+    ISSUES+=("operator-direction $(basename "$d") missing frontmatter 'date: $TODAY'")
+  fi
+done
+
+# 5. Tasks marked done must have a SHA reference (loose check for $-prefixed or myrepo#...)
+mapfile -t DONE_TASKS < <(grep -l '^status: done' "$WORKFORCE/runtime/tasks"/*.md 2>/dev/null)
+for t in "${DONE_TASKS[@]}"; do
+  if ! grep -qE '[A-Za-z0-9_/-]+#[a-f0-9]{7,}|[a-f0-9]{40}' "$t"; then
+    # Not a hard error — log as soft signal
+    ISSUES+=("done-task $(basename "$t") body has no commit-SHA reference (soft signal)")
+  fi
+done
+
+# 6. Parent-task auto-close: if every child of a parent is status=done,
+# flag the parent for review. Avoids the "parent stuck in_progress
+# forever" pattern.
+mapfile -t IN_PROGRESS_PARENTS < <(awk '
+  /^---$/    { f++; next }
+  f==1 && /^id:/        { id=$2 }
+  f==1 && /^status:/    { st=$2 }
+  f==1 && /^parent_task:[[:space:]]*null/ { is_root=1 }
+  f==2 && id && st=="in_progress" && is_root { print id; id=""; st=""; is_root=0; f=0 }
+' "$WORKFORCE/runtime/tasks"/*.md 2>/dev/null | sort -u)
+for parent in "${IN_PROGRESS_PARENTS[@]}"; do
+  [ -z "$parent" ] && continue
+  # Count children + count done children
+  total=0; done_count=0
+  for c in "$WORKFORCE/runtime/tasks"/*.md; do
+    pt=$(grep -m1 "^parent_task:" "$c" 2>/dev/null | sed -E 's/^parent_task:[[:space:]]*//')
+    if [ "$pt" = "$parent" ]; then
+      total=$((total+1))
+      cs=$(grep -m1 "^status:" "$c" | sed -E 's/^status:[[:space:]]*//')
+      [ "$cs" = "done" ] && done_count=$((done_count+1))
+    fi
+  done
+  if [ "$total" -gt 0 ] && [ "$done_count" -eq "$total" ]; then
+    ISSUES+=("parent-task $parent: all $total children done — review whether parent should flip to awaiting_review/done")
+  fi
+done
+
+# Emit report if any issues
+if [ ${#ISSUES[@]} -eq 0 ]; then
+  exit 0
+fi
+
+mkdir -p "$WORKFORCE/runtime/improvements"
+cat > "$REPORT" <<EOF
+---
+id: ${TODAY}__drift-alert
+generated_at: $NOW
+generator: bin/ac-drift-check
+status: open
+---
+
+# Drift alert — $TODAY
+
+ac-drift-check found ${#ISSUES[@]} issue(s) on this scan.
+
+EOF
+
+for i in "${ISSUES[@]}"; do
+  printf -- '- %s\n' "$i" >> "$REPORT"
+done
+
+cat >> "$REPORT" <<EOF
+
+---
+
+Captain triages on next rollup or weekly cadence. Each item:
+fix it, mark in CHANGELOG, OR document why it's acceptable
+(annotate this report) and close.
+EOF
+
+echo "drift-alert: $REPORT"

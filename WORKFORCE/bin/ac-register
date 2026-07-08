@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# ac-register — claim a name + register in manifest.d/.
+#
+# Usage:
+#   ac-register --role agent       [--name <name>] [--scope <tag>]
+#   ac-register --role coordinator [--name <name>]
+#   ac-register --release <name>                       # mark idle + free slot
+#   ac-register --stale   <name>                       # mark stale (peer or coordinator action)
+#   ac-register --list                                 # show current manifest
+#
+# Auto-picks first unclaimed name from name-pool.md if --name omitted.
+# Writes atomically via tmp + rename.
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+RUNTIME="$AC_ROOT/runtime"
+MANIFEST="$RUNTIME/manifest.d"
+PULSE="$RUNTIME/pulse"
+TMP="$RUNTIME/tmp"
+POOL="$AC_FLEET/personalities/name-pool.md"
+LOG="$RUNTIME/log.jsonl"
+
+mkdir -p "$MANIFEST" "$PULSE" "$TMP" "$RUNTIME/journal" "$RUNTIME/archive"
+
+die() { echo "ac-register: $*" >&2; exit 1; }
+ts_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+agent_pool() {
+  awk '/^## Agents/,/^## Coordinators/' "$POOL" \
+    | grep -E '^[0-9]+\. ' | sed -E 's/^[0-9]+\.[[:space:]]+//'
+}
+
+coord_pool() {
+  awk '/^## Coordinators/,/^## Scope tags/' "$POOL" \
+    | grep -E '^[0-9]+\. ' | sed -E 's/^[0-9]+\.[[:space:]]+//'
+}
+
+is_claimed() {
+  local n="$1"
+  [[ -f "$MANIFEST/${n}.json" ]] || return 1
+  local last status
+  status="$({ grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$MANIFEST/${n}.json" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+  last="$({ grep -oE '"last_seen"[[:space:]]*:[[:space:]]*"[^"]*"' "$MANIFEST/${n}.json" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+  case "$status" in
+    idle|stale) return 1 ;;
+  esac
+  local now_epoch last_epoch
+  now_epoch=$(date -u +%s)
+  last_epoch=$(date -u -d "$last" +%s 2>/dev/null || echo 0)
+  local age=$(( now_epoch - last_epoch ))
+  if (( age > 1800 )); then return 1; fi
+  return 0
+}
+
+pick_agent_name() {
+  while read -r n; do
+    [[ -z "$n" ]] && continue
+    if ! is_claimed "$n"; then
+      echo "$n"
+      return 0
+    fi
+  done < <(agent_pool)
+  die "no agent names available — all claimed and live"
+}
+
+pick_coord_name() {
+  while read -r n; do
+    [[ -z "$n" ]] && continue
+    if ! is_claimed "$n"; then
+      echo "$n"
+      return 0
+    fi
+  done < <(coord_pool)
+  die "no coordinator names available"
+}
+
+write_manifest() {
+  local name="$1" role="$2" scope="${3:-}" no_ack_gate="${4:-0}"
+  local now host sid
+  now="$(ts_iso)"
+  host="$(hostname)"
+  sid="${AC_SESSION_ID:-$(date -u +%s)-$$}"
+
+  local tmpf="$TMP/${name}.manifest.json"
+  cat > "$tmpf" <<EOF
+{
+  "name": "$name",
+  "scope_tag": "$scope",
+  "role": "$role",
+  "host": "$host",
+  "session_id": "$sid",
+  "claimed_at": "$now",
+  "last_seen": "$now",
+  "status": "ready",
+  "current_task": null,
+  "owned_repos": [],
+  "bound_root": "$AC_ROOT",
+  "notes": ""
+}
+EOF
+  mv -- "$tmpf" "$MANIFEST/${name}.json"
+
+  # HARD-rule ack gate: drop a flag file alongside the manifest.
+  # ac-msg refuses non-ack sends until the agent sends
+  # topic=hard-rules-acked (which removes the flag).
+  # Coordinators are exempt (they author the rules; activation flow differs).
+  # In-session subagents (Agent-tool subtype, debate-style) bypass the gate
+  # when --no-ack-gate is passed — they don't read AGENT.md or send msgs.
+  if [[ "$role" == "agent" && "$no_ack_gate" != "1" ]]; then
+    touch "$MANIFEST/${name}.ack-pending"
+  fi
+
+  local tmpp="$TMP/${name}.pulse.json"
+  cat > "$tmpp" <<EOF
+{
+  "agent": "$name",
+  "role": "$role",
+  "host": "$host",
+  "session_id": "$sid",
+  "last_seen": "$now",
+  "status": "ready",
+  "current_task": null,
+  "current_repo": null,
+  "current_branch": null,
+  "active_prs": [],
+  "blocked_on": [],
+  "notes": ""
+}
+EOF
+  mv -- "$tmpp" "$PULSE/${name}.json"
+
+  mkdir -p "$RUNTIME/inbox/$name"
+  local jf="$RUNTIME/journal/${name}.md"
+  if [[ ! -f "$jf" ]]; then
+    cat > "$jf" <<EOF
+# Journal — $name
+
+## ${now} — activated
+host: $host
+session: $sid
+role: $role
+scope: ${scope:-(unset)}
+
+EOF
+  else
+    cat >> "$jf" <<EOF
+
+---
+
+## ${now} — RECLAIMED (new session)
+host: $host
+session: $sid
+role: $role
+scope: ${scope:-(unset)}
+
+EOF
+  fi
+}
+
+log_event() {
+  local line="$1"
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; printf '%s\n' "$line" >> "$LOG" ) 9>>"$LOG"
+  else
+    printf '%s\n' "$line" >> "$LOG"
+  fi
+}
+
+cmd_register() {
+  local role="" name="" scope="" no_ack_gate=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --role)         role="$2"; shift 2 ;;
+      --name)         name="$2"; shift 2 ;;
+      --scope)        scope="$2"; shift 2 ;;
+      --no-ack-gate)  no_ack_gate=1; shift ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+  [[ -z "$role" ]] && die "missing --role"
+
+  case "$role" in
+    agent)
+      # Claim race fix: pick-name + is_claimed + write_manifest is a
+      # check-then-act sequence. write_manifest itself is atomic (tmp+mv),
+      # but without a lock spanning the whole sequence, two concurrent
+      # registrations can both pass is_claimed on the same free name before
+      # either has written a manifest, and both win. Serialize the claim
+      # under flock (style per ac-compact-peer/ac-mcp-reconnect-peer); scope
+      # stays tight — just claim+write, not logging/echo.
+      local lockfile="$MANIFEST/.register.lock"
+      {
+        flock 9
+        [[ -z "$name" ]] && name="$(pick_agent_name)"
+        is_claimed "$name" && die "name already claimed (live): $name"
+        write_manifest "$name" "agent" "$scope" "$no_ack_gate"
+      } 9>"$lockfile"
+      log_event "$(printf '{"ts":"%s","actor":"%s","event":"activate","role":"agent","host":"%s","scope":"%s","ack_gate":%s}' \
+                  "$(ts_iso)" "$name" "$(hostname)" "$scope" "$((1 - no_ack_gate))")"
+      echo "$name"
+      ;;
+    coordinator)
+      local coord_file="$MANIFEST/_coordinator.json"
+      if [[ -f "$coord_file" ]]; then
+        local last cstatus
+        last="$({ grep -oE '"last_seen"[[:space:]]*:[[:space:]]*"[^"]*"' "$coord_file" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+        cstatus="$({ grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$coord_file" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+        local now_epoch last_epoch
+        now_epoch=$(date -u +%s)
+        last_epoch=$(date -u -d "$last" +%s 2>/dev/null || echo 0)
+        local age=$(( now_epoch - last_epoch ))
+        # Slot is held only if status is "active" AND last_seen is recent.
+        # idle/stale = free regardless of age.
+        if [[ "$cstatus" == "active" ]] && (( age < 300 )); then
+          local existing
+          existing="$({ grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$coord_file" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+          die "coordinator slot held by $existing (last_seen ${age}s ago)"
+        fi
+      fi
+      [[ -z "$name" ]] && name="$(pick_coord_name)"
+      is_claimed "$name" && die "name already claimed: $name"
+
+      write_manifest "$name" "coordinator" ""
+
+      local now host sid tmpf
+      now="$(ts_iso)"; host="$(hostname)"; sid="${AC_SESSION_ID:-$(date -u +%s)-$$}"
+      tmpf="$TMP/_coordinator.json"
+      cat > "$tmpf" <<EOF
+{
+  "name": "$name",
+  "role": "coordinator",
+  "host": "$host",
+  "session_id": "$sid",
+  "claimed_at": "$now",
+  "last_seen": "$now",
+  "status": "active",
+  "notes": ""
+}
+EOF
+      mv -- "$tmpf" "$coord_file"
+      log_event "$(printf '{"ts":"%s","actor":"%s","event":"coordinator-activate","host":"%s"}' \
+                  "$(ts_iso)" "$name" "$(hostname)")"
+      echo "$name"
+      ;;
+    *)
+      die "bad role: $role (agent|coordinator)"
+      ;;
+  esac
+}
+
+cmd_release() {
+  local name="$1"
+  local mf="$MANIFEST/${name}.json"
+  [[ -f "$mf" ]] || die "no manifest for: $name"
+  local now; now="$(ts_iso)"
+  local tmpf="$TMP/${name}.json"
+  sed -E 's/"status"[[:space:]]*:[[:space:]]*"[^"]*"/"status": "idle"/' "$mf" \
+    | sed -E "s/\"last_seen\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"last_seen\": \"$now\"/" \
+    > "$tmpf"
+  mv -- "$tmpf" "$mf"
+
+  # If this agent was the active coordinator, also release the coord slot.
+  local coord_file="$MANIFEST/_coordinator.json"
+  if [[ -f "$coord_file" ]]; then
+    local coord_name
+    coord_name="$({ grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$coord_file" || true; } \
+                  | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+    if [[ "$coord_name" == "$name" ]]; then
+      local tmpc="$TMP/_coordinator.json"
+      sed -E 's/"status"[[:space:]]*:[[:space:]]*"[^"]*"/"status": "idle"/' "$coord_file" \
+        | sed -E "s/\"last_seen\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"last_seen\": \"$now\"/" \
+        > "$tmpc"
+      mv -- "$tmpc" "$coord_file"
+      log_event "$(printf '{"ts":"%s","actor":"%s","event":"coordinator-deactivate"}' "$now" "$name")"
+    fi
+  fi
+
+  log_event "$(printf '{"ts":"%s","actor":"%s","event":"deactivate"}' "$now" "$name")"
+  echo "released: $name"
+
+  # Checkpoint hook: refresh anchor of the RUNNER (not the released agent).
+  # Released agent's journal is closed; the observer (typically Coordinator)
+  # is the one whose fleet-state view changed.
+  # 2026-05-13 bug fix: previously set AC_NAME="$name" which refreshed the
+  # released agent's journal instead of the runner's. Caught by Captain
+  # during recovery sequence — release hook didn't actually update
+  # observer's anchor.
+  if [[ -n "${AC_NAME:-}" && -x "$AC_FLEET/bin/ac-pre-compact" ]]; then
+    "$AC_FLEET/bin/ac-pre-compact" --silent >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_stale() {
+  local name="$1"
+  local mf="$MANIFEST/${name}.json"
+  [[ -f "$mf" ]] || die "no manifest for: $name"
+  local tmpf="$TMP/${name}.json"
+  sed -E 's/"status"[[:space:]]*:[[:space:]]*"[^"]*"/"status": "stale"/' "$mf" > "$tmpf"
+  mv -- "$tmpf" "$mf"
+  log_event "$(printf '{"ts":"%s","actor":"%s","event":"mark-stale","target":"%s"}' \
+              "$(ts_iso)" "${AC_NAME:-unknown}" "$name")"
+  echo "marked stale: $name"
+}
+
+cmd_list() {
+  shopt -s nullglob
+  local f
+  for f in "$MANIFEST"/*.json; do
+    local n s last
+    n="$({ grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+    s="$({ grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+    last="$({ grep -oE '"last_seen"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+    printf '%-20s status=%-15s last_seen=%s\n' "$n" "$s" "$last"
+  done
+}
+
+main() {
+  [[ $# -lt 1 ]] && { sed -n '2,12p' "$0"; exit 1; }
+  case "$1" in
+    --role)    cmd_register "$@" ;;
+    --release) shift; cmd_release "${1:?missing name}" ;;
+    --stale)   shift; cmd_stale "${1:?missing name}" ;;
+    --list)    cmd_list ;;
+    -h|--help) sed -n '2,12p' "$0" ;;
+    *)         die "unknown: $1" ;;
+  esac
+}
+
+main "$@"

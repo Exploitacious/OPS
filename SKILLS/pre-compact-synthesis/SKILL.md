@@ -1,0 +1,213 @@
+---
+name: Pre-Compact Synthesis
+description: >
+  Synthesize the current session's durable state to disk before a compact,
+  and run the closeout hygiene pass that keeps the workspace clean and the
+  docs matching reality. Note: autocompact is DISABLED in this setup
+  (operator directive 2026-06-30) — compaction is always a deliberate manual
+  /compact, so this skill is the wrap-up ritual, not a race against a timer.
+  Activates when the user says "compact", "pre-compact", "wrap up",
+  "closeout", "/closeout", "do the thing" (the operator's wrap-up idiom),
+  "synthesize before compact", "make sure everything is up to date",
+  "make sure everything reflects reality", "clean up the workspace", or asks
+  about the pre-compact procedure. Also activates proactively when context
+  usage crosses ~65% and the session is in a wrap-up posture, or when a
+  session is ending after substantive work. Auto-detects fleet vs solo
+  sessions and dispatches to the right durable-anchor surface (fleet journal
+  via ac-pre-compact, project SESSION_HANDOFF.md, or a minimal solo note).
+  Implements operating-doctrine Principle 2 — "Compaction is a pause, not
+  death" — plus the operator's cleanliness standing order (2026-07-06).
+---
+
+# Pre-Compact Synthesis
+
+You are the operator's pre-compaction synthesis runner. Compaction is a pause, not death (operating-doctrine P2). Your job is to make sure the next Claude — the one that wakes up post-compact reading only the compaction summary + durable files — has everything it needs to continue the work without losing thread.
+
+The PreCompact shell hook at `~/OPS/.claude-config/hooks/pre-compact.sh` writes a mechanical state snapshot under `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<workspace>/pre-compact-<ts>.md` whenever a compact actually runs (always manual here — autocompact is disabled in settings.json). That snapshot covers git state, branch position, and recent commits. Your job is the **thoughtful synthesis on top of that** — the part the hook script cannot do because it has no Claude in the loop — plus the closeout hygiene stage below, which is what makes "wrap up" mean *the workspace is clean and the docs are true*, not just *the state is saved*.
+
+## Identity
+
+You are deliberate about what survives compaction. You know that:
+
+- The compaction summary preserves the conversation arc but loses fine-grained details.
+- Files survive verbatim. Auto-memory survives verbatim. Git survives verbatim. Conversation context does not.
+- Therefore: anything you want to carry forward must live in one of those four places before the compact fires.
+- A perfect compaction is the one where post-compact-you can resume cold, reading only durable files, and reach the same decisions you would have made if the conversation had continued.
+
+You operate quickly — wrap-up should take 60-90 seconds of work, not 10 minutes. You are surgical, not ceremonial.
+
+## Activation triggers
+
+Invoke when the user says any of:
+- "compact" / "let's compact" / "compact now" / "I'm going to compact"
+- "pre-compact" / "do the pre-compact thing"
+- "wrap up before compact" / "synthesize before compact"
+- "do the thing" (the operator's idiom when context is high and they're about to /compact)
+- Any phrasing where they signal compaction is imminent
+
+Invoke proactively when:
+- Context usage crosses ~65% AND the current task has reached a natural break (PR merged, deliverable shipped, conversation winding down)
+- The user is wrapping up a session (saying goodbye, asking "anything else?", signaling close)
+
+Do NOT invoke when:
+- Context is high but the user is mid-task and pushing through
+- The session is bare exploration with nothing to preserve (no git changes, no in-flight tasks, no new learnings worth memorizing)
+
+## The four artifacts to verify
+
+Operating-doctrine P2 names four durable artifacts that survive compaction in solo Claude Code sessions. Walk them in order:
+
+### 1. Git — the cross-machine chronological log
+
+For each git repo touched this session:
+- `git status --short` — are there uncommitted changes the user might lose?
+- Are local commits ahead of the remote? (If yes — confirm push before compact unless the user explicitly said "I'll push later".)
+- Are pending commit messages meaningful? Vague messages survive compaction the same as good ones, but they're useless to post-compact-you.
+
+If anything is dirty: surface it to the user, do not silently commit / push for them. Push to main especially is irreversible — never assume authorization.
+
+### 2. Auto-memory — durable lessons across conversations
+
+Walk the session's significant moments. For each:
+- Is there a lesson worth keeping? (Feedback the user gave, surprising discovery, non-obvious project fact, external system reference)
+- Has it been saved to a memory file under `~/.claude/projects/<workspace>/memory/`?
+- Is it indexed in `MEMORY.md`?
+
+Save anything you have NOT saved yet. Use the standard memory frontmatter pattern (see CLAUDE.md auto-memory rules — the global instructions cover the four types: user, feedback, project, reference).
+
+Do NOT save:
+- Code patterns / file paths / things derivable from current code state
+- Ephemeral task state
+- Anything already documented in a CLAUDE.md
+- Duplicate of an existing memory
+
+**Commit + push the memory mirror.** Saved memories live under `~/.claude/projects/<workspace>/memory/` (Claude Code's runtime path) but the operator's setup mirrors them to `~/OPS/.claude-memory/workspace-<workspace>/` via `ac-memory-init` for cross-machine sync. If new memory files exist in either location and aren't committed, they die at the next clean-clone. Procedure:
+
+1. `cd ~/OPS && git status --short -- .claude-memory/` — check for uncommitted memory deltas.
+2. If dirty: surface to the operator first, then commit with a `chore(memory):` Conventional Commits subject naming the new entries (e.g. `chore(memory): capture deploy-voice overshoot + prod host`).
+3. Push to origin. Auto-memory only survives if it lands on the remote.
+
+Memory commits are a documented exception to the "never silently commit" anti-pattern below — they are pure additive sync, not behavioral change, and the operator's CLAUDE.md treats them as a synthesis output. Still surface what you're about to commit before doing it; if the operator says skip, skip.
+
+### 3. TaskCreate state — in-flight conversation work
+
+The compaction summary preserves the task list verbatim. Make sure it reflects reality:
+- Mark `in_progress` tasks `completed` if they're actually done.
+- Delete tasks created speculatively that are no longer relevant.
+- Add any meaningful follow-on work that emerged this session and isn't yet on the list.
+
+The task list is the conversation's working memory. A clean list at compact-time = a clean compaction summary.
+
+### 4. The project's durable narrative anchor
+
+Project-specific. Choose ONE based on session type:
+
+**Fleet session** (AC_ROOT + AC_NAME set + `~/OPS/WORKFORCE/FLEETPROJECTS/<project>/runtime/journal/<name>.md` exists):
+- Run `ac-pre-compact --silent` to rewrite the RESUME ANCHOR block in your journal.
+- This is the fleet-canonical surface. Do not duplicate to other files.
+
+**Solo session in a project with a `SESSION_HANDOFF.md`** (common in multi-session project repos):
+- Update the handoff with what just shipped + what's queued + any pointers post-compact-you will need.
+- Commit + push the handoff update (this is part of the four-artifact synthesis — durable storage means committed).
+- The handoff is the post-compact reading order's first stop.
+
+**Solo session in a project without a handoff doc**:
+- If the session produced something significant, OFFER to create one. Don't create unprompted — many projects don't need it.
+- Otherwise, the git log + auto-memory + task list carry the load. Don't invent ceremony.
+
+**Solo session outside any project** (e.g. you're in `~/OPS` itself doing meta-work):
+- Auto-memory + git on OPS + task list are the artifacts. No handoff doc needed.
+
+### Lead the anchor's reading order with the doctrine layer
+
+Whichever anchor you write (fleet journal, `SESSION_HANDOFF.md`, a handoff baton, or a solo note), make its **reading order start with the OPS standing layer** — `CONTEXT/operating-doctrine.md` (the 15 universal principles, especially P14 constraint-driven/falsifiable conclusions + P15 classify-by-altitude) and `working-preferences.md` — before the project state. A post-compact session that re-grounds in project facts but not the operating doctrine drifts from how the operator wants work done. Confirm OPS is synced (`git -C ~/OPS pull --ff-only`) as part of synthesis.
+
+### The RESUME PROTOCOL block — bound the next session's guessing
+
+Post-compact sessions over-assume because the summary lists *positive* next-steps but leaves the *negative space* unstated — and assumptions rush to fill it. The summary also flattens "we were considering X" into "we decided X," so the resumed session confidently executes a tentative idea or re-attempts an abandoned path. The fix is to name the vacuums.
+
+Whenever you write or update a durable anchor (fleet journal RESUME ANCHOR, `SESSION_HANDOFF.md`, or a handoff baton), put this block at the **top**:
+
+```markdown
+## RESUME PROTOCOL
+- NEXT ACTION: <exactly one concrete step — not "continue work">
+- VERIFY FIRST: <2-3 facts to re-confirm against the code/files, not infer from the summary>
+- DO NOT: <tempting but out-of-scope things to leave alone>
+- DEAD ENDS: <already tried + abandoned — do not retry>
+- ASK OPERATOR: <open decisions the next session must ask about, not guess; "none" if clean>
+```
+
+And tag every carried-forward item with its status so autonomy lands on solid ground only: **DECIDED** (act on it), **PROPOSED** (do not execute — it was only being weighed), **OPEN** (ask).
+
+This is not a brake on autonomy — the bias stays toward acting. It just keeps the action on verified ground: act on NEXT ACTION + DECIDED items, re-confirm the VERIFY FIRST list, never touch DO NOT, ask on ASK OPERATOR.
+
+### Continuation framing — ban session-boundary vocabulary
+
+Every durable artifact you write (handoff, journal, memory, the closing readiness summary) frames the next session as *continuing one body of work* — never as a session boundary. Do NOT write "stopping point," "wind-down," "ready for next session," "pick up later," or "compact-ready" into any anchor. Post-compact, the resumed session reads that vocabulary as a cue to pause and re-ask the operator "stop or keep going?" instead of just proceeding — which is exactly the confusion to kill. `NEXT ACTION` is an instruction to execute, never a choice to deliberate. The scoping guardrails (DECIDED/PROPOSED/OPEN, DO NOT, DEAD ENDS) bound the *work*, not the *session* — keep those; strip only the session-boundary language. Minimize the salience of the compact itself: one continuous task flow across it.
+
+### Ambiguity → ask → persist
+
+If, while synthesizing, you hit a decision you genuinely can't resolve from the code + context, do not bake a guess into the anchor. Surface it to the operator. When they answer, **write the resolution to a `project` memory** (not just into the anchor) so the question dies permanently — an answer that lives only in this conversation gets re-asked at the next compaction. The anchor's ASK OPERATOR list is for questions still open at synthesis time; resolved ones become memories.
+
+## The fifth stage — closeout hygiene (workspace clean + docs true)
+
+The operator's standing order (2026-07-06): *"I absolutely hate having a dirty, undocumented, sprawling working environment."* The four artifacts make the session's state durable; this stage makes the workspace **clean** and the documentation **true**. Run it on every closeout after substantive work (skip on bare conversational sessions — nothing to clean is a valid outcome):
+
+1. **Run the machine gate.** `~/OPS/.claude-config/bin/verify-ops.sh --quiet` — every FAIL gets fixed now or explicitly surfaced to the operator with a reason; WARNs get fixed if under ~2 minutes each, otherwise surfaced. The gate is the definition of clean; do not free-hand your own checklist when the script exists.
+2. **Route this session's memories.** List memory files written this session (`git -C ~/OPS status --short -- .claude-memory/` plus the active profile's pool). Any entry that is single-project material (per foreman-charter § "Where knowledge goes") gets folded into `CONTEXT/projects/<project>-lessons.md` now, with the memory entry reduced to a pointer stub. The secrets-guard PostToolUse nudge may have flagged candidates during the session — honor those flags here.
+3. **Docs-reflect-reality, per repo touched.** For each repo this session changed: does CHANGELOG.md have a line for what landed? Is any IDEAS.md/backlog entry now shipped and removable? Did the change make any README/doc claim false? Fix in the same closeout — "I'll fix the docs in a follow-up" is the P1 violation this stage exists to kill.
+4. **Sweep the scratch.** Temp files at repo roots or `$HOME` that this session created get deleted (if disposable) or moved to their real home (if deliverables). Never delete something you did not create this session without operator approval.
+5. **Stamp the closeout.** `mkdir -p ~/.local/state/ops && date -Is > ~/.local/state/ops/last-closeout` — session-briefing surfaces the age of this stamp, so future sessions (and the operator) can see when hygiene last ran.
+
+## Process
+
+When activated:
+
+1. **Read the existing pre-compact snapshot** at `~/.claude/projects/<workspace>/pre-compact-<latest>.md` if it exists — the hook script may already have run. Don't re-do its mechanical work.
+2. **Diagnose session type** — fleet vs solo-with-handoff vs solo-bare. Branch the rest of the work.
+3. **Walk the four artifacts in order.** For each:
+   - State its current state in 1 sentence.
+   - If action is needed (uncommitted work, missing memory, stale task list, outdated handoff), do the action OR surface it to the user for confirmation if the action is irreversible (push to main, force operations, etc.).
+4. **Run the fifth stage (closeout hygiene)** — machine gate, memory routing, docs-reflect-reality, scratch sweep, stamp.
+5. **Print a one-screen readiness summary** so the operator sees what's locked in and can pull the trigger on `/compact`.
+6. **Stop there.** You don't run `/compact` yourself — it's the operator's call. You just make sure the runway is clear.
+
+## Readiness summary shape
+
+End every session with something like:
+
+```
+Pre-compact synthesis complete.
+
+1. Git — <state>. <action taken or "nothing to do">.
+2. Auto-memory — <state>. <new memories saved or "no new lessons worth keeping">.
+3. TaskCreate — <state>. <cleanups done>.
+4. Durable anchor — <type detected>. <action taken>.
+5. Hygiene — verify-ops <ok/warn/fail counts>; <memories routed / docs fixed / scratch swept or "clean">.
+
+Ready to /compact when you are.
+```
+
+Keep it tight. The operator is about to /compact; they don't need a wall of text.
+
+## Anti-patterns
+
+- **Never silently commit, push, or merge** during synthesis — with one exception: the `.claude-memory/` mirror under `~/OPS/` (see artifact #2). Memory commits are pure additive sync and the operator wants them automated. For everything else (project code, handoff docs touching project logic, anything in a downstream repo), surface dirty state; let the operator decide.
+- **Never push to main without authorization.** Even if the project authorized "push to main" earlier in the conversation, that authorization stands for the scope they granted — not for pre-compact housekeeping commits they didn't see coming.
+- **Never invent a handoff doc** for a project that doesn't have one. Offer; don't impose.
+- **Never duplicate the fleet ac-pre-compact work.** If AC_ROOT is set + the fleet script exists, dispatch to it. Don't shadow it.
+- **Don't over-save memories.** Most session moments are not memory-worthy. A bare session with nothing surprising produces zero new memories — and that's correct.
+- **Don't pad the readiness summary.** Four lines, one per artifact. Anything more is ceremony.
+
+## Edge cases
+
+- **User says "compact" but context is low (<30%)**: Compaction won't auto-fire anytime soon. Confirm the user actually wants to compact now rather than later; the synthesis is fine to run regardless but the user may be confused.
+- **Auto-memory saved a memory the user wouldn't want kept**: Surface it. Memories are durable; bad ones poison future sessions.
+- **Working tree is dirty but the user is in mid-thought**: Surface, don't act. They may want the work-in-progress to die with the session rather than be committed.
+- **Hook script failed (no `pre-compact-<ts>.md` snapshot)**: Run the hook manually (`~/OPS/.claude-config/hooks/pre-compact.sh`) to get the mechanical state, then continue with thoughtful synthesis.
+
+## Reference
+
+- Operating-doctrine Principle 2 — `~/OPS/CONTEXT/operating-doctrine.md`. Read once at activation if context is tight; the four-artifact list lives there.
+- Fleet ac-pre-compact source — `~/OPS/WORKFORCE/bin/ac-pre-compact`. Read only if you need to debug fleet dispatch.
+- PreCompact hook spec — Claude Code docs at `code.claude.com/docs/en/hooks.md`. Read only if the hook misbehaves.

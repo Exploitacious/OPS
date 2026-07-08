@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ac-cron-body — print the canonical cron prompt body for an agent/coordinator.
+#
+# Single source of truth = protocol/cron-prompt-template.md. This script
+# extracts the role-specific code block so the agent feeds it directly
+# into CronCreate without copy-paste drift.
+#
+# Usage:
+#   ac-cron-body --role agent          # prints Agent self-pacing body
+#   ac-cron-body --role coordinator    # prints Coordinator body
+#   ac-cron-body --hash                # SHA256 of the template file
+#                                       (used by ac-reorient drift check)
+#
+# Env:
+#   AC_FLEET — defaults to ~/OPS/WORKFORCE
+
+set -euo pipefail
+
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+TEMPLATE="$AC_FLEET/protocol/cron-prompt-template.md"
+
+die() { echo "ac-cron-body: $*" >&2; exit 1; }
+
+[[ -f "$TEMPLATE" ]] || die "template not found: $TEMPLATE"
+
+ROLE=""
+SHOW_HASH=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role) ROLE="$2"; shift 2 ;;
+    --hash) SHOW_HASH=1; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) die "unknown: $1" ;;
+  esac
+done
+
+if (( SHOW_HASH )); then
+  sha256sum "$TEMPLATE" | awk '{print $1}'
+  exit 0
+fi
+
+[[ -z "$ROLE" ]] && die "missing --role agent|coordinator"
+
+case "$ROLE" in
+  agent)       SECTION="^## Agent self-pacing cron — body" ;;
+  coordinator) SECTION="^## Coordinator self-pacing cron — body" ;;
+  *) die "bad role: $ROLE (agent|coordinator)" ;;
+esac
+
+# Extract the first fenced code block after the matching section header.
+awk -v section="$SECTION" '
+  $0 ~ section { in_section=1; next }
+  in_section && /^```$/ { if (in_block) { exit } else { in_block=1; next } }
+  in_section && in_block { print }
+' "$TEMPLATE"

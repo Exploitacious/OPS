@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# ac-spawn — launch a peer Claude Code agent in a tmux window of the
+# OPS ClaudeAgents session, with the activation brief prepared
+# via load-buffer + paste-buffer (multiline-safe — `send-keys`
+# corrupts on newlines and embedded quotes; primeline-ai prior-art
+# lesson confirmed in practice 2026-05-12 spawning Bravo[api-migration]).
+#
+# Usage:
+#   ac-spawn --scope <tag> --task <path-or-id> [--name <hint>] \
+#            [--brief <path>] [--no-skip-permissions]
+#
+# Required:
+#   --scope <tag>     Scope tag (e.g. api-migration, db-cleanup, mcp).
+#                     Used for tmux window name AND passed to the
+#                     agent so it can register with the right scope.
+#   --task <id|path>  Task spec — either bare id (resolved to
+#                     ~/OPS/WORKFORCE/FLEETPROJECTS/<project>/runtime/tasks/<id>.md) or a
+#                     full path.
+#
+# Optional:
+#   --name <hint>     Name hint for the agent (Bravo / Charlie / ...).
+#                     If omitted, the agent picks the first unclaimed
+#                     NATO phonetic name via ac-register.
+#   --brief <path>    Path to a custom brief text file. If omitted,
+#                     ac-spawn generates a standard brief.
+#   --config-dir <p>  CLAUDE_CONFIG_DIR for the spawned session, if you
+#                     run a second profile (e.g. ~/.claude-work-2). Bare
+#                     `claude` uses your primary profile, which is
+#                     instance-locked to ONE concurrent session — fleets
+#                     spawn on a second profile instead.
+#   --model <alias>   Pin the peer's main model (e.g. --model opus for
+#                     a hard lane, --model haiku for a mechanical one).
+#                     Omit to take the profile default.
+#   --no-skip-permissions
+#                     Launch the agent WITHOUT
+#                     --dangerously-skip-permissions. Defaults to
+#                     ON per operating-doctrine principle 5.
+#
+# Output:
+#   On success, prints the tmux window name + path to the brief used.
+#   Operator can attach with: tmux attach -t ClaudeAgents
+#
+# Requirements:
+#   tmux 3.0+ (tested on 3.5a)
+#   claude CLI in PATH
+#   WORKFORCE/<project>/personalities/AGENT.md + the four protocol/*.md files
+#   The 'ClaudeAgents' tmux session must exist (created lazily if not).
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+SESSION="${AC_TMUX_SESSION:-ClaudeAgents}"
+
+die() { echo "ac-spawn: $*" >&2; exit 1; }
+ts_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+SCOPE=""
+TASK=""
+NAME_HINT=""
+BRIEF_PATH=""
+CONFIG_DIR=""
+MODEL_ALIAS=""
+SKIP_PERMS=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scope) SCOPE="$2"; shift 2 ;;
+    --task)  TASK="$2";  shift 2 ;;
+    --name)  NAME_HINT="$2"; shift 2 ;;
+    --brief) BRIEF_PATH="$2"; shift 2 ;;
+    --config-dir) CONFIG_DIR="$2"; shift 2 ;;
+    --model) MODEL_ALIAS="$2"; shift 2 ;;
+    --no-skip-permissions) SKIP_PERMS=0; shift ;;
+    -h|--help)
+      sed -n '2,30p' "$0"
+      exit 0
+      ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+[[ -n "$SCOPE" ]] || die "missing --scope"
+[[ -n "$TASK"  ]] || die "missing --task"
+
+# Resolve task spec path
+if [[ -f "$TASK" ]]; then
+  TASK_PATH="$TASK"
+else
+  TASK_PATH="$AC_ROOT/runtime/tasks/${TASK}.md"
+  [[ -f "$TASK_PATH" ]] || die "task spec not found: $TASK_PATH"
+fi
+
+# Sanity-check prerequisites
+command -v tmux  >/dev/null 2>&1 || die "tmux not in PATH"
+command -v claude >/dev/null 2>&1 || die "claude CLI not in PATH"
+[[ -f "$AC_FLEET/personalities/AGENT.md"   ]] || die "AGENT.md missing at $AC_FLEET/personalities/"
+[[ -f "$AC_FLEET/protocol/messaging.md"    ]] || die "messaging.md missing at $AC_FLEET/protocol/"
+
+# Lazily create the tmux session if absent
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "[ac-spawn] creating tmux session: $SESSION"
+  tmux new-session -d -s "$SESSION" -n "main"
+fi
+
+# Choose a window name. Sanitize scope for filesystem-safety.
+SCOPE_SAFE=$(echo "$SCOPE" | tr -cd '[:alnum:]_-' | tr '[:upper:]' '[:lower:]')
+WINDOW_BASE="$SCOPE_SAFE"
+if [[ -n "$NAME_HINT" ]]; then
+  WINDOW_BASE="${NAME_HINT}-${SCOPE_SAFE}"
+fi
+# Avoid collisions with existing windows
+i=0
+WINDOW="$WINDOW_BASE"
+while tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -Fxq "$WINDOW"; do
+  i=$((i+1))
+  WINDOW="${WINDOW_BASE}-${i}"
+done
+
+# Generate the brief if not provided
+if [[ -z "$BRIEF_PATH" ]]; then
+  BRIEF_PATH="$(mktemp -t ac-brief-${SCOPE_SAFE}-XXXX.txt)"
+  NAME_LINE=""
+  if [[ -n "$NAME_HINT" ]]; then
+    NAME_LINE="Name hint: $NAME_HINT (use this if available; otherwise let ac-register pick the first unclaimed NATO phonetic name)."
+  fi
+  cat > "$BRIEF_PATH" <<EOF
+ACTIVATE AGENT. Scope tag: $SCOPE. Coordinator on duty is whoever holds $AC_ROOT/runtime/manifest.d/_coordinator.json (typically the active Captain). Confirm via cat on that file. Your task spec is: $TASK_PATH. Before any action: read ~/OPS/CONTEXT/operating-doctrine.md (fleet constitution), $AC_FLEET/personalities/AGENT.md (your role contract), and all four $AC_FLEET/protocol/*.md files. ACKNOWLEDGE HARD-RULES — AGENT.md ends with a hard-rule acknowledgement block. Read it and send AC_NAME=\$AC_NAME $AC_FLEET/bin/ac-msg send --to <coord-name> --topic hard-rules-acked --priority fyi BEFORE first task action. Skipping this is a discipline failure (the rules themselves require acknowledgement first). $NAME_LINE Activate via: export AC_NAME=\$($AC_FLEET/bin/ac-register --role agent --scope $SCOPE) — this claims an unclaimed name + writes your manifest, pulse, journal, inbox. Then send a hello: echo "<your-name>[$SCOPE] activated, picking up task." | AC_NAME=\$AC_NAME $AC_FLEET/bin/ac-msg send --to <coord-name> --topic hello --priority fyi (resolve coord-name from _coordinator.json). You operate with --dangerously-skip-permissions per operating-doctrine principle 3; irreversible-action gates per AGENT.md remain HARD doctrine gates regardless. HARD RULE — at the end of EVERY turn before going idle, process your inbox (find \$AC_ROOT/runtime/inbox/\$AC_NAME -mindepth 1 -type f | sort, then read + act + archive each one). Doctrine: $AC_ROOT/runtime/decisions/2026-05-12__agents-poll-inbox-before-idle.md. SECOND HARD RULE — you MUST NOT render Claude Code's interactive prompts (AskUserQuestion-style option lists, multiple-choice UI blocks). There is no synchronous human at your tmux session — interactive prompts freeze you indefinitely. If you find yourself about to render one: stop. Send the same question as an ac-msg to Coordinator with options + recommendation + what you're doing while you wait, OR file a runtime/decisions/<slug>.md with status: proposed, OR set pulse status=blocked and stop the turn. Doctrine reference: $AC_ROOT/runtime/decisions/2026-05-12__peer-agents-no-interactive-prompts.md. After activation and orientation, begin the task. Document every load-bearing decision per principle 1 (extraction-rules-log.md for per-node rules, runtime/decisions/ for cross-cutting calls). Escalate to the Coordinator per protocol/escalation.md — frame ambiguity with options + a recommendation, never "what should I do?". Before any escalation: apply the judgment-delegation test from runtime/decisions/2026-05-12__operator-judgment-delegation.md — if prior signal makes the answer obvious and the action is reversible in <24h, exercise judgment yourself instead. Do not message the Operator directly unless this is the always-escalate list (see escalation.md). Begin.
+EOF
+fi
+
+# Build the claude command. Shell-quote each argument so brackets,
+# spaces, and special chars survive the tmux→shell hop. Bare-array
+# expansion (${CLAUDE_FLAGS[*]}) does NOT quote — brackets in the
+# --name value (e.g. "Charlie[db-cleanup]") would be interpreted
+# as a glob and silently break tmux new-window.
+NAME_VAL="${NAME_HINT:-Agent}[$SCOPE]"
+QUOTED_NAME=$(printf '%q' "$NAME_VAL")
+QUOTED_HOME=$(printf '%q' "$HOME/OPS")
+CLAUDE_CMD="CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --name $QUOTED_NAME --add-dir $QUOTED_HOME"
+if [[ -n "$CONFIG_DIR" ]]; then
+  # Profile override (e.g. --config-dir ~/.claude-work-2), if you run a
+  # second profile. Your primary profile (~/.claude) holds an
+  # .instance.lock — only ONE concurrent session; a second profile has
+  # no lock, so fleets spawn there. The env var must precede the binary,
+  # inside the same tmux-window shell.
+  QUOTED_CONFIG=$(printf '%q' "$CONFIG_DIR")
+  CLAUDE_CMD="CLAUDE_CONFIG_DIR=$QUOTED_CONFIG $CLAUDE_CMD"
+fi
+if [[ -n "$MODEL_ALIAS" ]]; then
+  # Pin the peer's MAIN model (e.g. --model opus for a hard-lane
+  # foreman). Without this the session takes the profile default.
+  QUOTED_MODEL=$(printf '%q' "$MODEL_ALIAS")
+  CLAUDE_CMD="$CLAUDE_CMD --model $QUOTED_MODEL"
+fi
+if [[ $SKIP_PERMS -eq 1 ]]; then
+  CLAUDE_CMD="$CLAUDE_CMD --dangerously-skip-permissions"
+fi
+
+# Spawn the window detached. NOTE: do NOT pass a positional prompt arg
+# to claude. Shell parsing on long multi-line prompts is flaky. We
+# launch claude bare and then paste-buffer the brief.
+tmux new-window -t "$SESSION" -n "$WINDOW" -d "$CLAUDE_CMD"
+
+# Wait for claude to boot. The welcome screen + prompt box need to be
+# rendered before paste-buffer will land in the input box.
+# Empirically ~6-10s on a warm cache. Poll the pane until we see the
+# input prompt ('❯') or hit a timeout.
+TARGET="${SESSION}:${WINDOW}"
+echo "[ac-spawn] waiting for claude to render input prompt in $TARGET ..."
+for i in $(seq 1 30); do
+  sleep 1
+  if tmux capture-pane -t "$TARGET" -p -S -10 2>/dev/null | grep -qE '❯|>'; then
+    break
+  fi
+done
+
+# Paste the brief and submit.
+# Claude Code v2.1.140+ shows a "[Pasted text +N lines]" preview pill
+# when text arrives via tmux paste-buffer. First Enter expands the
+# pill; SECOND Enter actually submits. Single Enter caused silent
+# spawn-stall observed 2026-05-13 (Bravo[memory] never activated).
+# Lesson: WORKFORCE/protocol/lessons/2026-05-13__ac-spawn-paste-buffer-bug.md
+BUFFER_NAME="ac-brief-${SCOPE_SAFE}-$$"
+tmux load-buffer -b "$BUFFER_NAME" "$BRIEF_PATH"
+tmux paste-buffer -b "$BUFFER_NAME" -t "$TARGET"
+sleep 1
+tmux send-keys -t "$TARGET" Enter   # confirm paste-preview pill
+sleep 0.5
+tmux send-keys -t "$TARGET" Enter   # actually submit
+tmux delete-buffer -b "$BUFFER_NAME" 2>/dev/null || true
+
+# Audit-log the spawn
+LOG="$AC_ROOT/runtime/log.jsonl"
+COORD=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$AC_ROOT/runtime/manifest.d/_coordinator.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
+{
+  printf '{"ts":"%s","actor":"%s","event":"spawn-peer","scope":"%s","task":"%s","window":"%s","brief":"%s"}\n' \
+    "$(ts_iso)" "${COORD:-unknown}" "$SCOPE" "$(basename "$TASK_PATH" .md)" "$TARGET" "$BRIEF_PATH"
+} >> "$LOG"
+
+echo
+echo "[ac-spawn] launched"
+echo "  window:   $TARGET"
+echo "  scope:    $SCOPE"
+echo "  task:     $TASK_PATH"
+echo "  brief:    $BRIEF_PATH"
+echo "  attach:   tmux attach -t $SESSION   # then Ctrl-b <window-num>"

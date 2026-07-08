@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# ac-sync — pull/commit/push the fleet system (personalities, protocol,
+# bin, README) to the OPS remote.
+#
+# Per-project runtime (manifest, tasks, decisions, archive, log,
+# inbox, outbox, pulse, journal, tmp) is gitignored and stays local
+# to each machine — see WORKFORCE/FLEETPROJECTS/*/ in .gitignore.
+#
+# Usage:
+#   ac-sync              # pull, stage tracked changes, commit if any, push
+#   ac-sync --pull       # pull only
+#   ac-sync --push       # commit + push (skip pull)
+#   ac-sync --dry-run    # show what would commit, don't commit
+#
+# Safe to run repeatedly. Idempotent commits (no-op if nothing changed).
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+REPO="$(cd "$AC_FLEET/.." && pwd)"
+
+MODE="full"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pull)    MODE="pull"; shift ;;
+    --push)    MODE="push"; shift ;;
+    --dry-run) MODE="dry";  shift ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "unknown: $1" >&2; exit 1 ;;
+  esac
+done
+
+cd "$REPO"
+
+if [[ ! -d .git ]]; then
+  echo "ac-sync: not a git repo: $REPO" >&2
+  exit 1
+fi
+
+case "$MODE" in
+  pull|full)
+    echo "==> git pull --ff-only"
+    git pull --ff-only || {
+      echo "ac-sync: pull failed (merge conflicts? non-ff?). Resolve manually." >&2
+      exit 2
+    }
+    ;;
+esac
+
+if [[ "$MODE" == "pull" ]]; then
+  exit 0
+fi
+
+# Stage only fleet-system paths. Project runtime is gitignored.
+# This pushes personalities + protocol + bin + README — the doctrine
+# layer that other machines need. Runtime stays local.
+git add -- WORKFORCE/personalities/ WORKFORCE/protocol/ WORKFORCE/bin/ WORKFORCE/README.md WORKFORCE/.gitkeep WORKFORCE/FLEETPROJECTS/.gitkeep 2>/dev/null || true
+
+if git diff --cached --quiet; then
+  echo "ac-sync: nothing to commit"
+  if [[ "$MODE" == "full" ]] || [[ "$MODE" == "push" ]]; then
+    # Still push in case prior commits weren't pushed.
+    git push || true
+  fi
+  exit 0
+fi
+
+# Build a tight commit message from what changed.
+local_changed=$(git diff --cached --name-only | head -10 | tr '\n' ' ')
+host="$(hostname)"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+actor="${AC_NAME:-operator}"
+
+msg="chore(agents): sync from ${host} at ${ts}
+
+Actor: ${actor}
+Changed: ${local_changed}
+"
+
+if [[ "$MODE" == "dry" ]]; then
+  echo "==> Would commit:"
+  echo "$msg"
+  echo
+  echo "==> Staged files:"
+  git diff --cached --name-only
+  exit 0
+fi
+
+git commit -m "$msg"
+
+echo "==> git push"
+git push || {
+  echo "ac-sync: push failed. Check 'git status' / 'git log'." >&2
+  exit 3
+}

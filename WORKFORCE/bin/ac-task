@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# ac-task — task spec maintenance helpers.
+#
+# Today's surface (more subcommands may land later):
+#
+#   ac-task --auto-close-parents [--dry-run]
+#       Walk runtime/tasks/. For each in_progress parent (parent_task=null)
+#       where ALL children have status=done, flip parent to awaiting_review,
+#       append note to body, send Coordinator topic=parent-ready-for-review.
+#       Idempotent: parents already in awaiting_review/done are skipped.
+#
+#   ac-task --list-parents
+#       Print parent tasks + child counts (done/total). Read-only.
+#
+# Env:
+#   AC_ROOT   — per-project runtime root (required)
+#   AC_FLEET  — fleet system root (default ~/OPS/WORKFORCE)
+#   AC_NAME   — only required for --auto-close-parents (msg sender)
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+RUNTIME="$AC_ROOT/runtime"
+TASKS="$RUNTIME/tasks"
+TMP="$RUNTIME/tmp"
+
+die() { echo "ac-task: $*" >&2; exit 1; }
+ts_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Read a YAML frontmatter field from a task spec.
+get_field() {
+  local file="$1" key="$2"
+  awk -v k="^${key}:" '
+    /^---$/ { f++; if (f==2) exit; next }
+    f==1 && $0 ~ k { sub(/^[a-z_]+:[[:space:]]*/, ""); print; exit }
+  ' "$file"
+}
+
+# Resolve coordinator name from manifest (for msg recipient).
+coord_name() {
+  local f="$RUNTIME/manifest.d/_coordinator.json"
+  [[ -f "$f" ]] || return 1
+  grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" \
+    | head -1 | sed -E 's/.*"([^"]+)"$/\1/'
+}
+
+cmd_auto_close_parents() {
+  local dry=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+
+  shopt -s nullglob
+  local closed=0 skipped=0
+
+  for t in "$TASKS"/*.md; do
+    local id status parent
+    id=$(get_field "$t" id)
+    status=$(get_field "$t" status)
+    parent=$(get_field "$t" parent_task)
+    # Only act on in_progress root tasks.
+    [[ "$status" != "in_progress" ]] && continue
+    [[ "$parent" != "null" && -n "$parent" ]] && continue
+
+    # Count children
+    local total=0 done_count=0
+    for c in "$TASKS"/*.md; do
+      [[ "$c" == "$t" ]] && continue
+      local cp cs
+      cp=$(get_field "$c" parent_task)
+      [[ "$cp" != "$id" ]] && continue
+      total=$((total+1))
+      cs=$(get_field "$c" status)
+      [[ "$cs" == "done" ]] && done_count=$((done_count+1))
+    done
+
+    if (( total == 0 )); then
+      skipped=$((skipped+1))
+      continue
+    fi
+    if (( done_count != total )); then
+      skipped=$((skipped+1))
+      continue
+    fi
+
+    # All children done → flip parent to awaiting_review.
+    if (( dry )); then
+      echo "[dry-run] would flip $id: in_progress → awaiting_review ($done_count/$total children done)"
+      closed=$((closed+1))
+      continue
+    fi
+
+    local tmpf="$TMP/$(basename "$t")"
+    mkdir -p "$TMP"
+    # Replace status line in frontmatter only.
+    awk -v new="awaiting_review" '
+      BEGIN { f=0 }
+      /^---$/ { f++; print; next }
+      f==1 && /^status:/ { print "status: " new; next }
+      { print }
+    ' "$t" > "$tmpf"
+
+    # Append a note to the body.
+    {
+      printf '\n## Auto-closed %s\n\n' "$(ts_iso)"
+      printf '%s: all %d children reached status=done. Parent flipped from in_progress to awaiting_review by ac-task --auto-close-parents.\n' \
+             "${AC_NAME:-ac-task}" "$total"
+      printf 'Coordinator + Operator review acceptance criteria before final flip to done.\n'
+    } >> "$tmpf"
+
+    mv -- "$tmpf" "$t"
+    closed=$((closed+1))
+    echo "closed: $id (awaiting_review) — $done_count/$total children done"
+
+    # Notify Coordinator if msg infrastructure available.
+    local coord
+    coord=$(coord_name 2>/dev/null || true)
+    if [[ -n "$coord" && -n "${AC_NAME:-}" ]]; then
+      printf 'Parent task %s flipped to awaiting_review.\nAll %d children done.\nReview acceptance criteria before final close.\n' "$id" "$total" \
+        | "$AC_FLEET/bin/ac-msg" send --to "$coord" --topic parent-ready-for-review --priority normal >/dev/null 2>&1 || true
+    fi
+  done
+
+  echo "auto-close-parents: $closed closed, $skipped skipped"
+
+  # Checkpoint hook: refresh anchor after parent-state mutations.
+  if [[ -n "${AC_NAME:-}" && -x "$AC_FLEET/bin/ac-pre-compact" ]] && (( closed > 0 )); then
+    "$AC_FLEET/bin/ac-pre-compact" --silent >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_list_parents() {
+  shopt -s nullglob
+  printf '%-50s %-15s %s\n' "ID" "STATUS" "CHILDREN (done/total)"
+  for t in "$TASKS"/*.md; do
+    local id status parent
+    id=$(get_field "$t" id)
+    status=$(get_field "$t" status)
+    parent=$(get_field "$t" parent_task)
+    # Print only root tasks
+    [[ "$parent" != "null" && -n "$parent" ]] && continue
+
+    local total=0 done_count=0
+    for c in "$TASKS"/*.md; do
+      [[ "$c" == "$t" ]] && continue
+      local cp cs
+      cp=$(get_field "$c" parent_task)
+      [[ "$cp" != "$id" ]] && continue
+      total=$((total+1))
+      cs=$(get_field "$c" status)
+      [[ "$cs" == "done" ]] && done_count=$((done_count+1))
+    done
+
+    printf '%-50s %-15s %d/%d\n' "$id" "$status" "$done_count" "$total"
+  done
+}
+
+main() {
+  [[ $# -lt 1 ]] && { sed -n '2,20p' "$0"; exit 1; }
+  case "$1" in
+    --auto-close-parents) shift; cmd_auto_close_parents "$@" ;;
+    --list-parents)       shift; cmd_list_parents ;;
+    -h|--help)            sed -n '2,20p' "$0" ;;
+    *) die "unknown: $1" ;;
+  esac
+}
+
+main "$@"

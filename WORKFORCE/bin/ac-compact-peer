@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# ac-compact-peer — trigger /compact on a peer agent's tmux pane.
+#
+# /compact is a Claude Code UI command — agents cannot fire it on
+# themselves (same constraint as /mcp). This script lets any agent
+# trigger /compact on another agent's pane via tmux send-keys. The
+# protocol is symmetric: Captain can compact peers, peers can compact
+# Captain, peers can compact peers.
+#
+# Standard pattern (Captain compacts a peer):
+#   1. Captain calls: ac-compact-peer --target ClaudeAgents:1.1 \
+#                       --peer-name Bravo --reason "post task #N ship"
+#   2. Script: sends compact-now ac-msg to peer (audit trail)
+#   3. Script: pastes ac-pre-compact directive to peer's pane
+#   4. Script: waits for peer's pulse to confirm anchor refresh
+#   5. Script: fires `/compact` via tmux send-keys on peer's pane
+#   6. Script: logs to runtime/log.jsonl
+#
+# Self-compact via peer (Captain compacts self through a peer agent):
+#   1. Captain: ac-pre-compact --notify    (refresh own anchor first)
+#   2. Captain: ac-msg send --to <Peer> --topic compact-captain \
+#                --priority urgent  (briefs peer with the ask)
+#   3. Peer (next /loop tick or push-wake) calls:
+#        ac-compact-peer --target Main:1.1 --peer-name Captain \
+#                        --reason "Captain self-compact via peer"
+#   This closes the loop — Operator not in the chain.
+#
+# Usage:
+#   ac-compact-peer --target <tmux-target> --peer-name <name>
+#                   [--reason "<text>"]
+#                   [--skip-pre-compact]
+#                   [--skip-ac-msg]
+#                   [--watchdog <seconds>]
+#
+# Required:
+#   --target <tmux-target>  e.g. ClaudeAgents:1.1, Main:1.1
+#   --peer-name <name>      Peer's agent name (NATO phonetic / Captain)
+#
+# Optional:
+#   --reason "<text>"      Captured in ac-msg + log.jsonl.
+#                          Default: "scheduled compaction".
+#   --skip-pre-compact     Don't request peer to run ac-pre-compact.
+#                          Use when peer's anchor is already fresh
+#                          (<10 min old) — saves a paste-buffer hop.
+#   --skip-ac-msg          Don't send the ac-msg audit-trail message.
+#                          Discouraged. Default: send.
+#   --watchdog <seconds>   Max wait between paste-buffer and /compact
+#                          fire (waiting for pulse). Default: 90s.
+#                          Beyond watchdog, fire /compact anyway +
+#                          log warning (peer may be mid-tool-call,
+#                          /compact will queue).
+#
+# Env:
+#   AC_NAME    your agent name (used as the "actor" in ac-msg + log)
+#   AC_ROOT    project runtime root
+#   AC_FLEET   default ~/OPS/WORKFORCE
+#
+# Audit trail:
+#   - ac-msg lands in peer's inbox (compact-now topic)
+#   - runtime/log.jsonl gets one event line
+#   - peer's pulse updates via ac-pre-compact (if not skipped)
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+NAME="${AC_NAME:-}"
+[[ -z "$NAME" ]] && { echo "$(basename "$0"): AC_NAME not set" >&2; exit 1; }
+
+TARGET=""
+PEER_NAME=""
+REASON="scheduled compaction"
+SKIP_PRE=0
+SKIP_MSG=0
+WATCHDOG=90
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)            TARGET="$2"; shift 2 ;;
+    --peer-name)         PEER_NAME="$2"; shift 2 ;;
+    --reason)            REASON="$2"; shift 2 ;;
+    --skip-pre-compact)  SKIP_PRE=1; shift ;;
+    --skip-ac-msg)       SKIP_MSG=1; shift ;;
+    --watchdog)          WATCHDOG="$2"; shift 2 ;;
+    -h|--help)           sed -n '2,55p' "$0"; exit 0 ;;
+    *) echo "$(basename "$0"): unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -z "$TARGET" ]] && { echo "$(basename "$0"): --target required" >&2; exit 1; }
+[[ -z "$PEER_NAME" ]] && { echo "$(basename "$0"): --peer-name required" >&2; exit 1; }
+
+# Validate target pane exists
+if ! tmux list-panes -t "$TARGET" >/dev/null 2>&1; then
+  echo "$(basename "$0"): target pane '$TARGET' not found in tmux" >&2
+  echo "  tmux ls / tmux list-panes -a to inspect" >&2
+  exit 2
+fi
+
+ts_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+LOG="$AC_ROOT/runtime/log.jsonl"
+mkdir -p "$(dirname "$LOG")"
+
+echo "[ac-compact-peer] $NAME -> $PEER_NAME ($TARGET) | reason: $REASON"
+
+# Step 1: ac-msg send (audit trail)
+if [[ $SKIP_MSG -eq 0 ]]; then
+  MSG_BODY=$(cat <<BODY
+$NAME triggering your compaction. Reason: $REASON
+
+Protocol:
+1. Run ac-pre-compact --notify (anchor refresh) — unless your anchor is <10 min fresh.
+2. $NAME will fire /compact externally on your pane ($TARGET) via tmux send-keys.
+
+You don't need to do anything to fire /compact — it's the UI command and you can't fire it from inside your session. Just ensure ac-pre-compact ran. Then your post-compact ac-reorient + ac-post-compact-check + alignment ack template surfaces normally.
+
+After resume: continue your /loop cron + normal coordination.
+BODY
+)
+  echo "$MSG_BODY" | "$AC_FLEET/bin/ac-msg" send --to "$PEER_NAME" \
+      --topic compact-now --priority urgent >/dev/null
+  echo "[ac-compact-peer] ac-msg sent"
+fi
+
+# Step 2: Trigger ac-pre-compact on target pane (unless skipped)
+if [[ $SKIP_PRE -eq 0 ]]; then
+  TMP_BRIEF="$(mktemp)"
+  cat > "$TMP_BRIEF" <<EOF
+[compact directive from $NAME] Run \`ac-pre-compact --notify\` now. $NAME will fire /compact externally on your pane after anchor refresh confirms. Reason: $REASON
+EOF
+  BUFFER_NAME="ac-compact-${PEER_NAME,,}-$$"
+  tmux load-buffer -b "$BUFFER_NAME" "$TMP_BRIEF"
+  tmux paste-buffer -b "$BUFFER_NAME" -t "$TARGET"
+  sleep 0.5
+  tmux send-keys -t "$TARGET" Enter
+  sleep 0.5
+  tmux send-keys -t "$TARGET" Enter
+  tmux delete-buffer -b "$BUFFER_NAME" 2>/dev/null || true
+  rm -f "$TMP_BRIEF"
+  echo "[ac-compact-peer] ac-pre-compact directive pasted; waiting for pulse refresh (watchdog ${WATCHDOG}s)"
+
+  # Step 3: Watchdog — wait for target's pulse to update post-pre-compact
+  PEER_PULSE="$AC_ROOT/runtime/pulse/${PEER_NAME}.json"
+  if [[ -f "$PEER_PULSE" ]]; then
+    INITIAL_MTIME=$(stat -c %Y "$PEER_PULSE" 2>/dev/null || echo 0)
+    # Initialize CUR_MTIME so the post-loop check works even if the
+    # loop never runs (e.g., deadline already past, or `sleep 2`
+    # carries past deadline on first iteration). Under `set -u` an
+    # unset CUR_MTIME would abort.
+    CUR_MTIME=$INITIAL_MTIME
+    DEADLINE=$(( $(date +%s) + WATCHDOG ))
+    while [[ $(date +%s) -lt $DEADLINE ]]; do
+      CUR_MTIME=$(stat -c %Y "$PEER_PULSE" 2>/dev/null || echo 0)
+      if [[ "$CUR_MTIME" -gt "$INITIAL_MTIME" ]]; then
+        echo "[ac-compact-peer] pulse refreshed at $(date -u -d "@$CUR_MTIME" +"%Y-%m-%dT%H:%M:%SZ")"
+        break
+      fi
+      sleep 2
+    done
+    if [[ "$CUR_MTIME" -le "$INITIAL_MTIME" ]]; then
+      echo "[ac-compact-peer] WARN: pulse didn't refresh within ${WATCHDOG}s. Firing /compact anyway (will queue if peer busy)."
+    fi
+  else
+    echo "[ac-compact-peer] WARN: peer pulse file not found: $PEER_PULSE"
+  fi
+fi
+
+# Step 4: Fire /compact via tmux send-keys
+tmux send-keys -t "$TARGET" "/compact" Enter
+echo "[ac-compact-peer] /compact fired on $TARGET"
+
+# Step 5: Log to runtime/log.jsonl (flock for atomicity)
+{
+  flock 200
+  printf '{"ts":"%s","actor":"%s","event":"compact-peer","peer":"%s","target":"%s","reason":"%s","skipped_pre":%d,"skipped_msg":%d}\n' \
+    "$(ts_iso)" "$NAME" "$PEER_NAME" "$TARGET" "${REASON//\"/\\\"}" "$SKIP_PRE" "$SKIP_MSG" >> "$LOG"
+} 200>>"$LOG.lock"
+
+echo "[ac-compact-peer] done"
+exit 0

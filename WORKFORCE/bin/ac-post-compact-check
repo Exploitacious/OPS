@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# ac-post-compact-check — mandatory first action post-compact.
+#
+# Compares the latest operator-direction quote against the quote
+# embedded in the journal's RESUME ANCHOR. If they diverge → the
+# Coordinator may be acting on a stale anchor → HALT until
+# re-anchor.
+#
+# Also detects AMBIGUOUS state: quote matches but recent activity
+# suggests the work is operating on implicit direction (no fresh
+# Operator quote filed despite significant elapsed time + events).
+#
+# Designed to be called as the first turn after a compact resume.
+# Exit codes:
+#   0 = aligned, safe to proceed (prints alignment ack template)
+#   1 = anchor stale, HALT (prints diff + remediation)
+#   2 = no operator-directions filed yet (informational; safe to proceed)
+#   3 = AMBIGUOUS: directions exist but stale relative to activity
+#       (informational warning; suggest filing fresh quote)
+#
+# Logs execution to runtime/log.jsonl with event=post-compact-check.
+#
+# Usage:
+#   ac-post-compact-check          # full check
+#   ac-post-compact-check --quiet  # exit-code only
+#
+# Env:
+#   AC_ROOT   — required
+#   AC_FLEET  — default ~/OPS/WORKFORCE
+#   AC_NAME   — required
+#
+# Tuning (env vars, defaults sensible):
+#   AC_AMBIGUOUS_MAX_AGE_HOURS — directions older than this trigger
+#       AMBIGUOUS evaluation. Default 6.
+#   AC_AMBIGUOUS_MIN_EVENTS — minimum log events since the latest
+#       direction to consider the work "active without fresh direction."
+#       Default 10.
+
+set -uo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set." >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+NAME="${AC_NAME:-}"
+[[ -z "$NAME" ]] && { echo "$(basename "$0"): AC_NAME not set" >&2; exit 1; }
+
+QUIET=0
+[[ "${1:-}" == "--quiet" ]] && QUIET=1
+
+JOURNAL="$AC_ROOT/runtime/journal/${NAME}.md"
+DIRECTIONS="$AC_ROOT/runtime/operator-directions"
+LOG="$AC_ROOT/runtime/log.jsonl"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+AMBIG_HOURS="${AC_AMBIGUOUS_MAX_AGE_HOURS:-6}"
+AMBIG_MIN_EVENTS="${AC_AMBIGUOUS_MIN_EVENTS:-10}"
+
+[[ -f "$JOURNAL" ]] || { echo "no journal at $JOURNAL" >&2; exit 1; }
+
+# Log execution to log.jsonl with computed result so audit trail
+# captures whether the gate fired + what it concluded.
+log_event() {
+  local result="$1"
+  local line
+  line=$(printf '{"ts":"%s","actor":"%s","event":"post-compact-check","result":"%s"}' \
+                "$NOW" "$NAME" "$result")
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; printf '%s\n' "$line" >> "$LOG" ) 9>>"$LOG"
+  else
+    printf '%s\n' "$line" >> "$LOG"
+  fi
+}
+
+extract_quote() {
+  awk '
+    /^## Quote/ { in_quote=1; next }
+    in_quote && /^>/ { sub(/^>[[:space:]]*/, ""); if (out) out = out " " $0; else out = $0; next }
+    in_quote && !/^>/ && out { exit }
+    END { sub(/^"/, "", out); sub(/"$/, "", out); print out }
+  ' "$1"
+}
+extract_quote_fallback() {
+  awk '
+    /^>/ { sub(/^>[[:space:]]*/, ""); if (out) out = out " " $0; else out = $0; next }
+    !/^>/ && out { exit }
+    END { sub(/^"/, "", out); sub(/"$/, "", out); print out }
+  ' "$1"
+}
+
+LATEST_DIR=""
+LATEST_QUOTE=""
+LATEST_DATE=""
+LATEST_MTIME=0
+if [[ -d "$DIRECTIONS" ]]; then
+  LATEST_DIR=$(ls -1t "$DIRECTIONS"/*.md 2>/dev/null | head -1 || true)
+  if [[ -n "$LATEST_DIR" ]]; then
+    LATEST_QUOTE=$(extract_quote "$LATEST_DIR")
+    [[ -z "$LATEST_QUOTE" ]] && LATEST_QUOTE=$(extract_quote_fallback "$LATEST_DIR")
+    LATEST_DATE=$(awk '/^date:/ {sub(/^date:[[:space:]]*/, ""); print; exit}' "$LATEST_DIR")
+    LATEST_MTIME=$(stat -c %Y "$LATEST_DIR" 2>/dev/null || echo 0)
+  fi
+fi
+
+if [[ -z "$LATEST_QUOTE" ]]; then
+  (( QUIET )) || cat <<EOF
+============================================================
+ POST-COMPACT CHECK — $NAME — $NOW
+============================================================
+No operator-directions filed yet. Nothing to verify against.
+Safe to proceed, but: capture every Operator quote going
+forward into runtime/operator-directions/<date>__<topic>.md
+so the anchor can validate next time.
+============================================================
+EOF
+  log_event "no-directions"
+  exit 2
+fi
+
+# Quote from RESUME ANCHOR in journal.
+ANCHOR_QUOTE=$(awk '
+  /^## RESUME ANCHOR/ { in_anchor=1 }
+  in_anchor && /Last Operator direction.*verbatim/ { read_next=1; next }
+  in_anchor && read_next && /^[[:space:]]*"/ {
+    sub(/^[[:space:]]*"/, ""); sub(/"$/, "")
+    print; exit
+  }
+' "$JOURNAL")
+
+strip() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<< "$1"; }
+LQ=$(strip "$LATEST_QUOTE")
+AQ=$(strip "$ANCHOR_QUOTE")
+
+if [[ "$LQ" != "$AQ" ]]; then
+  (( QUIET )) || cat <<EOF
+============================================================
+ POST-COMPACT CHECK — STALE ANCHOR — HALT
+============================================================
+$NAME — your RESUME ANCHOR is out of sync with the latest
+Operator direction. Acting on a stale anchor is the failure
+mode that triggered the 2026-05-12 alignment-hardening
+batch. STOP all agent assignments + Operator-facing actions
+until you re-anchor.
+
+LATEST OPERATOR DIRECTION ($LATEST_DATE):
+  Source: $(basename "$LATEST_DIR")
+  Quote:  "$LATEST_QUOTE"
+
+ANCHOR HAS:
+  Quote:  "${ANCHOR_QUOTE:-<no quote found in anchor>}"
+
+REMEDIATION:
+  1. Re-read the latest operator-direction file (above).
+  2. Run \`$AC_FLEET/bin/ac-pre-compact\` to refresh the anchor.
+  3. Re-run this check.
+  4. Then ack to Operator with the new quote inline.
+
+DO NOT proceed with agent assignments or Operator narration
+until this check passes.
+============================================================
+EOF
+  log_event "stale"
+  exit 1
+fi
+
+# Quote matches. Now check for AMBIGUOUS state: latest direction is
+# older than AMBIG_HOURS AND there have been at least AMBIG_MIN_EVENTS
+# log entries since that direction was filed → work is operating on
+# implicit direction. Suggest filing a fresh quote.
+NOW_EPOCH=$(date -u +%s)
+AGE_HOURS=$(( (NOW_EPOCH - LATEST_MTIME) / 3600 ))
+EVENTS_SINCE=0
+if [[ -f "$LOG" && $LATEST_MTIME -gt 0 ]]; then
+  EVENTS_SINCE=$(awk -v cutoff="$LATEST_MTIME" '
+    {
+      # Extract ts field, convert to epoch via mktime if format known.
+      match($0, /"ts":"([^"]+)"/, a)
+      if (a[1]) {
+        # ISO 8601: 2026-05-13T15:30:00Z → space-format for mktime.
+        ts = a[1]
+        gsub(/[-:TZ]/, " ", ts)
+        epoch = mktime(ts)
+        if (epoch > cutoff) c++
+      }
+    }
+    END { print c+0 }
+  ' "$LOG")
+fi
+
+# Decision-staleness sniff (added 2026-05-13): also flag if the
+# newest decisions/*.md filename doesn't appear in the anchor body.
+# Catches the case where work shipped a decision since last anchor
+# refresh — quote may still match but in-flight context has moved on.
+NEWEST_DECISION=""
+DECISION_STALENESS=""
+if [[ -d "$AC_ROOT/runtime/decisions" ]]; then
+  NEWEST_DECISION=$(ls -1t "$AC_ROOT/runtime/decisions"/*.md 2>/dev/null | head -1 | xargs -r basename || true)
+  if [[ -n "$NEWEST_DECISION" ]]; then
+    if ! grep -qF "$NEWEST_DECISION" "$JOURNAL" 2>/dev/null; then
+      DECISION_STALENESS="newest decision '$NEWEST_DECISION' not referenced in anchor"
+    fi
+  fi
+fi
+
+if (( AGE_HOURS >= AMBIG_HOURS && EVENTS_SINCE >= AMBIG_MIN_EVENTS )) || [[ -n "$DECISION_STALENESS" ]]; then
+  (( QUIET )) || cat <<EOF
+============================================================
+ POST-COMPACT CHECK — AMBIGUOUS — $NOW
+============================================================
+$NAME re-anchored to latest filed Operator direction, but
+staleness signals fired:
+  - direction is ${AGE_HOURS}h old (threshold ${AMBIG_HOURS}h)
+  - ${EVENTS_SINCE} log events since it was filed (threshold ${AMBIG_MIN_EVENTS})
+  - decision-drift: ${DECISION_STALENESS:-none}
+
+The work in flight is likely operating on IMPLICIT direction
+(Operator messages that weren't captured as verbatim
+operator-directions) or new decisions filed without anchor refresh.
+
+Latest filed direction ($LATEST_DATE): "$LATEST_QUOTE"
+Source: $(basename "$LATEST_DIR")
+
+This is not a HALT — but proceed only AFTER one of:
+
+  (a) Quote the current Operator ask verbatim and file it at:
+      \`runtime/operator-directions/${NOW%T*}__<topic>.md\`
+      Then run \`ac-pre-compact\` + re-check.
+
+  (b) If no fresh Operator direction exists since the filed one,
+      that is itself a signal — surface the implicit-direction
+      gap to the Operator with this banner inline.
+
+Your first Operator-facing reply should explicitly call out
+AMBIGUOUS state + the proposed remediation, NOT just emit the
+standard alignment-ack template.
+============================================================
+EOF
+  log_event "ambiguous"
+  exit 3
+fi
+
+(( QUIET )) || cat <<EOF
+============================================================
+ POST-COMPACT CHECK — ALIGNED — $NOW
+============================================================
+$NAME re-anchored to latest Operator direction.
+
+Direction ($LATEST_DATE): "$LATEST_QUOTE"
+Source: $(basename "$LATEST_DIR")
+Age: ${AGE_HOURS}h, events since: ${EVENTS_SINCE}
+
+Your first Operator-facing reply MUST begin with:
+---
+Alignment check: "$LATEST_QUOTE"
+Last action authorized: <X>. Currently <doing|idle>.
+Cancel/correct if misaligned.
+---
+Then proceed. Operator confirms by silence or correction.
+============================================================
+EOF
+log_event "aligned"
+exit 0

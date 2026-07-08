@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+# ac-close-project — wind down + close a project per project-lifecycle.md.
+#
+# Phases:
+#   A. Sanity check — refuse if any in-flight work
+#   B. Generate FLEETPROJECTS/<slug>/CLOSEOUT.md
+#   C. Free agent names + clear ack flags + delete pulse files
+#   D. Detach coordinator slot if pointing here
+#   E. List promotion candidates (manual copy; not automated)
+#   F. File closeout decision + append to protocol/closeout-log.md
+#   G. Optional archive to ~/OPS/ARCHIVE/
+#
+# Usage:
+#   ac-close-project <slug> [--archive] [--dry-run] [--force]
+#
+# --force skips Phase A if you accept the in-flight items will be marked
+# as rolled-forward / cancelled by hand. Use sparingly.
+#
+# Env:
+#   AC_FLEET   — default ~/OPS/WORKFORCE
+#   AC_NAME    — required (who's running the closeout — typically Coordinator)
+
+set -uo pipefail
+
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+
+die() { echo "ac-close-project: $*" >&2; exit 1; }
+
+[[ $# -lt 1 ]] && die "missing <slug>. Usage: ac-close-project <slug> [--archive] [--dry-run] [--force]"
+
+SLUG="$1"; shift
+DRY=0; ARCHIVE=0; FORCE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --archive) ARCHIVE=1; shift ;;
+    --force)   FORCE=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) die "unknown arg: $1" ;;
+  esac
+done
+
+NAME="${AC_NAME:-}"
+[[ -z "$NAME" ]] && die "AC_NAME not set (Coordinator runs closeout)"
+
+PROJECT_DIR="$AC_FLEET/FLEETPROJECTS/$SLUG"
+[[ -d "$PROJECT_DIR" ]] || die "no project at $PROJECT_DIR"
+
+RUNTIME="$PROJECT_DIR/runtime"
+TASKS="$RUNTIME/tasks"
+DECISIONS="$RUNTIME/decisions"
+DIRECTIONS="$RUNTIME/operator-directions"
+IMPROVEMENTS="$RUNTIME/improvements"
+MANIFEST="$RUNTIME/manifest.d"
+PULSE="$RUNTIME/pulse"
+INBOX="$RUNTIME/inbox"
+
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TODAY="$(date -u +%Y-%m-%d)"
+CLOSEOUT="$PROJECT_DIR/CLOSEOUT.md"
+LOG="$AC_FLEET/protocol/closeout-log.md"
+
+get_field() {
+  local file="$1" key="$2"
+  awk -v k="^${key}:" '
+    /^---$/ { f++; if (f==2) exit; next }
+    f==1 && $0 ~ k { sub(/^[a-z_]+:[[:space:]]*/, ""); print; exit }
+  ' "$file"
+}
+
+get_json_field() {
+  local file="$1" key="$2"
+  { grep -oE "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$file" 2>/dev/null || true; } \
+    | head -1 | sed -E 's/.*"([^"]*)"$/\1/'
+}
+
+# Scope-aware helpers (added 2026-05-13 per decision
+# 2026-05-13__closeout-scope-aware.md). Default scope is "project"
+# when omitted; only "cross-cutting" triggers auto-promotion.
+get_scope() {
+  local s; s=$(get_field "$1" scope)
+  echo "${s:-project}"
+}
+
+list_cross_cutting() {
+  local dir="$1" f
+  for f in "$dir"/*.md; do
+    [[ -f "$f" ]] || continue
+    [[ "$(get_scope "$f")" == "cross-cutting" ]] && echo "$f"
+  done
+}
+
+# Test whether a settled cross-cutting decision is linked to a READY
+# (or READY HIGH PRIORITY / IDEA TO IMP) entry in OPS/IDEAS.md.
+# Returns 0 if a linked unbuilt action thread exists, 1 otherwise.
+links_ready_idea() {
+  local decision_id="$1"
+  local ideas="$HOME/OPS/IDEAS.md"
+  [[ -f "$ideas" ]] || return 1
+  awk -v id="$decision_id" '
+    /^## (READY|IDEA TO IMP)/ { in_ready=1; matched=0; next }
+    /^## / { if (in_ready && matched) { print "found"; exit 0 } in_ready=0; next }
+    in_ready && index($0, id) > 0 { matched=1 }
+    END { if (in_ready && matched) print "found" }
+  ' "$ideas" | grep -q found
+}
+
+# Insert a "Promoted to" banner just after the closing frontmatter
+# (---) of a project-local artifact whose canonical copy now lives
+# in the fleet-wide protocol/lessons/ or protocol/standing-directions/.
+append_promoted_banner() {
+  local src="$1" canonical="$2" today="$3" slug="$4"
+  local tmpf
+  tmpf=$(mktemp)
+  awk -v cn="$canonical" -v dt="$today" -v sl="$slug" '
+    /^---$/ {
+      count++
+      print
+      if (count == 2) {
+        print ""
+        print "> **PROMOTED to fleet-wide on " dt " during close of `" sl "`:**"
+        print "> Canonical copy: `" cn "`"
+        print "> (This in-project copy retained for audit trail.)"
+        print ""
+      }
+      next
+    }
+    { print }
+  ' "$src" > "$tmpf" && mv "$tmpf" "$src"
+}
+
+echo "==================================="
+echo "ac-close-project: $SLUG"
+echo "project_dir: $PROJECT_DIR"
+echo "dry_run: $DRY  archive: $ARCHIVE  force: $FORCE"
+echo "==================================="
+
+# --- Phase A: sanity check
+echo ""
+echo "[A] sanity check"
+BLOCKING=()
+
+shopt -s nullglob
+for t in "$TASKS"/*.md; do
+  st=$(get_field "$t" status)
+  case "$st" in
+    in_progress|assigned|blocked|needs-direction)
+      BLOCKING+=("task in $st: $(basename "$t" .md)")
+      ;;
+  esac
+done
+
+for m in "$MANIFEST"/*.json; do
+  [[ "$(basename "$m")" == "_coordinator.json" ]] && continue
+  st=$(get_json_field "$m" status)
+  case "$st" in
+    working)
+      BLOCKING+=("agent working: $(basename "$m" .json)")
+      ;;
+  esac
+done
+
+UNREAD=$(find "$INBOX" -mindepth 2 -type f 2>/dev/null | wc -l)
+(( UNREAD > 0 )) && BLOCKING+=("unread inbox items: $UNREAD")
+
+# Scope-aware Phase A checks (added 2026-05-13 per decision
+# 2026-05-13__closeout-scope-aware.md). Block on cross-cutting
+# improvements still in `proposed` status. Surface (warn, don't
+# block) cross-cutting settled decisions linked to READY IDEAs.
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  if [[ "$(get_field "$f" status)" == "proposed" ]]; then
+    BLOCKING+=("cross-cutting improvement still proposed: $(basename "$f")")
+  fi
+done < <(list_cross_cutting "$IMPROVEMENTS")
+
+OPEN_THREADS=()
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  if [[ "$(get_field "$f" status)" == "settled" ]]; then
+    did=$(basename "$f" .md)
+    if links_ready_idea "$did"; then
+      OPEN_THREADS+=("$did")
+    fi
+  fi
+done < <(list_cross_cutting "$DECISIONS")
+
+if (( ${#BLOCKING[@]} > 0 )); then
+  echo "  BLOCKING ITEMS:"
+  for b in "${BLOCKING[@]}"; do echo "    - $b"; done
+  if (( FORCE )); then
+    echo "  --force given; proceeding anyway"
+  else
+    die "abort: in-flight work exists. Resolve or use --force."
+  fi
+else
+  echo "  clean: no in-flight work"
+fi
+
+if (( ${#OPEN_THREADS[@]} > 0 )); then
+  echo "  OPEN CROSS-CUTTING THREADS (informational, recorded in closeout-log):"
+  for t in "${OPEN_THREADS[@]}"; do echo "    - $t (settled decision, linked READY IDEA)"; done
+fi
+
+# --- Phase B: generate CLOSEOUT.md
+echo ""
+echo "[B] generate CLOSEOUT.md"
+
+count_status() {
+  local s="$1" n=0
+  for t in "$TASKS"/*.md; do
+    [[ -f "$t" ]] || continue
+    [[ "$(get_field "$t" status)" == "$s" ]] && n=$((n+1))
+  done
+  echo "$n"
+}
+
+DONE_COUNT=$(count_status done)
+CANCELLED_COUNT=$(count_status cancelled)
+AWAITING_COUNT=$(count_status awaiting_review)
+READY_COUNT=$(count_status ready)
+INPROGRESS_COUNT=$(count_status in_progress)
+
+DECISIONS_COUNT=$(find "$DECISIONS" -maxdepth 1 -name "*.md" -type f 2>/dev/null | wc -l)
+DIRECTIONS_COUNT=$(find "$DIRECTIONS" -maxdepth 1 -name "*.md" -type f 2>/dev/null | wc -l)
+
+# Scope-aware promotion lists (computed here; copy happens in Phase E).
+AUTO_PROMOTE_DECISIONS=()
+AUTO_PROMOTE_IMPROVEMENTS=()
+AUTO_PROMOTE_DIRECTIONS=()
+while IFS= read -r f; do [[ -n "$f" ]] && AUTO_PROMOTE_DECISIONS+=("$f"); done \
+  < <(list_cross_cutting "$DECISIONS")
+while IFS= read -r f; do [[ -n "$f" ]] && AUTO_PROMOTE_IMPROVEMENTS+=("$f"); done \
+  < <(list_cross_cutting "$IMPROVEMENTS")
+while IFS= read -r f; do [[ -n "$f" ]] && AUTO_PROMOTE_DIRECTIONS+=("$f"); done \
+  < <(list_cross_cutting "$DIRECTIONS")
+AUTO_PROMOTE_TOTAL=$((${#AUTO_PROMOTE_DECISIONS[@]} + ${#AUTO_PROMOTE_IMPROVEMENTS[@]} + ${#AUTO_PROMOTE_DIRECTIONS[@]}))
+
+# Agents involved (manifest entries minus _coordinator).
+AGENTS_LIST=""
+for m in "$MANIFEST"/*.json; do
+  [[ "$(basename "$m")" == "_coordinator.json" ]] && continue
+  name=$(get_json_field "$m" name)
+  scope=$(get_json_field "$m" scope_tag)
+  role=$(get_json_field "$m" role)
+  claimed=$(get_json_field "$m" claimed_at)
+  last=$(get_json_field "$m" last_seen)
+  AGENTS_LIST+="- ${name} [${scope}] role=${role} (claimed ${claimed} → last_seen ${last})"$'\n'
+done
+
+# Drift alerts.
+DRIFT_FILES=$(ls -1 "$IMPROVEMENTS"/*__drift-alert.md 2>/dev/null || true)
+
+# Project opened date = earliest manifest claimed_at.
+OPENED=$(for m in "$MANIFEST"/*.json; do
+  [[ -f "$m" ]] && get_json_field "$m" claimed_at
+done | sort | head -1)
+[[ -z "$OPENED" ]] && OPENED="$TODAY"
+
+if (( DRY )); then
+  echo "  [dry-run] CLOSEOUT would be written to $CLOSEOUT"
+else
+  cat > "$CLOSEOUT" <<EOF
+---
+project: $SLUG
+opened: $OPENED
+closed: $TODAY
+closed_by: $NAME
+generated_at: $NOW
+---
+
+# Closeout — $SLUG
+
+## Outcomes
+
+- **Tasks shipped:** $DONE_COUNT done, $AWAITING_COUNT awaiting-review,
+  $INPROGRESS_COUNT still in_progress (rolled forward / forced),
+  $READY_COUNT ready (unstarted, rolled forward),
+  $CANCELLED_COUNT cancelled
+- **Decisions filed:** $DECISIONS_COUNT
+- **Operator-directions captured:** $DIRECTIONS_COUNT
+- **Drift-alerts:** $(echo "$DRIFT_FILES" | grep -c .) generated this project
+
+## Agents involved
+
+${AGENTS_LIST:-(none)}
+
+## Decisions (full list)
+
+$(for d in "$DECISIONS"/*.md; do [[ -f "$d" ]] && echo "- $(basename "$d")"; done)
+
+## Operator-directions captured
+
+$(for d in "$DIRECTIONS"/*.md; do [[ -f "$d" ]] && echo "- $(basename "$d")"; done)
+
+## Auto-promoted cross-cutting artifacts ($AUTO_PROMOTE_TOTAL total)
+
+Artifacts with \`scope: cross-cutting\` frontmatter are auto-copied
+to fleet-wide locations by Phase E. The in-project copy is retained
+with a "Promoted to" banner appended. See
+\`runtime/decisions/2026-05-13__closeout-scope-aware.md\` for doctrine.
+
+### Decisions → \`protocol/lessons/\`
+$(for f in "${AUTO_PROMOTE_DECISIONS[@]}"; do [[ -f "$f" ]] && echo "- $(basename "$f")"; done)
+
+### Improvements → \`protocol/lessons/\`
+$(for f in "${AUTO_PROMOTE_IMPROVEMENTS[@]}"; do [[ -f "$f" ]] && echo "- $(basename "$f")"; done)
+
+### Operator-directions → \`protocol/standing-directions/\`
+$(for f in "${AUTO_PROMOTE_DIRECTIONS[@]}"; do [[ -f "$f" ]] && echo "- $(basename "$f")"; done)
+
+## Open cross-cutting threads at close (${#OPEN_THREADS[@]})
+
+Settled cross-cutting decisions whose linked IDEAs in \`~/OPS/IDEAS.md\`
+remain \`READY\` (unbuilt) at close time. These decisions document the
+WHY of work that hasn't shipped yet. Operator: migrate the IDEAs to a
+successor project, or accept the loose pointer in IDEAS.md.
+
+$(for t in "${OPEN_THREADS[@]}"; do echo "- $t"; done)
+
+## Manual-review promotion candidates (heuristic fallback)
+
+Legacy / untagged files matching the original keyword + length heuristic.
+These had no \`scope:\` field; manual review confirms which deserve
+promotion to \`protocol/lessons/\`.
+
+### Decision-record candidates (heuristic)
+$(for d in "$DECISIONS"/*.md; do
+  [[ -f "$d" ]] || continue
+  sc=$(get_scope "$d")
+  [[ "$sc" == "cross-cutting" ]] && continue  # already auto-promoted
+  lines=$(wc -l < "$d")
+  base=$(basename "$d")
+  if (( lines > 50 )) && [[ "$base" =~ alignment|judgment|protocol|doctrine|naming|handoff|escalation ]]; then
+    echo "- $base ($lines lines)"
+  fi
+done)
+
+### Accepted improvements (heuristic — non-cross-cutting only)
+$(for f in "$IMPROVEMENTS"/*.md; do
+  [[ -f "$f" ]] || continue
+  sc=$(get_scope "$f")
+  [[ "$sc" == "cross-cutting" ]] && continue
+  st=$(awk '/^status:/ {sub(/^status:[[:space:]]*/, ""); print; exit}' "$f")
+  [[ "$st" == "accepted" ]] && echo "- $(basename "$f")"
+done)
+
+## Open items rolled forward (Operator decides)
+
+$(for t in "$TASKS"/*.md; do
+  [[ -f "$t" ]] || continue
+  st=$(get_field "$t" status)
+  case "$st" in
+    ready|in_progress|assigned|blocked|awaiting_review)
+      echo "- $(basename "$t" .md) [status=$st, assignee=$(get_field "$t" assignee)]"
+      ;;
+  esac
+done)
+
+EOF
+  echo "  wrote: $CLOSEOUT"
+fi
+
+# --- Phase C + D: free agent names + detach coordinator slot
+echo ""
+echo "[C+D] free resources"
+
+for m in "$MANIFEST"/*.json; do
+  base=$(basename "$m")
+  [[ "$base" == "_coordinator.json" ]] && continue
+  name="${base%.json}"
+  if (( DRY )); then
+    echo "  [dry-run] would mark $name: closed-with-project, delete pulse, clear ack-pending"
+  else
+    sed -i.bak -E "s/\"status\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"status\": \"closed-with-project\"/" "$m"
+    rm -f "$m.bak"
+    rm -f "$PULSE/${name}.json"
+    rm -f "$MANIFEST/${name}.ack-pending"
+    echo "  freed: $name"
+  fi
+done
+
+COORD_FILE="$MANIFEST/_coordinator.json"
+if [[ -f "$COORD_FILE" ]]; then
+  coord_name=$(get_json_field "$COORD_FILE" name)
+  if (( DRY )); then
+    echo "  [dry-run] would mark coord slot ($coord_name): project-closed"
+  else
+    sed -i.bak -E "s/\"status\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"status\": \"project-closed\"/" "$COORD_FILE"
+    rm -f "$COORD_FILE.bak"
+    echo "  detached coord slot: $coord_name"
+  fi
+fi
+
+# --- Phase E: auto-promote cross-cutting + list manual-review candidates
+echo ""
+echo "[E] auto-promote cross-cutting artifacts + list manual-review candidates"
+
+LESSONS_DIR="$AC_FLEET/protocol/lessons"
+STANDING_DIR="$AC_FLEET/protocol/standing-directions"
+mkdir -p "$LESSONS_DIR" "$STANDING_DIR"
+
+PROMOTED_COUNT=0
+
+promote_to() {
+  local src="$1" target_dir="$2" kind="$3"
+  local base canonical
+  base=$(basename "$src")
+  canonical="$target_dir/$base"
+  if (( DRY )); then
+    echo "  [dry-run] would promote ($kind): $base -> $canonical"
+    PROMOTED_COUNT=$((PROMOTED_COUNT + 1))
+    return 0
+  fi
+  if [[ -f "$canonical" ]]; then
+    echo "  WARN: target exists, skipping: $canonical"
+    return 1
+  fi
+  cp -- "$src" "$canonical"
+  append_promoted_banner "$src" "$canonical" "$TODAY" "$SLUG"
+  echo "  promoted ($kind): $base -> $canonical"
+  PROMOTED_COUNT=$((PROMOTED_COUNT + 1))
+}
+
+for f in "${AUTO_PROMOTE_DECISIONS[@]}";    do promote_to "$f" "$LESSONS_DIR"  "decision"; done
+for f in "${AUTO_PROMOTE_IMPROVEMENTS[@]}"; do promote_to "$f" "$LESSONS_DIR"  "improvement"; done
+for f in "${AUTO_PROMOTE_DIRECTIONS[@]}";   do promote_to "$f" "$STANDING_DIR" "standing-direction"; done
+
+if (( DRY )); then
+  echo "  would auto-promote: $PROMOTED_COUNT cross-cutting artifact(s) [dry-run]"
+else
+  echo "  auto-promoted: $PROMOTED_COUNT cross-cutting artifact(s)"
+fi
+echo "  see CLOSEOUT.md § Manual-review promotion candidates for heuristic-flagged legacy files"
+
+# --- Phase F: closeout decision + append to closeout-log.md
+echo ""
+echo "[F] closeout decision + log append"
+
+DECISION_FILE="$DECISIONS/${TODAY}__project-closed-${SLUG}.md"
+if (( DRY )); then
+  echo "  [dry-run] would file: $DECISION_FILE"
+  echo "  [dry-run] would append to: $LOG"
+else
+  cat > "$DECISION_FILE" <<EOF
+---
+id: ${TODAY}__project-closed-${SLUG}
+created_at: $NOW
+created_by: $NAME
+project: $SLUG
+---
+
+# Project closed: $SLUG
+
+Closeout generated by \`ac-close-project\` on $NOW.
+
+- Active: $OPENED → $TODAY
+- Tasks: $DONE_COUNT done, $CANCELLED_COUNT cancelled
+- Decisions: $DECISIONS_COUNT
+- Operator-directions: $DIRECTIONS_COUNT
+
+Full closeout: \`CLOSEOUT.md\` (this project's root, gitignored).
+
+Summary: see CLOSEOUT.md for outcomes, agents, promotion candidates.
+
+EOF
+  echo "  filed: $DECISION_FILE"
+
+  # Append to fleet-level closeout-log (extended format 2026-05-13).
+  AUTO_PROMOTED_LIST=""
+  for f in "${AUTO_PROMOTE_DECISIONS[@]}" "${AUTO_PROMOTE_IMPROVEMENTS[@]}"; do
+    [[ -f "$f" ]] && AUTO_PROMOTED_LIST+="    - protocol/lessons/$(basename "$f")"$'\n'
+  done
+  for f in "${AUTO_PROMOTE_DIRECTIONS[@]}"; do
+    [[ -f "$f" ]] && AUTO_PROMOTED_LIST+="    - protocol/standing-directions/$(basename "$f")"$'\n'
+  done
+  [[ -z "$AUTO_PROMOTED_LIST" ]] && AUTO_PROMOTED_LIST="    (none)"$'\n'
+
+  OPEN_THREADS_LIST=""
+  for t in "${OPEN_THREADS[@]}"; do
+    OPEN_THREADS_LIST+="    - $t (settled, linked READY IDEA)"$'\n'
+  done
+  [[ -z "$OPEN_THREADS_LIST" ]] && OPEN_THREADS_LIST="    (none)"$'\n'
+
+  cat >> "$LOG" <<EOF
+
+## $SLUG — closed $TODAY
+
+- **Active:** $OPENED → $TODAY
+- **Agents:** $(echo "$AGENTS_LIST" | grep -oE '^- [A-Za-z]+' | sed 's/^- //' | paste -sd, | sed 's/,/, /g')
+- **Tasks:** $DONE_COUNT done, $CANCELLED_COUNT cancelled, $((READY_COUNT + INPROGRESS_COUNT + AWAITING_COUNT)) rolled forward
+- **Decisions:** $DECISIONS_COUNT filed
+- **Operator-directions:** $DIRECTIONS_COUNT captured
+- **Cross-cutting artifacts auto-promoted:** $PROMOTED_COUNT
+$(printf '%s' "$AUTO_PROMOTED_LIST")
+- **Open cross-cutting threads at close:** ${#OPEN_THREADS[@]}
+$(printf '%s' "$OPEN_THREADS_LIST")
+- **Manual-review candidates:** see CLOSEOUT.md § Manual-review promotion candidates (heuristic legacy)
+- **Closeout artifact:** FLEETPROJECTS/$SLUG/CLOSEOUT.md (gitignored)
+- **Closeout decision:** runtime/decisions/${TODAY}__project-closed-${SLUG}.md (gitignored)
+
+Closed by: $NAME
+
+EOF
+  echo "  appended: $LOG"
+fi
+
+# --- Phase G: optional archive
+echo ""
+echo "[G] archive"
+if (( ARCHIVE )); then
+  ARCHIVE_DIR="$HOME/OPS/ARCHIVE"
+  ARCHIVE_FILE="$ARCHIVE_DIR/${SLUG}__${TODAY}.tar.gz"
+  if (( DRY )); then
+    echo "  [dry-run] would tar to $ARCHIVE_FILE + rm -rf $PROJECT_DIR"
+  else
+    mkdir -p "$ARCHIVE_DIR" || die "could not create archive dir: $ARCHIVE_DIR — project dir left untouched at $PROJECT_DIR"
+    if ! tar -czf "$ARCHIVE_FILE" -C "$AC_FLEET/FLEETPROJECTS" "$SLUG"; then
+      die "archive failed: tar exited non-zero writing $ARCHIVE_FILE — project dir left untouched at $PROJECT_DIR"
+    fi
+    if ! tar -tzf "$ARCHIVE_FILE" >/dev/null 2>&1; then
+      die "archive verification failed: $ARCHIVE_FILE is unreadable or corrupt — project dir left untouched at $PROJECT_DIR"
+    fi
+    rm -rf "$PROJECT_DIR"
+    echo "  archived: $ARCHIVE_FILE"
+    echo "  removed: $PROJECT_DIR"
+  fi
+else
+  echo "  skipped (no --archive). Project dir stays at $PROJECT_DIR."
+fi
+
+echo ""
+echo "==================================="
+if (( DRY )); then
+  echo "DRY-RUN complete. Re-run without --dry-run to execute."
+else
+  echo "CLOSED: $SLUG"
+  echo ""
+  echo "Next steps for Operator:"
+  echo "  1. Review $CLOSEOUT (§ Auto-promoted + § Open threads + § Manual-review)"
+  echo "  2. Auto-promoted artifacts already copied to fleet (review for accuracy)"
+  echo "  3. Migrate any 'Open cross-cutting threads' IDEAs to successor project (or accept loose pointers in IDEAS.md)"
+  echo "  4. Manually copy heuristic-flagged legacy candidates if any deserve promotion"
+  echo "  5. Commit fleet-system changes (lessons + standing-directions + closeout-log entry + banners on originals)"
+fi
+echo "==================================="

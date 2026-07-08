@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# ac-reorient — post-compact + session-start re-anchor for OPS agents/coordinators.
+#
+# Prints everything a freshly-resumed instance needs to re-anchor in <2 min.
+# Designed to be called by SessionStart hook in ~/.claude/settings.json so it
+# fires automatically on every session start INCLUDING post-compaction resume.
+#
+# Usage:
+#   ac-reorient              # auto-detect name from $AC_NAME env or _coordinator.json
+#   ac-reorient Captain      # explicit name
+#   ac-reorient --quiet      # only fire if compaction-resume detected (future hook)
+#
+# Exit 0 always. This is a context surface, not a gate.
+
+set -uo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+
+# Solo gating: plain solo sessions (no AC_NAME, no AC_ROOT -- i.e. no fleet
+# ACTIVATE marker has ever bound this session) get ZERO output, not the
+# fleet project-binding lecture below. foreman-charter.sh and
+# session-briefing.sh already cover solo posture on every SessionStart;
+# lecturing about fleet project binding outside fleet mode is pure noise.
+if [ -z "${AC_NAME:-}" ] && [ -z "$AC_ROOT" ]; then
+  exit 0
+fi
+
+# ac-reorient runs from SessionStart hook before agent has bound to
+# a project, so we DO NOT fail-fast here — we degrade to a banner
+# that tells the agent it needs Coordinator briefing first.
+if [ -z "$AC_ROOT" ]; then
+  cat <<EOF
+============================================================
+ OPS RE-ORIENT — $(date -u +%Y-%m-%dT%H:%M:%SZ)
+============================================================
+No project bound yet (AC_ROOT unset).
+
+Before running fleet operations, the Coordinator must brief
+this agent on which project to work from. Export:
+
+  export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>
+
+If unsure which project: send the Coordinator a message asking
+for project assignment. Do NOT default-pick a project from
+FLEETPROJECTS/ — that risks cross-project state collisions.
+
+Fleet system (read-only, always available):
+  Personalities: $AC_FLEET/personalities/
+  Protocol:      $AC_FLEET/protocol/
+  Tooling:       $AC_FLEET/bin/
+
+============================================================
+EOF
+  exit 0
+fi
+# Back-compat: $WORKFORCE refers to project runtime root (old name).
+WORKFORCE="${WORKFORCE_DIR:-$AC_ROOT}"
+NAME="${1:-${AC_NAME:-}}"
+
+# Resolve name if unset
+if [ -z "$NAME" ]; then
+  if [ -f "$WORKFORCE/runtime/manifest.d/_coordinator.json" ]; then
+    NAME=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$WORKFORCE/runtime/manifest.d/_coordinator.json" | sed -E 's/.*"([^"]+)"$/\1/' | head -1)
+  fi
+fi
+
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Detect SessionStart source if hook context piped via stdin.
+# Claude Code passes JSON like {"source":"startup|resume|compact|clear",...}
+HOOK_SOURCE="${SESSION_START_SOURCE:-}"
+if [ -z "$HOOK_SOURCE" ] && [ ! -t 0 ]; then
+  HOOK_INPUT=$(cat 2>/dev/null || true)
+  if [ -n "$HOOK_INPUT" ]; then
+    HOOK_SOURCE=$(echo "$HOOK_INPUT" | grep -oE '"source"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/' | head -1)
+  fi
+fi
+
+# Branch output: compact/resume = full re-anchor; startup = compact identity + state.
+case "$HOOK_SOURCE" in
+  startup)
+    cat <<EOF
+============================================================
+ OPS RE-ORIENT (startup) — $(now_utc)
+ Identity: ${NAME:-UNRESOLVED}
+============================================================
+Quick boot. Full re-anchor lives in runtime/journal/${NAME:-<name>}.md
+and runtime/operator-directions/. SessionStart hook fires the
+full re-anchor on resume/compact events.
+============================================================
+EOF
+    exit 0
+    ;;
+esac
+
+# resume/compact/clear/unrecognized source (incl. manual invocation with
+# no stdin) falls through to the full re-anchor dump below.
+cat <<EOF
+============================================================
+ OPS RE-ORIENT — $(now_utc)
+ Identity: ${NAME:-UNRESOLVED}
+============================================================
+
+PRIMARY GOAL: Coordinator-Operator alignment (operating-doctrine
+  Principle 7). Every action must trace back to:
+    (a) a quoted Operator direction (runtime/operator-directions/)
+    (b) a doctrine principle (~/OPS/CONTEXT/operating-doctrine.md
+        universal, ~/OPS/CONTEXT/fleet-doctrine.md fleet-specific)
+    (c) a settled decision (runtime/decisions/)
+  If you cannot quote a trace → STOP and re-read sources.
+
+============================================================
+ Re-read order (durable sources, post-compact):
+============================================================
+
+  1. $AC_ROOT/runtime/operator-directions/  (verbatim Operator quotes)
+  2. $AC_FLEET/personalities/captain-standing-orders.md  (cumulative rules)
+  3. ~/OPS/CONTEXT/operating-doctrine.md  (universal 7 principles)
+  4. ~/OPS/CONTEXT/fleet-doctrine.md  (multi-agent coordination)
+  5. $AC_FLEET/personalities/COORDINATOR.md OR AGENT.md  (your role)
+  6. $AC_ROOT/runtime/journal/${NAME:-<name>}.md  (top — RESUME ANCHOR)
+  7. $AC_ROOT/runtime/manifest.d/*.json  (fleet state)
+  8. $AC_ROOT/runtime/decisions/  (last 5 — settled architectural calls)
+  9. $AC_ROOT/runtime/inbox/${NAME:-<name>}/  (unread messages)
+
+EOF
+
+# Operator directions (verbatim) — most recent 3
+echo "============================================================"
+echo " Operator directions (last 3 by mtime):"
+echo "============================================================"
+if [ -d "$WORKFORCE/runtime/operator-directions" ]; then
+  ls -1t "$WORKFORCE/runtime/operator-directions"/*.md 2>/dev/null | head -3 | while read -r f; do
+    echo "  -> $(basename "$f")"
+  done
+else
+  echo "  (no operator-directions/ dir yet)"
+fi
+echo
+
+# Fleet pulse
+echo "============================================================"
+echo " Fleet pulse (age = seconds since last_seen):"
+echo "============================================================"
+if [ -d "$WORKFORCE/runtime/pulse" ]; then
+  for p in "$WORKFORCE/runtime/pulse"/*.json; do
+    [ -f "$p" ] || continue
+    n=$(basename "$p" .json)
+    ls=$(grep -oE '"last_seen"[[:space:]]*:[[:space:]]*"[^"]*"' "$p" | sed -E 's/.*"([^"]+)"$/\1/')
+    st=$(grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$p" | sed -E 's/.*"([^"]+)"$/\1/')
+    ct=$(grep -oE '"current_task"[[:space:]]*:[[:space:]]*"[^"]*"' "$p" | sed -E 's/.*"([^"]+)"$/\1/')
+    now=$(date -u +%s); le=$(date -u -d "$ls" +%s 2>/dev/null || echo 0); age=$((now-le))
+    flag=""
+    [ "$age" -gt 1800 ] && flag=" [STALE >30m]"
+    [ "$age" -gt 5400 ] && flag=" [STALE >90m]"
+    printf "  %-10s | %-10s | %5ds | task=%s%s\n" "$n" "$st" "$age" "$ct" "$flag"
+  done
+else
+  echo "  (no pulse/ dir)"
+fi
+echo
+
+# Inbox
+echo "============================================================"
+echo " Inbox for ${NAME:-<name>} (unread):"
+echo "============================================================"
+if [ -n "$NAME" ] && [ -d "$WORKFORCE/runtime/inbox/$NAME" ]; then
+  n_unread=$(find "$WORKFORCE/runtime/inbox/$NAME" -mindepth 1 -type f 2>/dev/null | wc -l)
+  if [ "$n_unread" -gt 0 ]; then
+    echo "  $n_unread unread:"
+    find "$WORKFORCE/runtime/inbox/$NAME" -mindepth 1 -type f -printf '    %f\n' 2>/dev/null | sort
+  else
+    echo "  (empty)"
+  fi
+else
+  echo "  (inbox path not resolved)"
+fi
+echo
+
+# Last 5 decisions
+echo "============================================================"
+echo " Last 5 decisions filed:"
+echo "============================================================"
+if [ -d "$WORKFORCE/runtime/decisions" ]; then
+  ls -1t "$WORKFORCE/runtime/decisions"/*.md 2>/dev/null | head -5 | while read -r f; do
+    echo "  -> $(basename "$f")"
+  done
+fi
+echo
+
+# Open tasks
+echo "============================================================"
+echo " Open tasks (status != done):"
+echo "============================================================"
+if [ -d "$WORKFORCE/runtime/tasks" ]; then
+  for f in "$WORKFORCE/runtime/tasks"/*.md; do
+    [ -f "$f" ] || continue
+    st=$(grep -oE '^status:[[:space:]]*[a-z_-]+' "$f" | sed -E 's/.*:[[:space:]]*//')
+    as=$(grep -oE '^assignee:[[:space:]]*[A-Za-z0-9_-]+' "$f" | sed -E 's/.*:[[:space:]]*//')
+    if [ "$st" != "done" ] && [ "$st" != "cancelled" ]; then
+      printf "  %-12s | %-10s | %s\n" "$st" "$as" "$(basename "$f")"
+    fi
+  done
+fi
+echo
+
+# Journal anchor (top 25 lines)
+echo "============================================================"
+echo " Your journal anchor (top 25 lines):"
+echo "============================================================"
+if [ -n "$NAME" ] && [ -f "$WORKFORCE/runtime/journal/$NAME.md" ]; then
+  head -25 "$WORKFORCE/runtime/journal/$NAME.md"
+else
+  echo "  (no journal at runtime/journal/${NAME:-<name>}.md)"
+fi
+echo
+
+cat <<EOF
+============================================================
+ First actions after reading the above:
+============================================================
+  1. Bump your pulse: $AC_FLEET/bin/ac-pulse
+  2. Process inbox: ac-msg list / read / archive (in order)
+  3. Confirm in-flight work traces to a quoted source
+  4. **Re-arm your self-pacing cron** — CronCreate is
+     session-scoped and dies on compaction. Suggested cadence
+     (off-minute, staggered):
+       - Captain:  17,42 * * * *
+       - Bravo:    3,18,33,48 * * * *
+       - Charlie:  8,23,38,53 * * * *
+     The prompt body should: poll inbox, bump pulse, advance
+     next queued task, idle cleanly if no work. See your last
+     arm-self-pacing-cron msg for the exact prompt template.
+  5. If alignment unclear → STOP and ask Operator
+
+  Stoic discipline. No shortcuts. No re-asks of known answers.
+  Alignment is the primary goal — everything else is secondary.
+============================================================
+EOF

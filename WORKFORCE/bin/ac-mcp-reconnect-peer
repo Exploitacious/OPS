@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# ac-mcp-reconnect-peer — fire /mcp on a peer agent's tmux pane.
+#
+# /mcp is a Claude Code UI command — agents cannot fire it on
+# themselves. When MCP connectors get stuck (Anthropic Proxy reject,
+# stale sessionId, post-deploy refresh need), this script reconnects
+# the peer's connectors externally.
+#
+# Symmetric: Captain can /mcp peers, peers can /mcp Captain, peers
+# can /mcp peers. Use when a peer is blocked on MCP errors visible
+# in their tmux pane or pulse blocked_on field.
+#
+# Usage:
+#   ac-mcp-reconnect-peer --target <tmux-target> --peer-name <name>
+#                         [--reason "<text>"]
+#                         [--skip-ac-msg]
+#
+# Required:
+#   --target <tmux-target>  e.g. ClaudeAgents:1.1, Main:1.1
+#   --peer-name <name>      Peer's agent name
+#
+# Optional:
+#   --reason "<text>"      Captured in ac-msg + log. Default: "MCP
+#                          reconnect requested by <actor>".
+#   --skip-ac-msg          Don't send the ac-msg audit-trail message.
+#
+# Env:
+#   AC_NAME    your agent name
+#   AC_ROOT    project runtime root
+#   AC_FLEET   default ~/OPS/WORKFORCE
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set." >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+NAME="${AC_NAME:-}"
+[[ -z "$NAME" ]] && { echo "$(basename "$0"): AC_NAME not set" >&2; exit 1; }
+
+TARGET=""
+PEER_NAME=""
+REASON=""
+SKIP_MSG=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)       TARGET="$2"; shift 2 ;;
+    --peer-name)    PEER_NAME="$2"; shift 2 ;;
+    --reason)       REASON="$2"; shift 2 ;;
+    --skip-ac-msg)  SKIP_MSG=1; shift ;;
+    -h|--help)      sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "unknown: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -z "$TARGET" ]] && { echo "--target required" >&2; exit 1; }
+[[ -z "$PEER_NAME" ]] && { echo "--peer-name required" >&2; exit 1; }
+[[ -z "$REASON" ]] && REASON="MCP reconnect requested by $NAME"
+
+if ! tmux list-panes -t "$TARGET" >/dev/null 2>&1; then
+  echo "target pane '$TARGET' not found in tmux" >&2
+  exit 2
+fi
+
+ts_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+LOG="$AC_ROOT/runtime/log.jsonl"
+
+echo "[ac-mcp-reconnect-peer] $NAME -> $PEER_NAME ($TARGET) | reason: $REASON"
+
+# ac-msg audit trail
+if [[ $SKIP_MSG -eq 0 ]]; then
+  MSG_BODY=$(cat <<BODY
+$NAME firing /mcp on your pane ($TARGET) to reconnect MCP connectors.
+
+Reason: $REASON
+
+After reconnect: your tool schemas refresh. If a tool call was mid-flight when this fired, retry it. No further action needed from you.
+BODY
+)
+  echo "$MSG_BODY" | "$AC_FLEET/bin/ac-msg" send --to "$PEER_NAME" \
+      --topic mcp-reconnect --priority normal >/dev/null
+fi
+
+# Fire /mcp
+tmux send-keys -t "$TARGET" "/mcp" Enter
+echo "[ac-mcp-reconnect-peer] /mcp fired on $TARGET"
+
+# Log
+{
+  flock 200
+  printf '{"ts":"%s","actor":"%s","event":"mcp-reconnect-peer","peer":"%s","target":"%s","reason":"%s"}\n' \
+    "$(ts_iso)" "$NAME" "$PEER_NAME" "$TARGET" "${REASON//\"/\\\"}" >> "$LOG"
+} 200>>"$LOG.lock"
+
+echo "[ac-mcp-reconnect-peer] done"
+exit 0

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ac-rollup — generate a daily rollup of done-tasks, decisions, open queue.
+#
+# Replaces ad-hoc status reports that violate
+# runtime/operator-directions/2026-05-12__no-status-narration.md.
+# This script generates a single artifact; Captain links it on demand
+# instead of typing recap paragraphs.
+#
+# Usage:
+#   ac-rollup                            # today, write to runtime/improvements/<date>__rollup.md
+#   ac-rollup --date 2026-05-12          # specific date
+#   ac-rollup --stdout                   # print to stdout instead of file
+#   ac-rollup --since 24h                # rolling window (default 24h)
+#
+# Output sections:
+#   - Tasks done in window (with commit-SHA refs if found)
+#   - Decisions filed in window
+#   - Open queue (assigned + in_progress + ready)
+#   - Drift-alerts (open)
+#   - Agent state (active, idle, stale)
+#
+# Designed to be human-skimmable in <60s. No prose narration. Tables only.
+
+set -uo pipefail
+
+OPS_ROOT="${OPS_ROOT:-$HOME/OPS}"
+AC_FLEET="${AC_FLEET:-$OPS_ROOT/WORKFORCE}"
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+RUNTIME="$AC_ROOT/runtime"
+
+DATE="$(date -u +%Y-%m-%d)"
+SINCE="24h"
+TO_STDOUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --date)    DATE="$2"; shift 2 ;;
+    --since)   SINCE="$2"; shift 2 ;;
+    --stdout)  TO_STDOUT=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown: $1" >&2; exit 1 ;;
+  esac
+done
+
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+OUT="$RUNTIME/improvements/${DATE}__rollup.md"
+
+# Helpers
+get_yaml() {
+  local file="$1" key="$2"
+  awk -v k="^${key}:" '/^---$/{f++; next} f==1 && $0 ~ k {sub(/^[a-z_]+:[[:space:]]*/, ""); print; exit}' "$file"
+}
+
+emit() {
+  if (( TO_STDOUT )); then
+    cat
+  else
+    cat >> "$OUT"
+  fi
+}
+
+if (( !TO_STDOUT )); then
+  mkdir -p "$(dirname "$OUT")"
+  : > "$OUT"  # truncate
+fi
+
+# Header
+emit <<EOF
+---
+id: ${DATE}__rollup
+generated_at: ${NOW}
+generator: bin/ac-rollup
+window: last ${SINCE}
+---
+
+# Rollup — ${DATE}
+
+EOF
+
+# 1. Done tasks (in window)
+emit <<<"## Tasks shipped (status=done in last ${SINCE})"
+emit <<<""
+emit <<<"| Task | Assignee | Pri | Commit ref |"
+emit <<<"|---|---|---|---|"
+
+shopt -s nullglob
+for t in "$RUNTIME/tasks"/*.md; do
+  st=$(get_yaml "$t" status)
+  [[ "$st" != "done" ]] && continue
+  id=$(basename "$t" .md)
+  asg=$(get_yaml "$t" assignee)
+  pri=$(get_yaml "$t" priority)
+  ref=$(grep -oE '[A-Za-z0-9_/.-]+#[a-f0-9]{7,}|[a-f0-9]{12,40}' "$t" 2>/dev/null | head -1)
+  [[ -z "$ref" ]] && ref="(none)"
+  emit <<<"| $id | $asg | $pri | $ref |"
+done
+emit <<<""
+
+# 2. Decisions (in window — by file mtime)
+emit <<<"## Decisions filed in last ${SINCE}"
+emit <<<""
+NOW_EPOCH=$(date -u +%s)
+WIN_SECONDS=86400
+case "$SINCE" in
+  *h) WIN_SECONDS=$(( ${SINCE%h} * 3600 )) ;;
+  *d) WIN_SECONDS=$(( ${SINCE%d} * 86400 )) ;;
+esac
+ANY=0
+for d in "$RUNTIME/decisions"/*.md; do
+  [[ -f "$d" ]] || continue
+  mt=$(stat -c %Y "$d")
+  age=$(( NOW_EPOCH - mt ))
+  if (( age <= WIN_SECONDS )); then
+    emit <<<"- $(basename "$d")"
+    ANY=1
+  fi
+done
+(( !ANY )) && emit <<<"(none)"
+emit <<<""
+
+# 3. Open queue
+emit <<<"## Open queue (status != done|cancelled)"
+emit <<<""
+emit <<<"| Status | Pri | Assignee | Task |"
+emit <<<"|---|---|---|---|"
+for t in "$RUNTIME/tasks"/*.md; do
+  st=$(get_yaml "$t" status)
+  [[ "$st" == "done" || "$st" == "cancelled" || -z "$st" ]] && continue
+  id=$(basename "$t" .md)
+  asg=$(get_yaml "$t" assignee)
+  pri=$(get_yaml "$t" priority)
+  emit <<<"| $st | $pri | ${asg:-—} | $id |"
+done
+emit <<<""
+
+# 4. Drift-alerts (open)
+emit <<<"## Drift-alerts (open)"
+emit <<<""
+ANY=0
+for a in "$RUNTIME/improvements"/*__drift-alert.md; do
+  [[ -f "$a" ]] || continue
+  status=$(grep -m1 '^status:' "$a" | sed 's/^status:[[:space:]]*//')
+  if [[ "$status" == "open" ]]; then
+    emit <<<"- $(basename "$a")"
+    ANY=1
+  fi
+done
+(( !ANY )) && emit <<<"(none open)"
+emit <<<""
+
+# 5. Agent state
+emit <<<"## Agent state (live manifest)"
+emit <<<""
+emit <<<"| Name | Role | Scope | Status | Last seen | Current task |"
+emit <<<"|---|---|---|---|---|---|"
+for m in "$RUNTIME/manifest.d"/*.json; do
+  [[ -f "$m" ]] || continue
+  name=$(basename "$m" .json)
+  [[ "$name" == "_coordinator" ]] && continue
+  role=$(grep -oE '"role"[[:space:]]*:[[:space:]]*"[^"]*"' "$m" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  scope=$(grep -oE '"scope_tag"[[:space:]]*:[[:space:]]*"[^"]*"' "$m" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  st=$(grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$m" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  ls=$(grep -oE '"last_seen"[[:space:]]*:[[:space:]]*"[^"]*"' "$m" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  ct=$(grep -oE '"current_task"[[:space:]]*:[[:space:]]*"[^"]*"' "$m" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  emit <<<"| $name | $role | ${scope:-—} | $st | $ls | ${ct:-—} |"
+done
+emit <<<""
+
+emit <<<"---"
+emit <<<""
+emit <<<"_Generated by ac-rollup. No narration; data only. Read at-glance and act._"
+
+if (( !TO_STDOUT )); then
+  echo "rollup written: $OUT"
+fi

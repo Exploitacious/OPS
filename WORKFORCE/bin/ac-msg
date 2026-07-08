@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# ac-msg — send a message between agents (or to operator).
+#
+# Usage:
+#   ac-msg send --from <name> --to <name> --topic <slug> [--priority urgent|normal|fyi]
+#               [--in-reply-to <id>] [--awaits <id>] [--refs ref1,ref2]
+#   ac-msg send --to <name> --topic <slug>      # reads $AC_NAME for --from
+#   echo "body markdown" | ac-msg send ...      # body via stdin
+#   ac-msg list [--for <name>]                  # list inbox
+#   ac-msg read <id> [--for <name>]             # read message body
+#   ac-msg archive <id> [--for <name>]          # move inbox -> archive
+#
+# Env:
+#   AC_NAME       — your agent name (used when --from omitted)
+#   AC_ROOT       — path to WORKFORCE/FLEETPROJECTS/<project> dir
+#                   (default: ~/OPS/WORKFORCE/FLEETPROJECTS/<project>)
+#
+# Atomicity: writes to runtime/tmp/ then renames into recipient inbox.
+# Logs: appends one line to runtime/log.jsonl via flock.
+#
+# Shipped-topic auto-ref: when --topic ends in -shipped/-fixed/-enriched/
+# -merged/-deployed and the cwd is a git repo, HEAD SHA is appended to
+# --refs automatically. Drops the drift-check "missing commit-SHA" alert.
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+RUNTIME="$AC_ROOT/runtime"
+
+die() { echo "ac-msg: $*" >&2; exit 1; }
+
+ts_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+ts_compact() { date -u +%Y-%m-%dT%H-%M-%SZ; }
+
+slugify() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//'
+}
+
+cmd_send() {
+  local from="" to="" topic="" priority="normal"
+  local in_reply_to="null" awaits="null" refs=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from)         from="$2"; shift 2 ;;
+      --to)           to="$2"; shift 2 ;;
+      --topic)        topic="$2"; shift 2 ;;
+      --priority)     priority="$2"; shift 2 ;;
+      --in-reply-to)  in_reply_to="$2"; shift 2 ;;
+      --awaits)       awaits="$2"; shift 2 ;;
+      --refs)         refs="$2"; shift 2 ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+
+  : "${from:=${AC_NAME:-}}"
+  [[ -z "$from" ]]  && die "missing --from (set AC_NAME or pass --from)"
+  [[ -z "$to" ]]    && die "missing --to"
+  [[ -z "$topic" ]] && die "missing --topic"
+  [[ "$priority" =~ ^(urgent|normal|fyi)$ ]] || die "bad priority: $priority"
+
+  local ts_c ts_i id slug
+  ts_c="$(ts_compact)"
+  ts_i="$(ts_iso)"
+  slug="$(slugify "$topic")"
+  id="${ts_c}__${from}__${slug}"
+
+  # bound_root validation: manifest captured AC_ROOT at register time.
+  # Detects cross-project drift (env AC_ROOT diverged since register).
+  # bound_root is mandatory (ac-register has written it on every manifest
+  # since 2026-05-12); a manifest missing it predates that field and must
+  # fail loud rather than silently pass the guard.
+  local mf="$RUNTIME/manifest.d/${from}.json"
+  if [[ -f "$mf" ]]; then
+    local bound
+    bound=$({ grep -oE '"bound_root"[[:space:]]*:[[:space:]]*"[^"]*"' "$mf" || true; } \
+            | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+    if [[ -z "$bound" ]]; then
+      die "manifest predates bound_root — re-register (ac-register) before sending"
+    fi
+    if [[ "$bound" != "$AC_ROOT" ]]; then
+      die "wrong project. ${from} registered with AC_ROOT=$bound, env says AC_ROOT=$AC_ROOT. Re-export or re-register."
+    fi
+  fi
+
+  # HARD-rule ack gate: agent must send hard-rules-acked first.
+  local ack_flag="$RUNTIME/manifest.d/${from}.ack-pending"
+  if [[ -f "$ack_flag" ]]; then
+    if [[ "$slug" == "hard-rules-acked" ]]; then
+      rm -f "$ack_flag"
+    else
+      die "ack required. Send --topic hard-rules-acked first. Then resume normal traffic."
+    fi
+  fi
+
+  # Auto-include commit SHA on shipped-class topics. Solves the
+  # drift-check "done-task body has no commit-SHA reference" alert
+  # by ensuring every ship-class message carries the HEAD ref.
+  if [[ "$slug" =~ -(shipped|fixed|enriched|merged|deployed|reinforced|narrowed|extended|armed|removed)$ ]]; then
+    if command -v git >/dev/null 2>&1; then
+      local sha=""
+      sha=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
+      if [[ -n "$sha" ]]; then
+        local origin slug_url
+        origin=$(git remote get-url origin 2>/dev/null || true)
+        if [[ "$origin" =~ github.com[:/]([^/]+)/([^/.]+) ]]; then
+          slug_url="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}#${sha}"
+        else
+          slug_url="HEAD@${sha}"
+        fi
+        if [[ -z "$refs" ]]; then refs="$slug_url"; else refs="${refs},${slug_url}"; fi
+      fi
+    fi
+  fi
+
+  local inbox="$RUNTIME/inbox/$to"
+  mkdir -p "$inbox" "$RUNTIME/tmp"
+
+  local body
+  if [[ -t 0 ]]; then
+    body=""
+  else
+    body="$(cat)"
+  fi
+
+  local refs_block="[]"
+  if [[ -n "$refs" ]]; then
+    refs_block=$(printf '\n'; IFS=,; for r in $refs; do printf '  - %s\n' "$r"; done)
+  fi
+
+  local tmp="$RUNTIME/tmp/${id}.md"
+  {
+    printf -- '---\n'
+    printf 'id: %s\n' "$id"
+    printf 'from: %s\n' "$from"
+    printf 'to: %s\n' "$to"
+    printf 'ts: %s\n' "$ts_i"
+    printf 'topic: %s\n' "$slug"
+    printf 'refs: %s\n' "$refs_block"
+    printf 'awaits: %s\n' "$awaits"
+    printf 'priority: %s\n' "$priority"
+    printf 'in_reply_to: %s\n' "$in_reply_to"
+    printf -- '---\n\n'
+    printf '%s\n' "$body"
+  } > "$tmp"
+
+  mv -- "$tmp" "$inbox/${id}.md"
+
+  # Push-wake: if recipient has a tmux window in ClaudeAgents session,
+  # send a wake nudge so they process this msg without waiting for
+  # their next own-turn. Best-effort; failures are silent (recipient
+  # may be Operator, may not have a tmux session, etc.).
+  if command -v tmux >/dev/null 2>&1; then
+    local win
+    win=$(tmux list-windows -t ClaudeAgents -F '#{window_name}' 2>/dev/null \
+          | grep -i "^${to}-" | head -1 || true)
+    if [[ -n "$win" ]]; then
+      local nudge="[push-wake from $from] new ${priority} msg: ${slug}. Read+archive: bin/ac-msg list && bin/ac-msg read <id> && bin/ac-msg archive <id>. Then bump pulse + act."
+      printf '%s' "$nudge" | tmux load-buffer - 2>/dev/null || true
+      sleep 0.3
+      tmux paste-buffer -t "ClaudeAgents:${win}" 2>/dev/null || true
+      sleep 0.3
+      tmux send-keys -t "ClaudeAgents:${win}" Enter 2>/dev/null || true
+    fi
+  fi
+
+  local log="$RUNTIME/log.jsonl"
+  local line
+  line=$(printf '{"ts":"%s","from":"%s","to":"%s","id":"%s","topic":"%s","priority":"%s"}' \
+    "$ts_i" "$from" "$to" "$id" "$slug" "$priority")
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; printf '%s\n' "$line" >> "$log" ) 9>>"$log"
+  else
+    printf '%s\n' "$line" >> "$log"
+  fi
+
+  echo "$id"
+
+  # Checkpoint hook (added 2026-05-13): refresh RESUME ANCHOR after
+  # every message send. Anchor stays current regardless of context-%.
+  # --silent suppresses banner; failure is swallowed (best-effort).
+  # Refreshes the SENDER's anchor (their fleet-state view changed by
+  # the send action). Uses $from explicitly since AC_NAME might be unset
+  # if the caller passed --from on the command line.
+  AC_FLEET_HOOK="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+  if [[ -x "$AC_FLEET_HOOK/bin/ac-pre-compact" ]]; then
+    AC_NAME="$from" "$AC_FLEET_HOOK/bin/ac-pre-compact" --silent >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_list() {
+  local who="${AC_NAME:-}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --for) who="$2"; shift 2 ;;
+      *) die "unknown arg: $1" ;;
+    esac
+  done
+  [[ -z "$who" ]] && die "missing --for (or set AC_NAME)"
+  local inbox="$RUNTIME/inbox/$who"
+  [[ -d "$inbox" ]] || { echo "(empty)"; return 0; }
+  ls -1 "$inbox" 2>/dev/null | sort
+}
+
+cmd_read() {
+  local id="" who="${AC_NAME:-}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --for) who="$2"; shift 2 ;;
+      *) id="$1"; shift ;;
+    esac
+  done
+  [[ -z "$id" ]] && die "missing message id"
+  [[ -z "$who" ]] && die "missing --for (or set AC_NAME)"
+  local f="$RUNTIME/inbox/$who/${id}.md"
+  [[ -f "$f" ]] || f="$RUNTIME/inbox/$who/${id}"
+  [[ -f "$f" ]] || die "not found: $id (in inbox of $who)"
+  cat -- "$f"
+}
+
+cmd_archive() {
+  local id="" who="${AC_NAME:-}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --for) who="$2"; shift 2 ;;
+      *) id="$1"; shift ;;
+    esac
+  done
+  [[ -z "$id" ]] && die "missing message id"
+  [[ -z "$who" ]] && die "missing --for (or set AC_NAME)"
+  local src="$RUNTIME/inbox/$who/${id}.md"
+  [[ -f "$src" ]] || src="$RUNTIME/inbox/$who/${id}"
+  [[ -f "$src" ]] || die "not found: $id"
+  local dst="$RUNTIME/archive/$who"
+  mkdir -p "$dst"
+  mv -- "$src" "$dst/$(basename "$src")"
+  echo "archived: $id"
+}
+
+main() {
+  [[ $# -lt 1 ]] && die "usage: ac-msg <send|list|read|archive> ..."
+  local sub="$1"; shift
+  case "$sub" in
+    send)    cmd_send "$@" ;;
+    list)    cmd_list "$@" ;;
+    read)    cmd_read "$@" ;;
+    archive) cmd_archive "$@" ;;
+    -h|--help|help) sed -n '2,30p' "$0" ;;
+    *) die "unknown subcommand: $sub" ;;
+  esac
+}
+
+main "$@"

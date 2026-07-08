@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly OPS drift gate
+
+[Timer]
+OnCalendar=*-*-* 03:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

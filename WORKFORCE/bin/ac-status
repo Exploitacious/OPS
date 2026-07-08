@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# ac-status — snapshot of multi-agent state.
+#
+# Usage:
+#   ac-status              # default: agents + tasks + recent log
+#   ac-status --json       # JSON-friendly dump (no markdown)
+#   ac-status --log N      # last N log lines (default 10)
+#   ac-status --inbox      # show every agent's inbox count + operator inbox listing
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+RUNTIME="$AC_ROOT/runtime"
+MANIFEST="$RUNTIME/manifest.d"
+PULSE="$RUNTIME/pulse"
+TASKS="$RUNTIME/tasks"
+LOG="$RUNTIME/log.jsonl"
+
+LOGN=10
+MODE="text"
+INBOX=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)  MODE="json"; shift ;;
+    --log)   LOGN="${2:-10}"; shift 2 ;;
+    --inbox) INBOX=1; shift ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    *) echo "unknown: $1" >&2; exit 1 ;;
+  esac
+done
+
+get_field() {
+  local f="$1" k="$2"
+  { grep -oE "\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$f" 2>/dev/null || true; } \
+    | head -1 | sed -E 's/.*"([^"]*)"$/\1/'
+}
+
+print_agents() {
+  shopt -s nullglob
+  local f any=0
+  for f in "$MANIFEST"/*.json; do
+    [[ "$(basename "$f")" == _coordinator.json ]] && continue
+    local n role scope status last task
+    role="$(get_field "$f" role)"
+    [[ "$role" == "coordinator" ]] && continue
+    any=1
+    n="$(get_field "$f" name)"
+    scope="$(get_field "$f" scope_tag)"
+    status="$(get_field "$f" status)"
+    last="$(get_field "$f" last_seen)"
+    task="$(get_field "$f" current_task)"
+    printf '  %-12s [%-6s] status=%-15s task=%-30s last=%s\n' \
+      "$n" "$scope" "$status" "${task:-—}" "$last"
+  done
+  if (( any == 0 )); then echo "  (no agents registered)"; fi
+}
+
+print_coord() {
+  local f="$MANIFEST/_coordinator.json"
+  if [[ -f "$f" ]]; then
+    local n status last
+    n="$(get_field "$f" name)"
+    status="$(get_field "$f" status)"
+    last="$(get_field "$f" last_seen)"
+    printf '  %-12s status=%-12s last=%s\n' "$n" "$status" "$last"
+  else
+    echo "  (no coordinator active)"
+  fi
+}
+
+print_tasks() {
+  shopt -s nullglob
+  local t any=0
+  for t in "$TASKS"/*.md; do
+    any=1
+    local id status assignee
+    id="$(basename "$t" .md)"
+    status="$(awk '/^---/{f++; next} f==1 && /^status:/ {print $2; exit}' "$t")"
+    assignee="$(awk '/^---/{f++; next} f==1 && /^assignee:/ {print $2; exit}' "$t")"
+    printf '  %-50s status=%-18s assignee=%s\n' "$id" "${status:-?}" "${assignee:-—}"
+  done
+  if (( any == 0 )); then echo "  (no open tasks)"; fi
+}
+
+print_inbox() {
+  shopt -s nullglob
+  local d
+  for d in "$RUNTIME"/inbox/*/; do
+    local who count
+    who="$(basename "$d")"
+    count=$(ls -1 "$d" 2>/dev/null | wc -l)
+    printf '  %-12s %d pending\n' "$who" "$count"
+  done
+  if [[ -d "$RUNTIME/inbox/operator" ]]; then
+    echo
+    echo '  operator inbox (most recent first):'
+    { ls -1t "$RUNTIME/inbox/operator/" 2>/dev/null || true; } | head -5 | sed 's/^/    /' || true
+  fi
+}
+
+if [[ "$MODE" == "json" ]]; then
+  printf '{"manifest_files":['
+  shopt -s nullglob
+  local_sep=""
+  for f in "$MANIFEST"/*.json; do
+    printf '%s' "$local_sep"
+    cat "$f"
+    local_sep=","
+  done
+  printf '],"pulse_files":['
+  local_sep=""
+  for f in "$PULSE"/*.json; do
+    printf '%s' "$local_sep"
+    cat "$f"
+    local_sep=","
+  done
+  printf ']}\n'
+  exit 0
+fi
+
+echo "=== OPS Agent Status ==="
+echo "Root: $AC_ROOT"
+echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo
+echo "Coordinator:"
+print_coord
+echo
+echo "Agents:"
+print_agents
+echo
+echo "Open tasks:"
+print_tasks
+
+if (( INBOX )); then
+  echo
+  echo "Inboxes:"
+  print_inbox
+fi
+
+echo
+echo "Recent log ($LOGN lines):"
+if [[ -f "$LOG" ]] && [[ -s "$LOG" ]]; then
+  tail -n "$LOGN" "$LOG" | sed 's/^/  /' || true
+else
+  echo "  (log empty)"
+fi

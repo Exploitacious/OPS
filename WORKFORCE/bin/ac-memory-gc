@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# ac-memory-gc — read-only inventory + GC report for the auto-memory pools in
+# the OPS store. NEVER deletes or moves anything: it reports each pool's
+# size / age / health and STAGES prune/archive candidates for the operator to
+# act on. Pairs with ac-memory-init (creates + syncs a pool per git repo) and
+# ac-memory-index (regenerates MEMORY.md).
+#
+# Why: under the per-project launch model a memory pool forms per git repo.
+# Over time pools accumulate — some go STALE (retired projects), some stay
+# EMPTY (created-never-used), some bloat OVER the index limit. This surfaces
+# all three BEFORE they become a problem, without ever touching content
+# (deletes/archives stay operator-gated per the never-delete-without-approval
+# standing rule).
+#
+# Staleness is measured from the newest CONTENT file mtime, NOT MEMORY.md —
+# MEMORY.md is regenerated every session, so its mtime would make every pool
+# look active. A pool with only a MEMORY.md (no content files) is EMPTY.
+#
+# Usage:
+#   ac-memory-gc                  # table + summary + staged candidates
+#   ac-memory-gc --days N         # staleness threshold in days (default 90)
+#   ac-memory-gc --limit B        # index-size limit in bytes (default 24576)
+#   ac-memory-gc --store DIR      # pool store (default ~/OPS/.claude-memory)
+#   ac-memory-gc --candidates     # print only the staged candidate lists
+#   ac-memory-gc --help
+#
+# Read-only. Exit 0 always (a report, never a gate).
+
+set -uo pipefail
+
+STORE="${OPS_DIR:-$HOME/OPS}/.claude-memory"
+STALE_DAYS=90
+LIMIT=24576
+CANDIDATES_ONLY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days)       STALE_DAYS="$2"; shift 2 ;;
+    --limit)      LIMIT="$2"; shift 2 ;;
+    --store)      STORE="$2"; shift 2 ;;
+    --candidates) CANDIDATES_ONLY=1; shift ;;
+    -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "ac-memory-gc: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -d "$STORE" ]] || { echo "ac-memory-gc: store not found: $STORE" >&2; exit 0; }
+
+# Colors only when writing to a terminal.
+if [ -t 1 ]; then
+  RST=$'\033[0m'; D=$'\033[2m'; GRN=$'\033[38;5;78m'; YEL=$'\033[38;5;220m'
+  RED=$'\033[38;5;196m'; CYN=$'\033[38;5;117m'; B=$'\033[1m'
+else
+  RST=''; D=''; GRN=''; YEL=''; RED=''; CYN=''; B=''
+fi
+
+# Portable mtime (epoch seconds): GNU stat, then BSD stat.
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
+human_bytes() {
+  local b=$1
+  if   [ "$b" -ge 1048576 ]; then awk "BEGIN{printf \"%.1fMB\", $b/1048576}"
+  elif [ "$b" -ge 1024 ];    then awk "BEGIN{printf \"%.1fKB\", $b/1024}"
+  else echo "${b}B"; fi
+}
+
+human_age() {  # seconds -> "2d" / "3h" / "<1h"
+  local s=$1; [ "$s" -lt 0 ] 2>/dev/null && s=0
+  local d=$(( s / 86400 )) h=$(( (s % 86400) / 3600 ))
+  if   [ "$d" -gt 0 ]; then echo "${d}d"
+  elif [ "$h" -gt 0 ]; then echo "${h}h"
+  else echo "<1h"; fi
+}
+
+NOW=$(date +%s 2>/dev/null || echo 0)
+STALE_SECS=$(( STALE_DAYS * 86400 ))
+
+# Assign empty arrays (not just `declare -a`): under `set -u`, ${#arr[@]} on a
+# declared-but-never-assigned array throws "unbound variable" in some bash.
+OVER_LIST=(); EMPTY_LIST=(); STALE_LIST=()
+n_pools=0 n_over=0 n_empty=0 n_stale=0 n_ok=0
+
+if [ "$CANDIDATES_ONLY" -eq 0 ]; then
+  printf '%s\n' "${B}ac-memory-gc${RST} ${D}— auto-memory pool inventory (read-only)${RST}"
+  printf '%s\n' "${D}store: ${STORE}   ·   index limit: ${LIMIT}B   ·   stale: >${STALE_DAYS}d${RST}"
+  echo
+  printf '%-50s %7s %9s %8s  %s\n' "POOL" "ENTRIES" "INDEX" "NEWEST" "STATUS"
+  printf '%s\n' "${D}$(printf '%.0s─' {1..92})${RST}"
+fi
+
+# Iterate pool directories in the store (skip top-level files like README.md).
+shopt -s nullglob
+for d in "$STORE"/*/; do
+  [[ -d "$d" ]] || continue
+  pool=$(basename "$d")
+  n_pools=$(( n_pools + 1 ))
+
+  # Content files = *.md except MEMORY.md. Track count + newest mtime.
+  entries=0; newest=0
+  for f in "$d"*.md; do
+    [[ -e "$f" ]] || continue
+    [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
+    entries=$(( entries + 1 ))
+    m=$(mtime "$f"); [ "$m" -gt "$newest" ] 2>/dev/null && newest="$m"
+  done
+
+  idx_bytes=0
+  [[ -f "${d}MEMORY.md" ]] && idx_bytes=$(wc -c < "${d}MEMORY.md" 2>/dev/null | tr -d ' ')
+  : "${idx_bytes:=0}"
+
+  # Classify (priority: empty > over-limit > stale > ok).
+  age_secs=$(( NOW - newest ))
+  if [ "$entries" -eq 0 ]; then
+    status="EMPTY"; sc="$D"; age_disp="-"; EMPTY_LIST+=("$pool"); n_empty=$(( n_empty + 1 ))
+  else
+    age_disp=$(human_age "$age_secs")
+    if [ "$idx_bytes" -gt "$LIMIT" ]; then
+      status="OVER-LIMIT"; sc="$RED"; OVER_LIST+=("$pool"); n_over=$(( n_over + 1 ))
+    elif [ "$newest" -gt 0 ] && [ "$age_secs" -gt "$STALE_SECS" ]; then
+      status="STALE"; sc="$YEL"; STALE_LIST+=("$pool"); n_stale=$(( n_stale + 1 ))
+    else
+      status="ok"; sc="$GRN"; n_ok=$(( n_ok + 1 ))
+    fi
+  fi
+
+  if [ "$CANDIDATES_ONLY" -eq 0 ]; then
+    # Truncate long pool names with an ellipsis to keep the column aligned.
+    disp="$pool"; [ "${#disp}" -gt 49 ] && disp="${disp:0:46}..."
+    printf '%-50s %7s %9s %8s  %b%s%b\n' \
+      "$disp" "$entries" "$(human_bytes "$idx_bytes")" "$age_disp" "$sc" "$status" "$RST"
+  fi
+done
+shopt -u nullglob
+
+echo
+printf '%s\n' "${B}Summary:${RST} ${n_pools} pools · ${RED}${n_over} over-limit${RST} · ${D}${n_empty} empty${RST} · ${YEL}${n_stale} stale${RST} · ${GRN}${n_ok} ok${RST}"
+
+emit_list() {  # $1=label $2=action ; rest=items
+  local label="$1" action="$2"; shift 2
+  [ "$#" -eq 0 ] && return 0
+  printf '  %s%s%s (%s):\n' "$B" "$label" "$RST" "$action"
+  local p; for p in "$@"; do printf '    - %s\n' "$p"; done
+}
+
+if [ $(( n_over + n_empty + n_stale )) -gt 0 ]; then
+  echo
+  printf '%s\n' "${B}Candidates${RST} ${D}— STAGED ONLY; this tool never deletes. Act with operator approval.${RST}"
+  [ "${#OVER_LIST[@]}"  -gt 0 ] && emit_list "over-limit" "run the memory-prune skill on this pool (fold→repo docs, delete stale, trim index)" "${OVER_LIST[@]}"
+  [ "${#EMPTY_LIST[@]}" -gt 0 ] && emit_list "empty"      "created-never-used — safe to rmdir once confirmed unused" "${EMPTY_LIST[@]}"
+  [ "${#STALE_LIST[@]}" -gt 0 ] && emit_list "stale"      "no content writes in >${STALE_DAYS}d — review; archive to .claude-memory/_archive/ if the project is retired" "${STALE_LIST[@]}"
+fi
+exit 0

@@ -1,0 +1,6 @@
+[Unit]
+Description=OPS drift gate (verify-ops.sh) — nightly report for session-briefing
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'mkdir -p %h/.local/state/ops && %h/OPS/.claude-config/bin/verify-ops.sh > %h/.local/state/ops/verify-last.txt 2>&1; exit 0'

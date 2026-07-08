@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+# ac-memory-index — regenerate a memory directory's MEMORY.md index from
+# the per-file frontmatter.
+#
+# MEMORY.md is a GENERATED artifact, never hand-edited. Each memory file
+# carries `title` + `description` in its `---`-delimited frontmatter; this
+# tool scans <DIR>/*.md (skipping MEMORY.md), reads each file's frontmatter,
+# and emits one index line per file:
+#
+#     - [title](filename.md) — description
+#
+# Why generated: the index was previously hand-maintained — every memory
+# write appended a line by hand. Cross-machine sync (additive `cp` + git)
+# clobbers a hand-maintained index because nothing keeps it equal to the
+# set of files actually present. Deriving it from frontmatter ends that
+# clobber class (see WORKFORCE/protocol/lessons/2026-06-25__memory-index-generated.md
+# and the MEMORY.md-format decision in 2026-05-13__memory-sync-doctrine.md).
+#
+# Profile-agnostic: this operates on whatever directory it's pointed at —
+# your primary ~/.claude profile, or a second profile if you run one via
+# CLAUDE_CONFIG_DIR, all wired to the same OPS store. The memory-index.sh
+# SessionStart hook resolves the active dir per profile and calls this.
+#
+# Frontmatter is parsed BY HAND (no PyYAML dependency — it isn't guaranteed
+# installed). Only the simple top-level `title:`/`description:`/`name:` keys
+# and the nested `metadata.type:` key are read; both quoted and unquoted
+# scalar values are supported.
+#
+# Ordering (documented + stable): files are grouped by `metadata.type` in a
+# fixed precedence (project, feedback, reference, then any other type
+# alphabetically), and within each group sorted by title (case-insensitive).
+# Files lacking a type sort last. This is deterministic regardless of
+# filesystem order, so the output is reproducible across machines.
+#
+# Usage:
+#   ac-memory-index <DIR>            # rewrite <DIR>/MEMORY.md in place
+#   ac-memory-index --check <DIR>    # print generated index to stdout; write nothing
+#   ac-memory-index -h | --help
+#
+# Exit codes:
+#   0 — success (index written, or --check printed)
+#   1 — error (bad args, unreadable dir)
+#   2 — at least one file could not contribute a line (missing title AND
+#       no derivable fallback). The index is still emitted/written for the
+#       files that are fine; the offenders are reported on stderr. Lets a
+#       caller detect "backfill needed" without losing good lines.
+
+import os
+import re
+import sys
+import tempfile
+
+USAGE = "usage: ac-memory-index [--check] <DIR>"
+
+# Fixed type precedence for grouping. Anything not listed sorts after these
+# (alphabetically by type), and type-less files sort dead last.
+TYPE_ORDER = {"project": 0, "feedback": 1, "reference": 2}
+
+
+def kebab_to_title(name):
+    """Derive a Title Case label from a kebab/snake-case file stem.
+
+    Used only as a fallback when a file has no `title:` and no MEMORY.md
+    line to backfill from. e.g. 'feedback-avoid-flaky-retries' ->
+    'Feedback Avoid Flaky Retries'.
+    """
+    words = re.split(r"[-_]+", name.strip())
+    return " ".join(w[:1].upper() + w[1:] for w in words if w)
+
+
+def parse_frontmatter(path):
+    """Parse the leading `---`-delimited frontmatter block by hand.
+
+    Returns a dict with keys: title, description, name, type (any may be
+    None / absent). Does NOT depend on PyYAML. Handles:
+      - top-level `key: value` scalars (title, description, name)
+      - the nested `metadata:` map's `type:` child (two-space indent)
+      - single- or double-quoted values (quotes stripped)
+    Only the first frontmatter block is read; the file body is ignored.
+    """
+    out = {"title": None, "description": None, "name": None, "type": None}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return out
+
+    if not lines or lines[0].strip() != "---":
+        return out  # no frontmatter
+
+    # Collect frontmatter lines (between the first pair of `---`).
+    fm = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        fm.append(line)
+
+    in_metadata = False
+    for line in fm:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        # Indented line -> child of the most recent map key (we only care
+        # about metadata.type, which is indented under `metadata:`).
+        indented = line[0] in (" ", "\t")
+        m = re.match(r"^(\s*)([A-Za-z0-9_.-]+):\s*(.*)$", line)
+        if not m:
+            continue
+        indent, key, raw = m.group(1), m.group(2), m.group(3)
+        val = _strip_scalar(raw)
+
+        if not indent:
+            # Top-level key.
+            in_metadata = key == "metadata"
+            if key == "title":
+                out["title"] = val or None
+            elif key == "description":
+                out["description"] = val or None
+            elif key == "name":
+                out["name"] = val or None
+        else:
+            # Nested key. Only metadata.type is consumed.
+            if in_metadata and key == "type":
+                out["type"] = val or None
+            # A nested non-metadata block resets the flag only if we hit a
+            # new top-level key, handled above. Stay in_metadata otherwise.
+        # If we encounter a top-level key other than metadata, the indented
+        # branch above won't fire for it; in_metadata already updated.
+    return out
+
+
+def _strip_scalar(raw):
+    """Strip surrounding quotes and reverse the standard YAML escaping.
+
+    - Double-quoted: unescape `\\"` -> `"` and `\\\\` -> `\\`.
+    - Single-quoted: unescape `''` -> `'`.
+    - Bare scalar: returned as-is (trimmed).
+
+    This MUST be the exact inverse of how the backfill writes scalars, so a
+    title/description round-trips losslessly through frontmatter -> index.
+    """
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] == '"':
+        inner = v[1:-1]
+        out = []
+        i = 0
+        while i < len(inner):
+            c = inner[i]
+            if c == "\\" and i + 1 < len(inner) and inner[i + 1] in ('"', "\\"):
+                out.append(inner[i + 1])
+                i += 2
+            else:
+                out.append(c)
+                i += 1
+        return "".join(out)
+    if len(v) >= 2 and v[0] == v[-1] == "'":
+        return v[1:-1].replace("''", "'")
+    return v
+
+
+def build_lines(directory):
+    """Return (lines, problems).
+
+    lines: the ordered list of formatted index lines.
+    problems: list of (filename, reason) for files that could not yield a
+              proper line (no title and only a kebab fallback, or no
+              description). These are still emitted (best-effort) but
+              flagged so a caller knows backfill is needed.
+    """
+    entries = []
+    problems = []
+
+    names = sorted(
+        f
+        for f in os.listdir(directory)
+        if f.endswith(".md") and f != "MEMORY.md"
+    )
+
+    for fn in names:
+        path = os.path.join(directory, fn)
+        fm = parse_frontmatter(path)
+        title = fm["title"]
+        desc = fm["description"]
+        typ = fm["type"]
+
+        if not title:
+            title = kebab_to_title(fn[:-3])  # strip ".md"
+            problems.append((fn, "missing title: (used kebab fallback)"))
+        if not desc:
+            desc = ""
+            problems.append((fn, "missing description:"))
+
+        entries.append((typ, title, fn, desc))
+
+    # Stable ordering: type precedence, then title (case-insensitive), then
+    # filename as a final tiebreak.
+    def sort_key(e):
+        typ, title, fn, _desc = e
+        if typ is None:
+            tprec = (1, "")  # type-less sorts after all typed groups
+        else:
+            tprec = (0, str(TYPE_ORDER.get(typ, 99)).zfill(3) + typ)
+        return (tprec, title.lower(), fn)
+
+    entries.sort(key=sort_key)
+
+    lines = []
+    for _typ, title, fn, desc in entries:
+        if desc:
+            lines.append(f"- [{title}]({fn}) — {desc}")
+        else:
+            lines.append(f"- [{title}]({fn})")
+    return lines, problems
+
+
+def main(argv):
+    check = False
+    directory = None
+    for arg in argv[1:]:
+        if arg in ("-h", "--help"):
+            print(USAGE)
+            print("  --check   print the generated index to stdout; write nothing")
+            return 0
+        elif arg == "--check":
+            check = True
+        elif arg.startswith("-"):
+            sys.stderr.write(f"ac-memory-index: unknown flag: {arg}\n{USAGE}\n")
+            return 1
+        elif directory is None:
+            directory = arg
+        else:
+            sys.stderr.write(f"ac-memory-index: unexpected arg: {arg}\n{USAGE}\n")
+            return 1
+
+    if directory is None:
+        sys.stderr.write(USAGE + "\n")
+        return 1
+    if not os.path.isdir(directory):
+        sys.stderr.write(f"ac-memory-index: not a directory: {directory}\n")
+        return 1
+
+    lines, problems = build_lines(directory)
+    content = "\n".join(lines) + ("\n" if lines else "")
+
+    if check:
+        sys.stdout.write(content)
+    else:
+        target = os.path.join(directory, "MEMORY.md")
+        # Atomic write (WS-5 regen-race fix). Two SessionStart hooks from
+        # parallel sessions sharing this memory dir (e.g. both launched from
+        # ~/OPS) can regenerate MEMORY.md concurrently. A plain
+        # open(target, "w") truncates first, so a reader — or the other writer
+        # — can observe a half-written or empty index. Write a unique temp file
+        # in the SAME directory (so os.replace stays on one filesystem and is
+        # atomic on POSIX), then replace MEMORY.md with it: every observer sees
+        # either the old file or a complete new one, never a torn one. The
+        # index is a pure function of the memory files, so last-writer-wins is
+        # harmless — concurrent writers emit identical bytes.
+        fd, tmp = tempfile.mkstemp(prefix=".MEMORY.md.", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        sys.stderr.write(
+            f"[ac-memory-index] wrote {len(lines)} line(s) -> {target}\n"
+        )
+
+    if problems:
+        sys.stderr.write(
+            f"[ac-memory-index] {len(problems)} file(s) need backfill:\n"
+        )
+        for fn, reason in problems:
+            sys.stderr.write(f"  - {fn}: {reason}\n")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

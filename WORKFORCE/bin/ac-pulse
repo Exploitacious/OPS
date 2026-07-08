@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# ac-pulse — heartbeat update for your agent / coordinator.
+#
+# Usage:
+#   ac-pulse                                       # touch last_seen only
+#   ac-pulse --status working --task <id>          # update fields
+#   ac-pulse --status blocked --blocked-on "<list>"
+#   ac-pulse --status idle
+#   ac-pulse --branch <name> --repo <name>
+#   ac-pulse --notes "<free-form>"
+#   ac-pulse --show                                # cat current pulse
+#
+# Env: AC_NAME (required) — your agent name.
+#
+# Atomic: writes via tmp + rename. Also mirrors status + last_seen
+# into manifest.d/<name>.json so a single update keeps both in sync.
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  echo "  If unsure which project, ask Coordinator before running fleet ops." >&2
+  exit 1
+fi
+RUNTIME="$AC_ROOT/runtime"
+PULSE="$RUNTIME/pulse"
+MANIFEST="$RUNTIME/manifest.d"
+TMP="$RUNTIME/tmp"
+LOG="$RUNTIME/log.jsonl"
+COORD_SLOT="$MANIFEST/_coordinator.json"
+
+die() { echo "ac-pulse: $*" >&2; exit 1; }
+ts_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+NAME="${AC_NAME:-}"
+[[ -z "$NAME" ]] && die "AC_NAME not set"
+
+PF="$PULSE/${NAME}.json"
+MF="$MANIFEST/${NAME}.json"
+
+# bound_root validation: env AC_ROOT must match what was captured at
+# ac-register. Catches cross-project AC_ROOT drift in long sessions.
+# Legacy manifests without bound_root field pass through (no validation).
+if [[ -f "$MF" ]]; then
+  BOUND=$({ grep -oE '"bound_root"[[:space:]]*:[[:space:]]*"[^"]*"' "$MF" || true; } \
+          | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  if [[ -n "$BOUND" && "$BOUND" != "$AC_ROOT" ]]; then
+    die "wrong project. $NAME registered with AC_ROOT=$BOUND, env says AC_ROOT=$AC_ROOT. Re-export or re-register."
+  fi
+fi
+
+SHOW=0
+declare -A UP=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --show)       SHOW=1; shift ;;
+    --status)     UP[status]="$2"; shift 2 ;;
+    --task)       UP[current_task]="$2"; shift 2 ;;
+    --repo)       UP[current_repo]="$2"; shift 2 ;;
+    --branch)     UP[current_branch]="$2"; shift 2 ;;
+    --blocked-on) UP[blocked_on]="$2"; shift 2 ;;
+    --notes)      UP[notes]="$2"; shift 2 ;;
+    -h|--help)    sed -n '2,15p' "$0"; exit 0 ;;
+    *) die "unknown: $1" ;;
+  esac
+done
+
+if (( SHOW )); then
+  [[ -f "$PF" ]] || die "no pulse for $NAME"
+  cat "$PF"
+  exit 0
+fi
+
+if [[ ! -f "$PF" ]]; then
+  # Cross-project probe: maybe $NAME is registered under a DIFFERENT project.
+  AC_FLEET_PROBE="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+  if [[ -d "$AC_FLEET_PROBE/FLEETPROJECTS" ]]; then
+    other=$(find "$AC_FLEET_PROBE/FLEETPROJECTS" -maxdepth 4 -name "${NAME}.json" -path '*/manifest.d/*' 2>/dev/null | head -1)
+    if [[ -n "$other" ]]; then
+      bound_other=$({ grep -oE '"bound_root"[[:space:]]*:[[:space:]]*"[^"]*"' "$other" || true; } | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+      die "wrong project. $NAME is registered at $other (bound_root=${bound_other:-<legacy-no-bound>}). AC_ROOT env=$AC_ROOT. Re-export or re-register."
+    fi
+  fi
+  die "no pulse for $NAME — run ac-register first"
+fi
+
+NOW="$(ts_iso)"
+UP[last_seen]="$NOW"
+
+# Status ↔ current_task consistency validator (added 2026-05-13).
+# Catches the protocol drift Captain showed pre-recovery:
+# pulse status=ready but current_task=supervise-bravo+deliverables-draft.
+# Either you're ready (idle, no task) or you're working/blocked (task set).
+# This check fires only when BOTH status and current_task are being set
+# in the same invocation — partial updates against existing state pass
+# through unchanged (existing inconsistency isn't auto-rewritten).
+if [[ -n "${UP[status]:-}" ]] && [[ -n "${UP[current_task]:-}" || -n "${UP[blocked_on]:-}" ]]; then
+  case "${UP[status]}" in
+    ready|idle)
+      if [[ -n "${UP[current_task]:-}" && "${UP[current_task]}" != "null" ]]; then
+        die "inconsistency: status=${UP[status]} with current_task=${UP[current_task]}. Use --status working|blocked, or omit --task."
+      fi
+      ;;
+    working|blocked)
+      if [[ -z "${UP[current_task]:-}" || "${UP[current_task]}" == "null" ]]; then
+        # blocked with blocked_on but no task is OK (transient supervisory state)
+        if [[ "${UP[status]}" == "working" && -z "${UP[current_task]:-}" ]]; then
+          die "inconsistency: status=working requires --task <id>."
+        fi
+      fi
+      ;;
+  esac
+fi
+
+# --- In-place JSON patch ---
+# Prefer jq (correct JSON semantics, handles any UTF-8 + special chars).
+# Fall back to sed for the rare host without jq, but only if --notes is
+# absent (sed can't safely handle free-form text — corruption risk via
+# `&`, newlines, regex metachars).
+TMPF="$TMP/${NAME}.pulse.json"
+
+if command -v jq >/dev/null 2>&1; then
+  JQ_ARGS=()
+  JQ_FILTER='.'
+  for k in "${!UP[@]}"; do
+    v="${UP[$k]}"
+    if [[ "$k" == "blocked_on" ]]; then
+      if [[ -n "$v" ]]; then
+        # Comma-list → JSON array via jq's split.
+        JQ_ARGS+=(--arg blocked_on_csv "$v")
+        JQ_FILTER+=" | .blocked_on = (\$blocked_on_csv | split(\",\"))"
+      else
+        JQ_FILTER+=" | .blocked_on = []"
+      fi
+    else
+      JQ_ARGS+=(--arg "$k" "$v")
+      JQ_FILTER+=" | .${k} = \$${k}"
+    fi
+  done
+  if ! jq "${JQ_ARGS[@]}" "$JQ_FILTER" "$PF" > "$TMPF"; then
+    die "jq patch failed against $PF"
+  fi
+else
+  # Sed fallback. Refuse free-form notes — too risky to escape correctly
+  # across all sed implementations.
+  if [[ -n "${UP[notes]:-}" ]]; then
+    die "jq not installed and --notes contains free-form text. Install jq (apt/dnf/pacman install jq) or omit --notes."
+  fi
+  SED_CMDS=()
+  for k in "${!UP[@]}"; do
+    v="${UP[$k]}"
+    if [[ "$k" == "blocked_on" ]]; then
+      arr="[]"
+      if [[ -n "$v" ]]; then
+        IFS=',' read -ra parts <<< "$v"
+        arr=$(printf '"%s",' "${parts[@]}")
+        arr="[${arr%,}]"
+      fi
+      SED_CMDS+=(-e "s|\"$k\"[[:space:]]*:[[:space:]]*\[[^]]*\]|\"$k\": $arr|")
+    else
+      # Strict alphanumeric+safe-punctuation guard for short fields
+      # (status, task ids, repos, branches). Reject anything else.
+      if [[ ! "$v" =~ ^[A-Za-z0-9._/+@:#-]*$ ]]; then
+        die "jq not installed and value for '$k' contains chars that the sed fallback can't safely escape. Install jq."
+      fi
+      SED_CMDS+=(-e "s|\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"$k\": \"$v\"|")
+      SED_CMDS+=(-e "s|\"$k\"[[:space:]]*:[[:space:]]*null|\"$k\": \"$v\"|")
+    fi
+  done
+  sed "${SED_CMDS[@]}" "$PF" > "$TMPF"
+fi
+mv -- "$TMPF" "$PF"
+
+# Mirror status + last_seen into manifest entry too.
+if [[ -f "$MF" ]]; then
+  TMPM="$TMP/${NAME}.manifest.json"
+  if command -v jq >/dev/null 2>&1; then
+    JQ_ARGS=(--arg last_seen "$NOW")
+    JQ_FILTER='.last_seen = $last_seen'
+    [[ -n "${UP[status]:-}" ]]       && { JQ_ARGS+=(--arg status       "${UP[status]}");       JQ_FILTER+=" | .status = \$status"; }
+    [[ -n "${UP[current_task]:-}" ]] && { JQ_ARGS+=(--arg current_task "${UP[current_task]}"); JQ_FILTER+=" | .current_task = \$current_task"; }
+    jq "${JQ_ARGS[@]}" "$JQ_FILTER" "$MF" > "$TMPM" || die "jq mirror failed"
+  else
+    MIRROR=()
+    [[ -n "${UP[status]:-}" ]] && {
+      MIRROR+=(-e "s|\"status\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"status\": \"${UP[status]}\"|")
+    }
+    MIRROR+=(-e "s|\"last_seen\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"last_seen\": \"$NOW\"|")
+    [[ -n "${UP[current_task]:-}" ]] && {
+      MIRROR+=(-e "s|\"current_task\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"current_task\": \"${UP[current_task]}\"|")
+      MIRROR+=(-e "s|\"current_task\"[[:space:]]*:[[:space:]]*null|\"current_task\": \"${UP[current_task]}\"|")
+    }
+    sed "${MIRROR[@]}" "$MF" > "$TMPM"
+  fi
+  mv -- "$TMPM" "$MF"
+
+  # If we are the active coordinator, mirror last_seen into the coord slot.
+  # Fix: prevent _coordinator.json staleness while Captain.json keeps pulsing.
+  if [[ -f "$COORD_SLOT" ]]; then
+    COORD_NAME=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$COORD_SLOT" 2>/dev/null \
+                 | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+    if [[ "$COORD_NAME" == "$NAME" ]]; then
+      TMPC="$TMP/_coordinator.json"
+      if command -v jq >/dev/null 2>&1; then
+        jq --arg last_seen "$NOW" '.last_seen = $last_seen' "$COORD_SLOT" > "$TMPC" || die "jq coord-slot mirror failed"
+      else
+        sed -E "s|\"last_seen\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"last_seen\": \"$NOW\"|" "$COORD_SLOT" > "$TMPC"
+      fi
+      mv -- "$TMPC" "$COORD_SLOT"
+    fi
+  fi
+fi
+
+# Log only meaningful status transitions, not bare heartbeats.
+if [[ -n "${UP[status]:-}" ]]; then
+  line=$(printf '{"ts":"%s","actor":"%s","event":"pulse","status":"%s"}' \
+    "$NOW" "$NAME" "${UP[status]}")
+  if command -v flock >/dev/null 2>&1; then
+    ( flock 9; printf '%s\n' "$line" >> "$LOG" ) 9>>"$LOG"
+  else
+    printf '%s\n' "$line" >> "$LOG"
+  fi
+fi
+
+echo "pulsed: $NAME @ $NOW${UP[status]:+ status=${UP[status]}}"

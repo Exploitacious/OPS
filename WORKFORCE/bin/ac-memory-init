@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+# ac-memory-init — initialize Claude Code auto-memory git-sync on this machine.
+#
+# Walks ~/.claude/projects/<encoded>/memory/ for ALL encoded cwd subdirs
+# Claude Code has created on this machine, moves each into
+# ~/OPS/.claude-memory/<hostname>-<encoded>/, and symlinks the original
+# path to the new target. Idempotent: safe to re-run on a machine that's
+# already set up.
+#
+# Why all encoded subdirs (not just $HOME): Claude Code creates a separate
+# memory dir per cwd. A session started from ~/OPS has memory at
+# `-home-<user>-OPS`, a root session at `-root`, etc. Without walking
+# all of them, only the $HOME-cwd memory was git-tracked.
+#
+# Per doctrine 2026-05-13__memory-sync-doctrine.md (Option A: drafts
+# graduate to CONTEXT/). Linux/WSL/macOS only. Windows uses .ps1.
+#
+# Usage:
+#   ac-memory-init                    # walk all encoded subdirs (default)
+#   ac-memory-init --only-home        # legacy: only $HOME-encoded path
+#   ac-memory-init --hostname <name>  # override the host key
+#   ac-memory-init --migrate-host-key # rename a generic-host dir (e.g.
+#                                       workspace-*) to the stable machine-id
+#                                       key; default runs ADOPT existing dirs
+#   ac-memory-init --dry-run          # show what would happen
+#   ac-memory-init --auto-commit      # after each successful init, stage +
+#                                       commit + push the new memory subdir
+#   ac-memory-init --help
+#
+# Exit codes:
+#   0 — success (already initialized OR initialized just now)
+#   1 — error (permissions, conflicting state, etc.)
+#   2 — gitignore conflict for $HOME-encoded path (fatal; others are skipped)
+
+set -euo pipefail
+
+OPS_ROOT="${OPS_DIR:-$HOME/OPS}"
+MEMORY_ROOT="$OPS_ROOT/.claude-memory"
+
+# Active Claude config dir. Defaults to ~/.claude; if you run a second
+# profile via CLAUDE_CONFIG_DIR, it wires its per-cwd memory symlinks to
+# the SAME shared OPS store below, so auto-memory is identical across
+# profiles.
+CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+HOSTNAME_OVERRIDE=""
+DRY=0
+AUTO_COMMIT=0
+ONLY_HOME=0
+MIGRATE_HOST_KEY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hostname)         HOSTNAME_OVERRIDE="$2"; shift 2 ;;
+    --dry-run)          DRY=1; shift ;;
+    --auto-commit)      AUTO_COMMIT=1; shift ;;
+    --only-home)        ONLY_HOME=1; shift ;;
+    --migrate-host-key) MIGRATE_HOST_KEY=1; shift ;;
+    -h|--help)
+      sed -n '2,30p' "$0"
+      exit 0
+      ;;
+    *) echo "ac-memory-init: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+die() { echo "ac-memory-init: $*" >&2; exit 1; }
+log() { echo "[ac-memory-init] $*"; }
+dry() { log "[dry-run] $*"; }
+
+# --- Host key (namespaces this machine's memory in the shared store) ---------
+# The key prefixes .claude-memory/<key>-<encoded>/, which is git-synced ACROSS
+# machines, so it must be STABLE and UNIQUE per machine. A generic hostname
+# like the cloud-default "workspace" collides if a second box shares it (both
+# map to workspace-<encoded>/ → cross-machine clobber). Resolution order:
+#   1. explicit --hostname override (always wins)
+#   2. a real, non-generic hostname (unchanged behavior — e.g. a named laptop)
+#   3. generic/empty hostname → a short, stable hash of the machine-id
+# Existing dirs are ADOPTED, not renamed, on a routine run (see init_one_encoded
+# adopt-existing guard); pass --migrate-host-key to actually rename a
+# stale-keyed dir (e.g. workspace-* -> m-*) to the derived key.
+GENERIC_HOSTS_RE='^(workspace|localhost|localhost\.localdomain|ubuntu|debian|kali|raspberrypi)?$'
+
+derive_machine_id() {
+  local mid=""
+  if [[ -r /etc/machine-id ]]; then
+    mid=$(cat /etc/machine-id 2>/dev/null)
+  elif [[ -r /var/lib/dbus/machine-id ]]; then
+    mid=$(cat /var/lib/dbus/machine-id 2>/dev/null)
+  fi
+  mid=$(echo "$mid" | tr -d '[:space:]')
+  if [[ -z "$mid" ]]; then
+    # No machine-id (some containers). Persist a generated id OUTSIDE the
+    # synced repo so it stays stable per machine across runs.
+    local idfile="$HOME/.config/ops/machine-id"
+    if [[ ! -s "$idfile" ]]; then
+      mkdir -p "$(dirname "$idfile")" 2>/dev/null || true
+      ( umask 077; head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' \
+          > "$idfile" ) 2>/dev/null || true
+    fi
+    mid=$(tr -d '[:space:]' < "$idfile" 2>/dev/null || true)
+  fi
+  [[ -n "$mid" ]] || die "could not derive a stable machine-id for the host key"
+  printf 'm-%s' "${mid:0:12}"
+}
+
+RAW_HOST="${HOSTNAME_OVERRIDE:-$(hostname 2>/dev/null || true)}"
+RAW_HOST=$(echo "$RAW_HOST" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+if [[ -n "$HOSTNAME_OVERRIDE" ]]; then
+  HOST="$RAW_HOST"
+elif [[ "$RAW_HOST" =~ $GENERIC_HOSTS_RE ]]; then
+  HOST="$(derive_machine_id)"
+  log "hostname '${RAW_HOST:-<empty>}' is generic — using stable machine-id key '$HOST'"
+else
+  HOST="$RAW_HOST"
+fi
+[[ -n "$HOST" ]] || die "could not determine a host key"
+
+HOME_ENCODED=$(echo "$HOME" | sed 's|/|-|g')
+[[ -n "$HOME_ENCODED" ]] || die "could not derive encoded home path"
+
+log "host:         $HOST"
+log "home-encoded: $HOME_ENCODED"
+log "mode:         $([ "$ONLY_HOME" -eq 1 ] && echo "only-home" || echo "all-cwds")"
+
+# Sanity: OPS present.
+[[ -d "$OPS_ROOT" ]] || die "OPS not found at $OPS_ROOT — clone the repo first"
+
+# --- init_one_encoded: process a single encoded cwd subdir -------------------
+# Args: $1 = encoded cwd dirname (e.g., "-home-master" or "-root")
+# Behavior depends on three cases at $HOME/.claude/projects/<encoded>/memory:
+#   case 1 — already a symlink (no-op or repoint to current target)
+#   case 2 — real directory with files (migrate + symlink)
+#   case 3 — doesn't exist:
+#             * if encoded == $HOME_ENCODED: create empty target + symlink
+#             * otherwise: skip (don't proliferate empty subdirs)
+# Returns 0 on success or "nothing to do", 1 on fatal error.
+init_one_encoded() {
+  local ENCODED="$1"
+  local TARGET="$MEMORY_ROOT/${HOST}${ENCODED}"
+  local TARGET_REL=".claude-memory/${HOST}${ENCODED}"
+  local SOURCE="$CLAUDE_CFG/projects/${ENCODED}/memory"
+  local SOURCE_PARENT
+  SOURCE_PARENT=$(dirname "$SOURCE")
+
+  log "[$ENCODED] target=$TARGET_REL"
+
+  # Adopt-existing host-key guard. On a routine run, if the symlink already
+  # points to a valid store dir for THIS encoded path under a GENERIC host key
+  # (e.g. an old "workspace-*" from before the machine-id switch), keep using
+  # it instead of silently migrating git-synced memory to the new key. Only
+  # generic keys are adopted — a real hostname or an already-migrated "m-*" dir
+  # is never touched. Pass --migrate-host-key to opt into the actual rename.
+  if (( ! MIGRATE_HOST_KEY )) && [[ -L "$SOURCE" ]]; then
+    local CUR CUR_BASE CUR_KEY
+    CUR=$(readlink -f "$SOURCE" 2>/dev/null || true)
+    CUR_BASE=$(basename "$CUR" 2>/dev/null || true)
+    CUR_KEY="${CUR_BASE%"${ENCODED}"}"   # strip encoded-cwd suffix -> host key
+    if [[ -n "$CUR" && -d "$CUR" \
+          && "$(dirname "$CUR")" == "$MEMORY_ROOT" \
+          && "$CUR_KEY" != "$CUR_BASE" \
+          && "$CUR_BASE" != "${HOST}${ENCODED}" \
+          && "$CUR_KEY" =~ $GENERIC_HOSTS_RE ]]; then
+      log "[$ENCODED] adopting existing generic-host dir '$CUR_BASE' (run --migrate-host-key to rename -> '${HOST}${ENCODED}')"
+      TARGET="$CUR"
+      TARGET_REL=".claude-memory/$CUR_BASE"
+    fi
+  fi
+
+  # gitignore check (per-path; non-fatal except for HOME)
+  if command -v git >/dev/null 2>&1; then
+    if (cd "$OPS_ROOT" && git check-ignore -q "${TARGET_REL}/MEMORY.md" 2>/dev/null); then
+      if [[ "$ENCODED" == "$HOME_ENCODED" ]]; then
+        echo "ac-memory-init: .gitignore excludes $TARGET (fatal for HOME path)" >&2
+        exit 2
+      else
+        log "[$ENCODED] .gitignore excludes target — skipping"
+        return 0
+      fi
+    fi
+  fi
+
+  if [[ -L "$SOURCE" ]]; then
+    # Case 1: symlink already in place.
+    local EXISTING TARGET_REAL
+    EXISTING=$(readlink -f "$SOURCE")
+    TARGET_REAL=$(readlink -f "$TARGET" 2>/dev/null || echo "$TARGET")
+    if [[ "$EXISTING" == "$TARGET_REAL" ]]; then
+      log "[$ENCODED] already initialized"
+    else
+      log "[$ENCODED] existing symlink points elsewhere: $EXISTING"
+      if (( DRY )); then
+        dry "[$ENCODED] would atomically repoint -> $TARGET"
+      else
+        mkdir -p "$TARGET"
+        if [[ -d "$EXISTING" && "$EXISTING" != "$TARGET_REAL" ]]; then
+          log "[$ENCODED] migrating files from $EXISTING -> $TARGET"
+          shopt -s dotglob nullglob
+          local f
+          for f in "$EXISTING"/*; do
+            mv -n -- "$f" "$TARGET/" || true
+          done
+          shopt -u dotglob nullglob
+          rmdir "$EXISTING" 2>/dev/null || log "[$ENCODED] old target not empty, leaving in place"
+        fi
+        ln -sfn "$TARGET" "$SOURCE"
+        log "[$ENCODED] symlink repointed"
+      fi
+    fi
+  elif [[ -d "$SOURCE" ]]; then
+    # Case 2: real directory — migrate.
+    log "[$ENCODED] source is real directory — migrating"
+    if (( DRY )); then
+      dry "[$ENCODED] would migrate $SOURCE -> $TARGET and symlink"
+    else
+      mkdir -p "$TARGET"
+      shopt -s dotglob nullglob
+      local moved=0 f
+      for f in "$SOURCE"/*; do
+        if [[ -e "$TARGET/$(basename "$f")" ]]; then
+          log "[$ENCODED] skip (already in target): $(basename "$f")"
+          continue
+        fi
+        mv -- "$f" "$TARGET/" && moved=$((moved+1))
+      done
+      shopt -u dotglob nullglob
+      log "[$ENCODED] moved $moved file(s)"
+      rmdir "$SOURCE" 2>/dev/null || {
+        log "[$ENCODED] source not empty after move — leaving in place + skipping symlink"
+        return 1
+      }
+      ln -s "$TARGET" "$SOURCE"
+      log "[$ENCODED] symlinked"
+    fi
+  else
+    # Case 3: no source. Only create-empty-and-symlink for HOME_ENCODED.
+    if [[ "$ENCODED" == "$HOME_ENCODED" ]]; then
+      log "[$ENCODED] no memory yet — creating empty target + symlink (HOME path)"
+      if (( DRY )); then
+        dry "[$ENCODED] would mkdir target + parent + ln -s"
+      else
+        mkdir -p "$TARGET"
+        mkdir -p "$SOURCE_PARENT"
+        ln -s "$TARGET" "$SOURCE"
+        log "[$ENCODED] symlinked (empty target ready)"
+      fi
+    else
+      log "[$ENCODED] no memory dir — skipping (not HOME path)"
+      return 0
+    fi
+  fi
+
+  # --- auto-commit for this encoded path ---
+  if (( AUTO_COMMIT )) && (( ! DRY )); then
+    if ! command -v git >/dev/null 2>&1; then
+      log "[$ENCODED] auto-commit: git missing, skipping"
+      return 0
+    fi
+    (
+      cd "$OPS_ROOT" || exit 1
+      local status_out
+      status_out=$(git status --porcelain "$TARGET_REL" 2>/dev/null || true)
+      if [[ -z "$status_out" ]]; then
+        log "[$ENCODED] auto-commit: nothing new — skipping"
+        exit 0
+      fi
+      log "[$ENCODED] auto-commit: staging $TARGET_REL"
+      if ! git add "$TARGET_REL" 2>/dev/null; then
+        log "[$ENCODED] auto-commit: git add failed — leaving untracked"
+        exit 0
+      fi
+      local commit_msg="feat(memory): seed .claude-memory/${HOST}${ENCODED}"
+      if git commit -m "$commit_msg" 2>/dev/null; then
+        log "[$ENCODED] auto-commit: committed"
+        if git push 2>/dev/null; then
+          log "[$ENCODED] auto-commit: pushed"
+        else
+          log "[$ENCODED] auto-commit: push failed — commit landed locally"
+        fi
+      else
+        log "[$ENCODED] auto-commit: commit failed (hook/signing?) — staged but uncommitted"
+      fi
+    )
+  fi
+
+  return 0
+}
+
+# --- Build the list of encoded subdirs to process ----------------------------
+declare -a ENCODED_LIST
+ENCODED_LIST=("$HOME_ENCODED")
+
+if (( ! ONLY_HOME )); then
+  if [[ -d "$CLAUDE_CFG/projects" ]]; then
+    shopt -s nullglob
+    for d in "$CLAUDE_CFG/projects/"*; do
+      [[ -d "$d" ]] || continue
+      local_enc=$(basename "$d")
+      [[ "$local_enc" == "$HOME_ENCODED" ]] && continue
+      # Only include if a memory entry (real dir or symlink) is present.
+      if [[ -d "$d/memory" || -L "$d/memory" ]]; then
+        ENCODED_LIST+=("$local_enc")
+      fi
+    done
+    shopt -u nullglob
+  fi
+fi
+
+log "processing ${#ENCODED_LIST[@]} encoded subdir(s): ${ENCODED_LIST[*]}"
+echo
+
+# --- Process each ----------------------------
+for enc in "${ENCODED_LIST[@]}"; do
+  init_one_encoded "$enc" || log "[$enc] non-fatal error — continuing with next"
+  echo
+done
+
+log "done"
+exit 0

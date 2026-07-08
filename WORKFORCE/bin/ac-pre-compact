@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# ac-pre-compact — refresh the RESUME ANCHOR before auto-compaction fires.
+#
+# Auto-compact triggers at 75% context usage by default. The
+# SessionStart hook surfaces re-anchor sources post-compact, but
+# anchor freshness depends on the journal's RESUME ANCHOR block
+# carrying the LATEST verbatim Operator direction. This script
+# rewrites the anchor so resume reads from current state, not
+# from whatever was true when the Coordinator last manually
+# updated it.
+#
+# Run when context > 65% (CLI statusLine surfaces this). Also
+# safe to run on a normal cadence (e.g., every Coordinator tick).
+#
+# Usage:
+#   ac-pre-compact                # rewrite anchor + bump pulse
+#   ac-pre-compact --notify       # also drop Operator inbox FYI
+#   ac-pre-compact --dry-run      # print what would change, no write
+#
+# Env:
+#   AC_ROOT   — required
+#   AC_FLEET  — default ~/OPS/WORKFORCE
+#   AC_NAME   — required (whose journal to anchor)
+
+set -euo pipefail
+
+AC_ROOT="${AC_ROOT:-}"
+if [[ -z "$AC_ROOT" ]]; then
+  echo "$(basename "$0"): AC_ROOT not set. Coordinator assigns project path." >&2
+  echo "  Export AC_ROOT=\$HOME/OPS/WORKFORCE/FLEETPROJECTS/<project>" >&2
+  exit 1
+fi
+AC_FLEET="${AC_FLEET:-$HOME/OPS/WORKFORCE}"
+NAME="${AC_NAME:-}"
+[[ -z "$NAME" ]] && { echo "$(basename "$0"): AC_NAME not set" >&2; exit 1; }
+
+DRY=0
+NOTIFY=0
+SILENT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --notify)  NOTIFY=1; shift ;;
+    --silent)  SILENT=1; shift ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    *) echo "unknown: $1" >&2; exit 1 ;;
+  esac
+done
+
+RUNTIME="$AC_ROOT/runtime"
+JOURNAL="$RUNTIME/journal/${NAME}.md"
+DIRECTIONS="$RUNTIME/operator-directions"
+DECISIONS="$RUNTIME/decisions"
+TMP="$RUNTIME/tmp"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+mkdir -p "$TMP"
+[[ -f "$JOURNAL" ]] || { echo "no journal at $JOURNAL — run ac-register first" >&2; exit 1; }
+
+# Pull latest operator-direction (by mtime).
+# Quote extraction collects the FULL block-quote (may span multiple
+# `>` lines) and strips surrounding quotation marks if present.
+extract_quote() {
+  awk '
+    /^## Quote/ { in_quote=1; next }
+    in_quote && /^>/ {
+      sub(/^>[[:space:]]*/, "")
+      if (out) { out = out " " $0 } else { out = $0 }
+      next
+    }
+    in_quote && !/^>/ && out { exit }
+    END {
+      # Strip a single pair of surrounding quotes.
+      sub(/^"/, "", out); sub(/"$/, "", out)
+      print out
+    }
+  ' "$1"
+}
+extract_quote_fallback() {
+  awk '
+    /^>/ {
+      sub(/^>[[:space:]]*/, "")
+      if (out) { out = out " " $0 } else { out = $0 }
+      next
+    }
+    !/^>/ && out { exit }
+    END {
+      sub(/^"/, "", out); sub(/"$/, "", out)
+      print out
+    }
+  ' "$1"
+}
+
+LATEST_DIR=""
+LATEST_QUOTE=""
+LATEST_DATE=""
+if [[ -d "$DIRECTIONS" ]]; then
+  LATEST_DIR=$(ls -1t "$DIRECTIONS"/*.md 2>/dev/null | head -1 || true)
+  if [[ -n "$LATEST_DIR" ]]; then
+    LATEST_QUOTE=$(extract_quote "$LATEST_DIR")
+    [[ -z "$LATEST_QUOTE" ]] && LATEST_QUOTE=$(extract_quote_fallback "$LATEST_DIR")
+    LATEST_DATE=$(awk '/^date:/ {sub(/^date:[[:space:]]*/, ""); print; exit}' "$LATEST_DIR")
+  fi
+fi
+
+# Pull last 5 decisions.
+DECISIONS_LIST=""
+if [[ -d "$DECISIONS" ]]; then
+  DECISIONS_LIST=$(ls -1t "$DECISIONS"/*.md 2>/dev/null | head -5 | xargs -n1 basename 2>/dev/null || true)
+fi
+
+# Pull in-flight task ids.
+INFLIGHT=""
+if [[ -d "$RUNTIME/tasks" ]]; then
+  INFLIGHT=$(awk '
+    /^---$/ { f++; if(f==2){ if(stat=="in_progress" || stat=="assigned") print id; id=""; stat=""; f=0 } next }
+    f==1 && /^id:/        { sub(/^id:[[:space:]]*/, ""); id=$0 }
+    f==1 && /^status:/    { sub(/^status:[[:space:]]*/, ""); stat=$0 }
+  ' "$RUNTIME/tasks"/*.md 2>/dev/null | sed 's/^/  - /')
+fi
+
+# Compose the new anchor block.
+ANCHOR=$(cat <<EOF
+## RESUME ANCHOR (read first post-compact) — refreshed $NOW
+
+1. **Identity:** $NAME @ $(hostname)
+2. **Primary goal:** Coordinator-Operator alignment. Everything else secondary.
+3. **Last Operator direction (verbatim, $LATEST_DATE):**
+   "${LATEST_QUOTE:-<no operator-directions filed yet>}"
+   Source: ${LATEST_DIR:+$(basename "$LATEST_DIR")}
+4. **In-flight tasks:**
+${INFLIGHT:-  (none)}
+5. **Last 5 decisions:**
+$(echo "$DECISIONS_LIST" | sed 's/^/  - /')
+6. **Re-read order post-compact:**
+   1. \`runtime/operator-directions/\` (verbatim Operator quotes)
+   2. \`$AC_FLEET/personalities/captain-standing-orders.md\`
+   3. \`~/OPS/CONTEXT/operating-doctrine.md\` (Principle 7 = alignment primacy)
+   4. \`$AC_FLEET/personalities/COORDINATOR.md\` OR \`AGENT.md\`
+   5. This anchor
+   6. \`runtime/manifest.d/\` (peer state)
+   7. Last 5 \`runtime/decisions/\`
+   8. \`runtime/inbox/$NAME/\`
+7. **Drift indicators to watch for in self:**
+   - Action without trace (cannot quote authorizing source)
+   - Re-asking Operator on known answers
+   - Agent-shadowing (running audits when Charlie alive)
+   - Implementation-narration to Operator (cron IDs, mechanics)
+   - Pulse > 30 min stale
+   - Compact-resume cold-start without ac-post-compact-check
+8. **Pre-compact synthesis timestamp:** $NOW
+   Required action post-compact: run \`ac-post-compact-check\` BEFORE any
+   agent assignment or Operator interaction.
+
+EOF
+)
+
+if (( DRY )); then
+  echo "===== Would rewrite anchor in $JOURNAL ====="
+  printf '%s\n' "$ANCHOR"
+  echo "===== end ====="
+  exit 0
+fi
+
+# Rewrite the journal: replace existing RESUME ANCHOR section (from header
+# "## RESUME ANCHOR" to next "## " or "---" separator) with the new block.
+# Falls through to prepending if no existing anchor.
+TMPF="$TMP/${NAME}.journal.md"
+
+if grep -q "^## RESUME ANCHOR" "$JOURNAL"; then
+  awk -v anchor="$ANCHOR" '
+    BEGIN { in_anchor=0; written=0 }
+    /^## RESUME ANCHOR/ { in_anchor=1; print anchor; written=1; next }
+    in_anchor && /^## / && !/^## RESUME ANCHOR/ { in_anchor=0 }
+    in_anchor && /^---$/ { in_anchor=0 }
+    !in_anchor { print }
+  ' "$JOURNAL" > "$TMPF"
+else
+  # Prepend after first "# Journal" header
+  {
+    head -1 "$JOURNAL"
+    echo
+    printf '%s\n' "$ANCHOR"
+    echo
+    tail -n +2 "$JOURNAL"
+  } > "$TMPF"
+fi
+
+mv -- "$TMPF" "$JOURNAL"
+(( SILENT )) || echo "anchor refreshed: $JOURNAL"
+
+# Bump pulse with synthesis note.
+if [[ -x "$AC_FLEET/bin/ac-pulse" ]]; then
+  "$AC_FLEET/bin/ac-pulse" --notes "pre-compact synthesis $NOW" >/dev/null 2>&1 || true
+fi
+
+# Optional Operator notification.
+if (( NOTIFY )); then
+  if [[ -x "$AC_FLEET/bin/ac-msg" ]]; then
+    coord=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$RUNTIME/manifest.d/_coordinator.json" 2>/dev/null \
+            | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+    if [[ "$NAME" == "$coord" ]]; then
+      printf 'Pre-compact synthesis ran at %s. Anchor refreshed to your %s direction. No action required.\n' \
+        "$NOW" "$LATEST_DATE" \
+        | "$AC_FLEET/bin/ac-msg" send --to operator --topic pre-compact-synthesis --priority fyi >/dev/null 2>&1 || true
+    fi
+  fi
+fi
