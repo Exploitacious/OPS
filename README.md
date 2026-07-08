@@ -106,6 +106,7 @@ OPS/
 ├── DEPLOYMENT.md          # the two-stage deploy (linuxploitacious -> deploy.sh)
 ├── BOOTSTRAP.md           # first-launch interview + machine recon (populates CONTEXT/)
 ├── LICENSE                # MIT
+├── CONTRIBUTING.md        # the porting discipline — how private-harness improvements land here
 ├── CONTEXT/               # always-loaded doctrine + your identity (read every session)
 │   ├── operating-doctrine.md   #   the universal principles (P1-P15) any session follows
 │   ├── foreman-charter.md      #   always-on foreman posture (auto-injected at SessionStart)

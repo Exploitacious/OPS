@@ -32,7 +32,7 @@ fail() { FAILS=$((FAILS+1)); echo "FAIL: $*"; }
 # GENERALIZATION-RULES.md is deliberately absent from this list: it is a build
 # marker and must fail here until it is removed (see check_ship_gate).
 check_root() {
-  local allowed="README.md CLAUDE.md CHANGELOG.md IDEAS.md DEPLOYMENT.md BOOTSTRAP.md LICENSE"
+  local allowed="README.md CLAUDE.md CHANGELOG.md IDEAS.md DEPLOYMENT.md BOOTSTRAP.md LICENSE CONTRIBUTING.md"
   local extras=""
   for f in "$OPS"/*; do
     [ -f "$f" ] || continue
