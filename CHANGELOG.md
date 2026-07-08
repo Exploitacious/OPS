@@ -4,6 +4,14 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-08 — session-close skill
+
+- `SKILLS/session-close/`: the third session ending. Pause = closeout +
+  `/compact` (pre-compact-synthesis); move = session-handoff; **close** =
+  full closeout synthesis, an archive-vs-forget decision, a receipt, then
+  the session removes itself from the reboot registry and kills its own
+  tmux. History is never deleted; archived sessions revive on demand.
+
 ## 2026-07-08 — Session lifecycle: profiles, auto-register, template sync
 
 - **Profile-aware reboot-resume.** The remote-sessions registry gains an
