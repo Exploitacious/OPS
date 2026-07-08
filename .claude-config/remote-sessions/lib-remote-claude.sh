@@ -19,8 +19,10 @@ rc_is_guaranteed() {  # arg: name -> 0 if guaranteed
 }
 
 # Title-Case each word, hyphen-join (Life / Kali-Yoga / Development). Preserves existing caps.
+# Strips everything outside [A-Za-z0-9-]: quotes would break the launch line rc_launch builds,
+# and dots/colons collide with tmux's target syntax ("session:window.pane").
 rc_normalize_name() {
-  printf '%s' "$1" | tr ' _' '--' \
+  printf '%s' "$1" | tr ' _' '--' | tr -cd 'A-Za-z0-9-' \
     | awk -F'-' 'BEGIN{OFS="-"}{for(i=1;i<=NF;i++)if(length($i)>0)$i=toupper(substr($i,1,1)) substr($i,2);print}' \
     | sed 's/--*/-/g; s/^-//; s/-$//'
 }
@@ -85,7 +87,7 @@ rc_launch() {
 
 # Resolve any user-typed name (any case/spacing) to the actual stored NAME in a registry file, by a
 # canonical key (lowercase, spaces/underscores -> hyphens, collapsed). Exact stored casing is returned,
-# so acronyms like "Ninja-MCP-Play" match "ninja mcp play". Prints the stored name, empty if no match.
+# so acronyms like "MCP-Dev-Lab" match "mcp dev lab". Prints the stored name, empty if no match.
 rc_resolve_name() {  # args: input_name file
   [ -f "$2" ] || return 0
   awk -F'\t' -v raw="$1" '
