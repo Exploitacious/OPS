@@ -1,5 +1,11 @@
-# Live registry format (TAB-separated): NAME<TAB>WORKDIR<TAB>SESSION_ID
+# Live registry format (TAB-separated): NAME<TAB>WORKDIR<TAB>SESSION_ID[<TAB>CONFIG_DIR]
 # The real file lives at ~/.claude-remote-sessions.tsv and is machine-local (not committed).
 # Lines beginning with # are ignored by the boot script.
+#
+# CONFIG_DIR (optional 4th column) = the default ~/.claude profile when empty/absent. Set it to a
+# secondary Claude Code config dir (a CLAUDE_CONFIG_DIR profile -- e.g. a personal account beside a
+# work one) so boot-resume relaunches that session under its own profile and resumes the transcript
+# that lives under <CONFIG_DIR>/projects. The first two rows below are default-profile (3-column).
 Main	/home/USER	00000000-0000-0000-0000-000000000001
 Trading	/home/USER/projects/trading	00000000-0000-0000-0000-000000000002
+Personal	/home/USER	00000000-0000-0000-0000-000000000003	/home/USER/.claude-work
