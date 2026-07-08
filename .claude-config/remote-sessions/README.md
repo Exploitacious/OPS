@@ -39,6 +39,9 @@ sessions up on request.
    systemctl --user enable --now tmux-main.service   # unit in ../systemd/
    ```
 
+   Skip this if you deployed via linuxploitacious with its `TMUX` option —
+   Stage 1 already writes and enables an identical `tmux-main.service`.
+
 3. **Create your first session:**
 
    ```

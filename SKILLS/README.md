@@ -74,6 +74,7 @@ The script is idempotent — safe to re-run anytime.
 | `memory-prune` | yes | no | Claude Code only — fans out a memory audit via the Workflow tool; no GUI Project half exists. |
 | `pre-compact-synthesis` | yes | no | Claude Code only — pre-compaction durable-state synthesis; no GUI Project half exists. |
 | `session-handoff` | yes | no | Claude Code only — write/read baton pair for handing off sessions across profiles/machines; pairs with `pre-compact-synthesis`. No GUI Project half exists. |
+| `remote-session` | yes | no | Claude Code only — spins up always-on `claude --remote-control` sessions in tmux on request; sessions persist + resume across reboots via `.claude-config/remote-sessions/`. |
 
 Domain-partner skills (a vendor-docs assistant, a trading co-strategist, anything
 tied to your own stack or business) aren't shipped here — they're yours to

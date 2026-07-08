@@ -4,6 +4,15 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-08 — Remote-controlled sessions (community PR #1)
+
+- `.claude-config/remote-sessions/` + the `remote-session` skill: always-on
+  Claude Code sessions in tmux, driven from another device via
+  `claude --remote-control`, persisted in a registry and **resumed with full
+  conversation history after a reboot** (@reboot cron + stable session ids).
+  Archive/revive tooling parks sessions without losing history. Contributed
+  by @kontrolflow — the first port from a sibling private harness.
+
 ## 2026-07-07 — Contribution discipline
 
 - `CONTRIBUTING.md`: contributions here are typically extractions from a
