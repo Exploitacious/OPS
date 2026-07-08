@@ -29,11 +29,12 @@ done
 # After guaranteeing the above there is always a registry; guard defensively anyway.
 [ -f "$REGISTRY" ] || { echo "$(date -Is) no registry after seeding — nothing to start"; exit 0; }
 
-# Recreate every registered session (resume if it has a transcript, else create).
-while IFS=$'\t' read -r name workdir sid; do
+# Recreate every registered session (resume if it has a transcript, else create). The optional 4th column
+# (config dir) is read into $cfg and passed down; 3-column rows leave it empty -> the default profile.
+while IFS=$'\t' read -r name workdir sid cfg; do
   [ -z "${name:-}" ] && continue
   case "$name" in \#*) continue ;; esac
   [ -z "${workdir:-}" ] && workdir="$DEFAULT_WORKDIR"
   [ -z "${sid:-}" ] && sid="$(rc_new_uuid)"
-  rc_launch "$name" "$workdir" "$sid"
+  rc_launch "$name" "$workdir" "$sid" "${cfg:-}"
 done < "$REGISTRY"

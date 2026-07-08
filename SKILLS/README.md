@@ -75,6 +75,7 @@ The script is idempotent — safe to re-run anytime.
 | `pre-compact-synthesis` | yes | no | Claude Code only — pre-compaction durable-state synthesis; no GUI Project half exists. |
 | `session-handoff` | yes | no | Claude Code only — write/read baton pair for handing off sessions across profiles/machines; pairs with `pre-compact-synthesis`. No GUI Project half exists. |
 | `remote-session` | yes | no | Claude Code only — spins up always-on `claude --remote-control` sessions in tmux on request; sessions persist + resume across reboots via `.claude-config/remote-sessions/`. |
+| `harness-update` | yes | no | Claude Code only — safe template-sync of a private OPS copy from the public upstream (no shared git history); the scan classifies files NEW/UPDATE/CONFLICT/IDENTICAL, hard-excludes identity/memory/handoff surfaces, and never auto-applies a CONFLICT. See [[harness-update/SKILL.md]]. |
 
 Domain-partner skills (a vendor-docs assistant, a trading co-strategist, anything
 tied to your own stack or business) aren't shipped here — they're yours to
