@@ -22,15 +22,22 @@ if tmux has-session -t "$NAME" 2>/dev/null; then
   exit 3
 fi
 
-# If this name is already registered, reuse its dir + session-id so it resumes; else mint a new id.
+# Capture the caller's live profile: a session launched under a secondary CLAUDE_CONFIG_DIR must be
+# registered with that dir so boot-resume relaunches it under the same profile (its transcript lives
+# there, not under the default $HOME/.claude). The default normalizes to empty — a clean 3-column row.
+CFGDIR="${CLAUDE_CONFIG_DIR:-}"
+[ "$CFGDIR" = "$HOME/.claude" ] && CFGDIR=""
+
+# If this name is already registered, reuse its dir + session-id + profile so it resumes; else mint a new id.
 existing="$(rc_lookup "$NAME")"
 if [ -n "$existing" ]; then
   WORKDIR="$(printf '%s' "$existing" | cut -f1)"
   SID="$(printf '%s' "$existing" | cut -f2)"
+  CFGDIR="$(printf '%s' "$existing" | cut -f3)"
 else
   [ -d "$WORKDIR" ] || { echo "ERR_DIR: directory not found: $WORKDIR" >&2; exit 4; }
   SID="$(rc_new_uuid)"
 fi
 
-rc_register "$NAME" "$WORKDIR" "$SID"
-rc_launch  "$NAME" "$WORKDIR" "$SID"
+rc_register "$NAME" "$WORKDIR" "$SID" "$CFGDIR"
+rc_launch  "$NAME" "$WORKDIR" "$SID" "$CFGDIR"

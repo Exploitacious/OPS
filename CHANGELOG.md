@@ -4,6 +4,24 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-08 — Session lifecycle: profiles, auto-register, template sync
+
+- **Profile-aware reboot-resume.** The remote-sessions registry gains an
+  optional 4th column (`CONFIG_DIR`): sessions running a secondary Claude
+  Code profile (`CLAUDE_CONFIG_DIR=...`) now resume from their own
+  transcript store instead of silently starting fresh. 3-column rows keep
+  working untouched.
+- **Auto-registration.** New SessionStart hook
+  (`.claude-config/hooks/remote-session-register.sh`): any Claude session
+  that starts inside tmux self-registers for reboot-resume — hand-launched
+  sessions included, not just skill-created ones. Archived names stay
+  parked; opt out with `RC_AUTOREGISTER=0`.
+- **`harness-update` skill + scan script.** The safe update path from the
+  OPS template into your private copy: fetch-only upstream remote,
+  classified delta (NEW / UPDATE / CONFLICT / IDENTICAL) against a
+  last-synced marker, identity surfaces hard-excluded in both directions,
+  conflicts never auto-apply.
+
 ## 2026-07-08 — Remote-controlled sessions (community PR #1)
 
 - `.claude-config/remote-sessions/` + the `remote-session` skill: always-on
