@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Shared library for remote-controlled Claude sessions.
+# Sourced by start-remote-claude.sh (@reboot boot) and new-remote-claude.sh (on-demand).
+# Single source of truth for naming, launching, resume-vs-create, and the session registry.
+# Paths derive from $HOME; override any of them via the RC_* env vars below.
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+ENVFILE="${RC_ENVFILE:-$HOME/.claude-mcp.env}"          # optional MCP secrets; sourced with 2>/dev/null (may not exist)
+DEFAULT_WORKDIR="${RC_DEFAULT_WORKDIR:-$HOME}"
+REGISTRY="${RC_REGISTRY:-$HOME/.claude-remote-sessions.tsv}"           # live — boot script launches these. NAME<TAB>WORKDIR<TAB>SESSION_ID
+ARCHIVE="${RC_ARCHIVE:-$HOME/.claude-remote-sessions.archive.tsv}"    # parked — same schema, IGNORED on boot; revivable with full history
+
+# Sessions the boot script always guarantees (self-healing). Defined here so the boot loop and the
+# archive guard share one source of truth — a guaranteed name must never be archived (boot re-seeds
+# it with a fresh id, which would orphan its archived history).
+RC_GUARANTEED_NAMES=(  )  # sessions the boot script always keeps registered + running; e.g. ( "Main" )
+rc_is_guaranteed() {  # arg: name -> 0 if guaranteed
+  local n; for n in "${RC_GUARANTEED_NAMES[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1
+}
+
+# Title-Case each word, hyphen-join (Life / Kali-Yoga / Development). Preserves existing caps.
+rc_normalize_name() {
+  printf '%s' "$1" | tr ' _' '--' \
+    | awk -F'-' 'BEGIN{OFS="-"}{for(i=1;i<=NF;i++)if(length($i)>0)$i=toupper(substr($i,1,1)) substr($i,2);print}' \
+    | sed 's/--*/-/g; s/^-//; s/-$//'
+}
+
+# Kernel-native UUID — no python3 dependency (pyenv shim won't resolve in a bare @reboot cron env).
+rc_new_uuid() { cat /proc/sys/kernel/random/uuid; }
+
+# Does a transcript for this session-id exist on disk? (encoding-agnostic — searches all project dirs.)
+rc_transcript_exists() { find "$HOME/.claude/projects" -maxdepth 2 -name "$1.jsonl" -print -quit 2>/dev/null | grep -q .; }
+
+# Registry helpers -----------------------------------------------------------
+rc_lookup() {  # arg: name -> prints "WORKDIR<TAB>SESSION_ID" (empty if absent)
+  [ -f "$REGISTRY" ] || return 0
+  awk -F'\t' -v n="$1" '$1==n {print $2"\t"$3; exit}' "$REGISTRY"
+}
+rc_register() {  # args: name workdir session_id  (upsert)
+  touch "$REGISTRY"
+  local tmp; tmp="$(mktemp)"
+  awk -F'\t' -v n="$1" '$1!=n && NF>0' "$REGISTRY" > "$tmp"
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$tmp"
+  mv "$tmp" "$REGISTRY"
+}
+rc_deregister() {  # arg: name  (stop it returning on reboot)
+  [ -f "$REGISTRY" ] || return 0
+  local tmp; tmp="$(mktemp)"
+  awk -F'\t' -v n="$1" '$1!=n' "$REGISTRY" > "$tmp"
+  mv "$tmp" "$REGISTRY"
+}
+
+# Launch (or resume) ONE session in a fresh detached tmux session.
+# args: name workdir session_id ; echoes an OK/ERR/SKIP status line.
+rc_launch() {
+  local name="$1" workdir="$2" sid="$3"
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo "SKIP name=$name (already running)"; return 0
+  fi
+  [ -d "$workdir" ] || { echo "ERR_DIR name=$name dir=$workdir (skipped)" >&2; return 4; }
+
+  local launchflag mode
+  if rc_transcript_exists "$sid"; then
+    launchflag="-r '$sid'";           mode="resume"
+  else
+    launchflag="--session-id '$sid'"; mode="create"
+  fi
+
+  tmux new-session -d -s "$name" -c "$workdir"
+  tmux send-keys -t "$name" "set -a; source '$ENVFILE' 2>/dev/null; set +a; claude --remote-control '$name' $launchflag" Enter
+  # First-run "enable project MCP servers?" prompt (create only); Enter accepts it. No-op on resume.
+  sleep 10
+  tmux send-keys -t "$name" Enter
+  sleep 2
+
+  local cwd; cwd="$(tmux display-message -p -t "$name" -F '#{pane_current_path}' 2>/dev/null)"
+  echo "OK name=$name cwd=${cwd:-unknown} session_id=$sid mode=$mode remote_control=on"
+}
+
+# Archive helpers ------------------------------------------------------------
+# Archiving parks a session: its row moves from the live registry to the archive file (so the boot
+# script no longer launches it) and its running tmux session is killed (so it leaves your phone/desktop).
+# Nothing is destroyed — the transcript persists on disk keyed by session-id, and the archive row keeps
+# the exact id + workdir needed to revive it later with full history.
+
+# Resolve any user-typed name (any case/spacing) to the actual stored NAME in a registry file, by a
+# canonical key (lowercase, spaces/underscores -> hyphens, collapsed). Exact stored casing is returned,
+# so acronyms like "Ninja-MCP-Play" match "ninja mcp play". Prints the stored name, empty if no match.
+rc_resolve_name() {  # args: input_name file
+  [ -f "$2" ] || return 0
+  awk -F'\t' -v raw="$1" '
+    function canon(s){ gsub(/[ _]/,"-",s); s=tolower(s); gsub(/-+/,"-",s); sub(/^-/,"",s); sub(/-$/,"",s); return s }
+    BEGIN{ k=canon(raw) }
+    NF>0 && canon($1)==k { print $1; exit }
+  ' "$2"
+}
+
+rc_archive() {  # arg: name (any casing/spacing) — live registry -> archive, kill tmux. Preserves id + workdir + history.
+  local input="$1" name
+  name="$(rc_resolve_name "$input" "$REGISTRY")"
+  if [ -z "$name" ]; then
+    local aname; aname="$(rc_resolve_name "$input" "$ARCHIVE")"
+    if [ -n "$aname" ]; then echo "SKIP name=$aname (already archived)"; return 0; fi
+    echo "ERR_NOT_FOUND name=$input (not in live registry)" >&2; return 6
+  fi
+  if rc_is_guaranteed "$name"; then
+    echo "ERR_GUARANTEED name=$name (guaranteed session — boot re-seeds it fresh; archiving would orphan its history)" >&2
+    return 5
+  fi
+  local row workdir sid
+  row="$(rc_lookup "$name")"   # WORKDIR<TAB>SESSION_ID
+  workdir="$(printf '%s' "$row" | cut -f1)"
+  sid="$(printf '%s' "$row" | cut -f2)"
+  # upsert into archive (dedupe by name), then drop from the live registry
+  touch "$ARCHIVE"
+  local tmp; tmp="$(mktemp)"
+  awk -F'\t' -v n="$name" '$1!=n && NF>0' "$ARCHIVE" > "$tmp"
+  printf '%s\t%s\t%s\n' "$name" "$workdir" "$sid" >> "$tmp"
+  mv "$tmp" "$ARCHIVE"
+  rc_deregister "$name"
+  local tmuxstate="not running"
+  if tmux has-session -t "$name" 2>/dev/null; then
+    tmux kill-session -t "$name" && tmuxstate="killed"
+  fi
+  echo "OK archived name=$name session_id=$sid workdir=$workdir tmux=$tmuxstate (revive: archive-remote-claude.sh revive $name)"
+}
+
+rc_revive() {  # arg: name (any casing/spacing) — archive -> live registry, then launch now (resumes history via -r).
+  local input="$1" name
+  name="$(rc_resolve_name "$input" "$ARCHIVE")"
+  if [ -z "$name" ]; then
+    local lname; lname="$(rc_resolve_name "$input" "$REGISTRY")"
+    if [ -n "$lname" ]; then echo "SKIP name=$lname (already live, not archived)"; return 0; fi
+    echo "ERR_NOT_FOUND name=$input (not in archive)" >&2; return 6
+  fi
+  local row workdir sid
+  row="$(awk -F'\t' -v n="$name" '$1==n {print $2"\t"$3; exit}' "$ARCHIVE")"
+  workdir="$(printf '%s' "$row" | cut -f1)"
+  sid="$(printf '%s' "$row" | cut -f2)"
+  rc_register "$name" "$workdir" "$sid"          # back onto the live registry (returns on reboot again)
+  local tmp; tmp="$(mktemp)"                      # remove from archive
+  awk -F'\t' -v n="$name" '$1!=n' "$ARCHIVE" > "$tmp"
+  mv "$tmp" "$ARCHIVE"
+  rc_launch "$name" "$workdir" "$sid"            # launches now; resumes since the transcript exists
+}
+
+rc_archive_list() {  # print parked sessions: NAME  WORKDIR  SESSION_ID
+  [ -f "$ARCHIVE" ] && [ -s "$ARCHIVE" ] || { echo "(no archived sessions)"; return 0; }
+  awk -F'\t' 'NF>0 {printf "%-42s %-28s %s\n", $1, $2, $3}' "$ARCHIVE"
+}
