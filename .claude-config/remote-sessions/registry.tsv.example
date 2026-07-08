@@ -1,0 +1,5 @@
+# Live registry format (TAB-separated): NAME<TAB>WORKDIR<TAB>SESSION_ID
+# The real file lives at ~/.claude-remote-sessions.tsv and is machine-local (not committed).
+# Lines beginning with # are ignored by the boot script.
+Main	/home/USER	00000000-0000-0000-0000-000000000001
+Trading	/home/USER/projects/trading	00000000-0000-0000-0000-000000000002
