@@ -7,8 +7,14 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 ENVFILE="${RC_ENVFILE:-$HOME/.claude-mcp.env}"          # optional MCP secrets; sourced with 2>/dev/null (may not exist)
 DEFAULT_WORKDIR="${RC_DEFAULT_WORKDIR:-$HOME}"
-REGISTRY="${RC_REGISTRY:-$HOME/.claude-remote-sessions.tsv}"           # live — boot script launches these. NAME<TAB>WORKDIR<TAB>SESSION_ID
+REGISTRY="${RC_REGISTRY:-$HOME/.claude-remote-sessions.tsv}"           # live — boot script launches these. NAME<TAB>WORKDIR<TAB>SESSION_ID[<TAB>CONFIG_DIR]
 ARCHIVE="${RC_ARCHIVE:-$HOME/.claude-remote-sessions.archive.tsv}"    # parked — same schema, IGNORED on boot; revivable with full history
+
+# CONFIG_DIR (optional 4th column) enables a SECONDARY Claude Code profile. A session launched under
+# CLAUDE_CONFIG_DIR=<dir> (e.g. a personal account beside a work one) keeps its transcript under
+# <dir>/projects, so resume must search there and relaunch with that env — otherwise the session silently
+# starts FRESH under the default profile. Empty/missing 4th column means the default $HOME/.claude profile;
+# every reader tolerates 3-column rows ($4 absent -> default).
 
 # Sessions the boot script always guarantees (self-healing). Defined here so the boot loop and the
 # archive guard share one source of truth — a guaranteed name must never be archived (boot re-seeds
@@ -31,18 +37,27 @@ rc_normalize_name() {
 rc_new_uuid() { cat /proc/sys/kernel/random/uuid; }
 
 # Does a transcript for this session-id exist on disk? (encoding-agnostic — searches all project dirs.)
-rc_transcript_exists() { find "$HOME/.claude/projects" -maxdepth 2 -name "$1.jsonl" -print -quit 2>/dev/null | grep -q .; }
+# args: session_id [config_dir] — searches <config_dir>/projects so secondary profiles resolve; an empty
+# or absent config_dir falls back to the default $HOME/.claude.
+rc_transcript_exists() {
+  local sid="$1" cfg="${2:-}"; [ -n "$cfg" ] || cfg="$HOME/.claude"
+  find "$cfg/projects" -maxdepth 2 -name "$sid.jsonl" -print -quit 2>/dev/null | grep -q .
+}
 
 # Registry helpers -----------------------------------------------------------
-rc_lookup() {  # arg: name -> prints "WORKDIR<TAB>SESSION_ID" (empty if absent)
+rc_lookup() {  # arg: name -> prints "WORKDIR<TAB>SESSION_ID<TAB>CONFIG_DIR" (empty if absent). $4 absent -> empty CONFIG_DIR (default profile).
   [ -f "$REGISTRY" ] || return 0
-  awk -F'\t' -v n="$1" '$1==n {print $2"\t"$3; exit}' "$REGISTRY"
+  awk -F'\t' -v n="$1" '$1==n {print $2"\t"$3"\t"$4; exit}' "$REGISTRY"
 }
-rc_register() {  # args: name workdir session_id  (upsert)
+rc_register() {  # args: name workdir session_id [config_dir]  (upsert). Empty config_dir writes a clean 3-column row (default profile).
   touch "$REGISTRY"
   local tmp; tmp="$(mktemp)"
   awk -F'\t' -v n="$1" '$1!=n && NF>0' "$REGISTRY" > "$tmp"
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$tmp"
+  if [ -n "${4:-}" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$tmp"
+  else
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$tmp"
+  fi
   mv "$tmp" "$REGISTRY"
 }
 rc_deregister() {  # arg: name  (stop it returning on reboot)
@@ -53,30 +68,41 @@ rc_deregister() {  # arg: name  (stop it returning on reboot)
 }
 
 # Launch (or resume) ONE session in a fresh detached tmux session.
-# args: name workdir session_id ; echoes an OK/ERR/SKIP status line.
+# args: name workdir session_id [config_dir] ; echoes an OK/ERR/SKIP status line.
+# A non-default config_dir launches the in-tmux command under CLAUDE_CONFIG_DIR=<dir> so a secondary
+# profile resumes its OWN transcript instead of silently starting fresh under the default profile.
 rc_launch() {
-  local name="$1" workdir="$2" sid="$3"
+  local name="$1" workdir="$2" sid="$3" cfg="${4:-}"
   if tmux has-session -t "$name" 2>/dev/null; then
     echo "SKIP name=$name (already running)"; return 0
   fi
   [ -d "$workdir" ] || { echo "ERR_DIR name=$name dir=$workdir (skipped)" >&2; return 4; }
 
+  local cfgdir="$cfg"; [ -n "$cfgdir" ] || cfgdir="$HOME/.claude"
+
   local launchflag mode
-  if rc_transcript_exists "$sid"; then
+  if rc_transcript_exists "$sid" "$cfgdir"; then
     launchflag="-r '$sid'";           mode="resume"
   else
     launchflag="--session-id '$sid'"; mode="create"
   fi
 
+  # Prefix CLAUDE_CONFIG_DIR only for a non-default profile — the default launch line stays byte-identical.
+  local cfgprefix="" profile="default"
+  if [ "$cfgdir" != "$HOME/.claude" ]; then
+    cfgprefix="CLAUDE_CONFIG_DIR='$cfgdir' "
+    profile="$(basename "$cfgdir")"
+  fi
+
   tmux new-session -d -s "$name" -c "$workdir"
-  tmux send-keys -t "$name" "set -a; source '$ENVFILE' 2>/dev/null; set +a; claude --remote-control '$name' $launchflag" Enter
+  tmux send-keys -t "$name" "set -a; source '$ENVFILE' 2>/dev/null; set +a; ${cfgprefix}claude --remote-control '$name' $launchflag" Enter
   # First-run "enable project MCP servers?" prompt (create only); Enter accepts it. No-op on resume.
   sleep 10
   tmux send-keys -t "$name" Enter
   sleep 2
 
   local cwd; cwd="$(tmux display-message -p -t "$name" -F '#{pane_current_path}' 2>/dev/null)"
-  echo "OK name=$name cwd=${cwd:-unknown} session_id=$sid mode=$mode remote_control=on"
+  echo "OK name=$name cwd=${cwd:-unknown} session_id=$sid mode=$mode profile=$profile remote_control=on"
 }
 
 # Archive helpers ------------------------------------------------------------
@@ -109,15 +135,21 @@ rc_archive() {  # arg: name (any casing/spacing) — live registry -> archive, k
     echo "ERR_GUARANTEED name=$name (guaranteed session — boot re-seeds it fresh; archiving would orphan its history)" >&2
     return 5
   fi
-  local row workdir sid
-  row="$(rc_lookup "$name")"   # WORKDIR<TAB>SESSION_ID
+  local row workdir sid cfg
+  row="$(rc_lookup "$name")"   # WORKDIR<TAB>SESSION_ID<TAB>CONFIG_DIR
   workdir="$(printf '%s' "$row" | cut -f1)"
   sid="$(printf '%s' "$row" | cut -f2)"
-  # upsert into archive (dedupe by name), then drop from the live registry
+  cfg="$(printf '%s' "$row" | cut -f3)"
+  # upsert into archive (dedupe by name), then drop from the live registry. Carry CONFIG_DIR through so a
+  # parked secondary-profile session revives under its own profile.
   touch "$ARCHIVE"
   local tmp; tmp="$(mktemp)"
   awk -F'\t' -v n="$name" '$1!=n && NF>0' "$ARCHIVE" > "$tmp"
-  printf '%s\t%s\t%s\n' "$name" "$workdir" "$sid" >> "$tmp"
+  if [ -n "$cfg" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$name" "$workdir" "$sid" "$cfg" >> "$tmp"
+  else
+    printf '%s\t%s\t%s\n' "$name" "$workdir" "$sid" >> "$tmp"
+  fi
   mv "$tmp" "$ARCHIVE"
   rc_deregister "$name"
   local tmuxstate="not running"
@@ -135,18 +167,19 @@ rc_revive() {  # arg: name (any casing/spacing) — archive -> live registry, th
     if [ -n "$lname" ]; then echo "SKIP name=$lname (already live, not archived)"; return 0; fi
     echo "ERR_NOT_FOUND name=$input (not in archive)" >&2; return 6
   fi
-  local row workdir sid
-  row="$(awk -F'\t' -v n="$name" '$1==n {print $2"\t"$3; exit}' "$ARCHIVE")"
+  local row workdir sid cfg
+  row="$(awk -F'\t' -v n="$name" '$1==n {print $2"\t"$3"\t"$4; exit}' "$ARCHIVE")"
   workdir="$(printf '%s' "$row" | cut -f1)"
   sid="$(printf '%s' "$row" | cut -f2)"
-  rc_register "$name" "$workdir" "$sid"          # back onto the live registry (returns on reboot again)
+  cfg="$(printf '%s' "$row" | cut -f3)"
+  rc_register "$name" "$workdir" "$sid" "$cfg"    # back onto the live registry (returns on reboot again)
   local tmp; tmp="$(mktemp)"                      # remove from archive
   awk -F'\t' -v n="$name" '$1!=n' "$ARCHIVE" > "$tmp"
   mv "$tmp" "$ARCHIVE"
-  rc_launch "$name" "$workdir" "$sid"            # launches now; resumes since the transcript exists
+  rc_launch "$name" "$workdir" "$sid" "$cfg"      # launches now; resumes since the transcript exists (under its profile)
 }
 
-rc_archive_list() {  # print parked sessions: NAME  WORKDIR  SESSION_ID
+rc_archive_list() {  # print parked sessions: NAME  WORKDIR  SESSION_ID  PROFILE (config dir, "(default)" when unset)
   [ -f "$ARCHIVE" ] && [ -s "$ARCHIVE" ] || { echo "(no archived sessions)"; return 0; }
-  awk -F'\t' 'NF>0 {printf "%-42s %-28s %s\n", $1, $2, $3}' "$ARCHIVE"
+  awk -F'\t' 'NF>0 {printf "%-42s %-28s %-38s %s\n", $1, $2, $3, ($4==""?"(default)":$4)}' "$ARCHIVE"
 }

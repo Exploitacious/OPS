@@ -38,9 +38,11 @@ sanity-check in one shot:
 
 The script prints one status line and uses exit codes:
 
-- `OK name=<Name> cwd=<dir> remote_control=on` (exit 0) — success. **Report back:**
-  the final session name, the directory it opened in (the sanity check — confirm
-  it's the dir they wanted), and that it's live on their device now.
+- `OK name=<Name> cwd=<dir> ... profile=<default|name> remote_control=on` (exit 0) —
+  success. **Report back:** the final session name, the directory it opened in (the
+  sanity check — confirm it's the dir they wanted), and that it's live on their device
+  now. `profile=` is `default` unless the session runs under a secondary
+  `CLAUDE_CONFIG_DIR` profile, in which case it names that profile.
 - `ERR_EXISTS` (exit 3) — a session with that name is already running (script prints
   its cwd). Tell them; offer a different name or the existing one.
 - `ERR_DIR` (exit 4) — the directory doesn't exist. Ask for the right path.
@@ -49,11 +51,24 @@ The script prints one status line and uses exit codes:
 ## Persistence across reboot
 
 Every session created this way is written to the **registry**
-(`~/.claude-remote-sessions.tsv`, `NAME<TAB>WORKDIR<TAB>SESSION_ID`). On reboot the
-`@reboot` boot script (`start-remote-claude.sh`) recreates every registered session
-**and resumes its conversation** (each has a stable `--session-id`; the boot script
-uses `-r` when a transcript exists, `--session-id` on first create). So a session
-made today comes back — with its history — after a reboot.
+(`~/.claude-remote-sessions.tsv`, `NAME<TAB>WORKDIR<TAB>SESSION_ID[<TAB>CONFIG_DIR]`).
+On reboot the `@reboot` boot script (`start-remote-claude.sh`) recreates every
+registered session **and resumes its conversation** (each has a stable
+`--session-id`; the boot script uses `-r` when a transcript exists, `--session-id` on
+first create). So a session made today comes back — with its history — after a reboot.
+
+- **Profile-aware resume.** The optional 4th column, `CONFIG_DIR`, holds a secondary
+  Claude Code profile (`CLAUDE_CONFIG_DIR`); empty means the default `~/.claude`. A
+  session started under a secondary profile keeps its transcript under
+  `<CONFIG_DIR>/projects`, so the boot script resumes it there and relaunches it under
+  that profile — otherwise it would silently start fresh. The script captures the
+  caller's live `CLAUDE_CONFIG_DIR` at creation, so this is automatic.
+- **Hand-launched sessions self-register.** A `SessionStart` hook
+  (`.claude-config/hooks/remote-session-register.sh`) registers any Claude session
+  started inside `tmux`, so sessions the operator created by hand — not via this skill
+  — also return on reboot. It is an idempotent upsert (the same tmux session
+  re-registers with its newest session id on each restart), respects archived names,
+  and is disabled with `RC_AUTOREGISTER=0`. See the feature README for install.
 
 - **Stop a session returning on reboot:** `source ~/OPS/.claude-config/remote-sessions/lib-remote-claude.sh && rc_deregister <Name>`
   (then `tmux kill-session -t <Name>`). Or park it with history:
