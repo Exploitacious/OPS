@@ -13,7 +13,7 @@ stable `--session-id`.
 | `lib-remote-claude.sh` | Shared library — naming, registry I/O, launch/resume, archive/revive. Sourced by the others. |
 | `start-remote-claude.sh` | `@reboot` boot target — waits for network, then recreates + resumes every registered session. |
 | `new-remote-claude.sh <name> [dir]` | Start one session on demand. |
-| `archive-remote-claude.sh <archive\|revive\|list> [name]` | Park a session (keeps history, stops it returning on boot) / bring it back / list parked. |
+| `archive-remote-claude.sh <archive\|revive\|list\|sweep> [name]` | Park a session (keeps history, stops it returning on boot) / bring it back / list parked / **`sweep`**: read-only health view of the live registry (per-session STATUS + transcript age + tmux presence + case-collision scan). |
 | `../hooks/remote-session-register.sh` | `SessionStart` hook — any Claude session started inside `tmux` self-registers (idempotent upsert), so boot-resume covers hand-launched sessions, not only skill-created ones. |
 | `registry.tsv.example` | Sample registry. The live registry is `~/.claude-remote-sessions.tsv` (machine-local, not committed). |
 | `../systemd/tmux-main.service` | Optional: a base `main` tmux session at boot. |
@@ -107,6 +107,56 @@ missing 4th column as the default profile, so older registries keep working.
 `( "Main" )`) to always keep one or more sessions registered and running — the boot
 script self-heals them (re-seeds a fresh id if the registry row is ever lost, so
 history survives normal reboots).
+
+## Keeping the registry clean
+
+Every live-registry row **boot-resumes into its old transcript on reboot** — so a session
+whose purpose is finished but was never parked comes back into stale context. Two guards:
+
+- **`archive-remote-claude.sh sweep`** — read-only health view of what actually boots.
+  Flags each row: `ZOMBIE` (in the registry but not in tmux — reboot would spawn it from
+  a dead/old id), `STALE` (transcript older than `RC_STALE_DAYS`, default 7 — a likely
+  finished-and-forgotten session), `IDLE` (live but detached), `OK`. Also scans for
+  case/format **collisions**. Run it after a reboot, or whenever the device list looks
+  crowded, then `archive <name>` the stale rows. Parking is the intended end-of-purpose
+  step (the `session-close` skill does it) and it sticks: the auto-register hook refuses
+  to re-register an archived name.
+- **Collision guard** — because names normalize case+separators, `dev` and `Dev` both
+  map to registry name `Dev`; a stray differently-cased session could otherwise clobber
+  the real one's session-id and reboot-resume the wrong transcript. The register hook
+  skips a non-canonical colliding name (only the session whose raw name already equals its
+  normalized form holds the row). `sweep` surfaces any live collisions.
+
+## Single owner of Claude session persistence
+
+This registry system is the **only** thing allowed to (re)create Claude sessions.
+The failure mode it guards against is three systems fighting over the same tmux
+server — observed live as sessions popping in and out, and closing one session
+cascading into others:
+
+1. **tmux-resurrect/continuum auto-restore** (`@continuum-restore 'on'`) re-creates
+   the last-saved layout on every server start — including deliberately archived
+   sessions — and `@resurrect-processes "claude->claude"` types bare `claude`
+   into each pane: a fresh, context-less impostor with no `--remote-control`
+   and no `-r`, wearing the real session's name.
+2. **`tmux-main.service`** with `Type=forking` + `Restart=on-failure` tracks the
+   tmux *server* as MainPID. Killing the last session (e.g. archiving during a
+   cleanup) exits the server, systemd "repairs" it, and the resurrect plugin
+   revives the graveyard. tmux dies with its last session — that is the "closing
+   one session closed the others" cascade.
+3. This registry's `@reboot` boot script — the one that resumes correctly.
+
+Standing constraints (the repo unit in `../systemd/` ships the safe shape; apply
+the tmux ones in your `.tmux.conf` — linuxploitacious's `TMUX` option does):
+
+- `@continuum-restore` stays **off**; continuum only auto-saves.
+- `claude` never appears in `@resurrect-processes`.
+- `tmux-main.service` is `Type=oneshot` + `RemainAfterExit` + `KillMode=process`
+  with an idempotent `has-session || new-session` start — it never owns or
+  restarts the server.
+- Every `tmux -t` target in these scripts uses `"=$name"` (exact match): bare
+  names unique-prefix-match, so `-t Dev` can hit `Dev2` and `kill-session`
+  the wrong session.
 
 ## Notes
 
