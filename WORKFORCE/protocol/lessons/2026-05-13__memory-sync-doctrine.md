@@ -13,7 +13,8 @@ affects:
 supersedes: null
 superseded_by: null
 related_tasks: []
-related_improvements: []
+related_improvements:
+  - 2026-05-13__deliverables-and-memory-sync
 related_repos:
   - ~/OPS
 tags:
@@ -32,14 +33,14 @@ Doctrine: **Option A — drafts that graduate.** Auto-memory is the AI's working
 
 ## Context
 
-Surfaced during a working session where the Coordinator wrote three auto-memory entries mid-conversation; the Operator asked whether memory should be git-tracked, which Claude flavors it should serve, and what the pruning model looks like. Two interpretations were on the table (Option A = drafts graduate; Option B = flat-with-overrides).
+Surfaced during a working session where the Coordinator wrote three auto-memory entries mid-conversation; the Operator asked whether memory should be git-tracked, which Claude flavors it should serve, and what the pruning model looks like. Full proposal in the companion `2026-05-13__deliverables-and-memory-sync.md` lesson. Two interpretations were on the table (Option A = drafts graduate; Option B = flat-with-overrides).
 
 ## Why this decision
 
 Rationale captured:
 
 - Option A preserves the existing doctrine pattern — `CONTEXT/` stays the source of truth for user identity / preferences / doctrine. Auto-memory becomes a staging layer beneath it.
-- The Operator primarily uses Claude Code; cross-flavor bridges (chat Claude, Claude Cowork (Anthropic's desktop app) on Windows if different, Claude Desktop) are out of scope for v1.
+- The Operator primarily uses Claude Code; cross-flavor bridges (chat Claude, Anthropic's desktop agent app on Windows if different, Claude Desktop) are out of scope for v1.
 - Symlink works on both Linux (`ln -s`) and Windows (`mklink /D`). Stow remains optional convenience but not required.
 - Secrets-scan urgency is low for v1: the hard rule still applies (no credentials, no client PII, ever), but a pre-commit scan is deferred rather than shipped in v1.
 
@@ -69,7 +70,7 @@ Rationale captured:
 ## Cross-flavor reach (explicit non-coverage)
 
 - **Claude Code (Linux / WSL / macOS / Windows)** — covered by v1.
-- **Cowork on Windows** — verify mechanism before committing the sync claim. Likely same as Claude Code.
+- **Anthropic's desktop agent app on Windows** — verify mechanism before committing the sync claim. Likely same as Claude Code.
 - **Chat Claude (claude.ai)** — NOT covered. Different mechanism (Projects feature). If bridge ever wanted, file as new IDEA.
 - **Claude Desktop** — NOT covered. Verify before promising future bridge.
 
