@@ -17,10 +17,25 @@
 # say, so the banner never becomes noise the operator learns to ignore.
 set -uo pipefail
 
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/hooklib.sh"
+
 OPS_DIR="${OPS_DIR:-$HOME/OPS}"
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SETTINGS="$CFG/settings.json"
+
+# Encoded cwd: prefer Claude's OWN encoded path from transcript_path in the
+# SessionStart payload (basename of its parent dir). The `pwd | sed` form is
+# `-c-Users-...` on Windows Git Bash, never matching Claude's native
+# `C--Users-...`, which left SNAP_DIR + the memory-health path wrong there.
 ENCODED_CWD="$(pwd | sed 's|/|-|g')"
+if [[ ! -t 0 ]]; then
+  _payload="$(cat 2>/dev/null || true)"
+  if [[ -n "$_payload" ]]; then
+    _tp="$(printf '%s' "$_payload" | hook_field transcript_path 2>/dev/null)" || _tp=""
+    [[ -n "$_tp" ]] && ENCODED_CWD="$(basename "$(hook_pathnorm "$(dirname "$_tp")")")"
+  fi
+fi
 
 # --- worker posture ---
 gate="Sonnet 5 1M default worker"
