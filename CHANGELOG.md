@@ -4,6 +4,35 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-15 — backport wave: compact automation, session-persistence hardening, portable hooks
+
+Five-PR wave ported from a private harness under the CONTRIBUTING extraction
+discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
+
+- **Automated compact cycle.** `bin/compact-cycle.sh` — a deterministic bash
+  compactor in a detached tmux session: waits for the target Claude pane to go
+  idle, types `/compact`, watches completion, types the resume baton, and
+  self-destructs; on error/timeout it never resumes (the session stays paused
+  with synthesis on disk). `hooks/context-watch.sh` (Stop hook) nags the
+  ritual from REAL context tokens (transcript `usage` entries), growth-
+  throttled. `pre-compact-synthesis` gains the self-compact exit — automated
+  is the default in tmux; manual only when the Operator claims `/compact`.
+- **Session-persistence single-owner doctrine.** The registry system is the
+  only thing allowed to (re)create Claude sessions. `tmux-main.service`
+  rewritten from Type=forking + Restart=on-failure (server-death cascade →
+  restart → resurrection storm) to oneshot + RemainAfterExit + KillMode=process.
+  Registry staleness `sweep`, case-collision guard in the auto-register hook,
+  and every tmux `-t` target exact-matched (`=Name` / `=Name:` — bare names
+  unique-prefix-match; `kill-session -t Dev` can kill `Dev2`).
+- **Portable hooks.** `hooks/hooklib.sh` `hook_field` (jq-first, python
+  fallback, fail-closed) replaces inline `python3 -c` extraction across the
+  guard hooks; `guard-selftest.sh` proves the guards actually block.
+- **Deploy + docs.** `deploy.ps1` profile seam (`profile.local.ps1`, never
+  `$PROFILE`), dynamic backup task (static XML retired), verify gate updates;
+  DEPLOYMENT.md corrected to match `deploy.ps1` reality.
+- **Workforce docs.** Memory-sync doctrine lessons, `ac-memory-init.ps1`
+  exit-code contract restored, project-kata delta.
+
 ## 2026-07-08 — session-close skill
 
 - `SKILLS/session-close/`: the third session ending. Pause = closeout +
