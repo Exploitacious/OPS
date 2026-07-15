@@ -96,7 +96,7 @@ done
 [[ -z "$PEER_NAME" ]] && { echo "$(basename "$0"): --peer-name required" >&2; exit 1; }
 
 # Validate target pane exists
-if ! tmux list-panes -t "$TARGET" >/dev/null 2>&1; then
+if ! tmux list-panes -t "=$TARGET" >/dev/null 2>&1; then
   echo "$(basename "$0"): target pane '$TARGET' not found in tmux" >&2
   echo "  tmux ls / tmux list-panes -a to inspect" >&2
   exit 2
@@ -135,11 +135,11 @@ if [[ $SKIP_PRE -eq 0 ]]; then
 EOF
   BUFFER_NAME="ac-compact-${PEER_NAME,,}-$$"
   tmux load-buffer -b "$BUFFER_NAME" "$TMP_BRIEF"
-  tmux paste-buffer -b "$BUFFER_NAME" -t "$TARGET"
+  tmux paste-buffer -b "$BUFFER_NAME" -t "=$TARGET"
   sleep 0.5
-  tmux send-keys -t "$TARGET" Enter
+  tmux send-keys -t "=$TARGET" Enter
   sleep 0.5
-  tmux send-keys -t "$TARGET" Enter
+  tmux send-keys -t "=$TARGET" Enter
   tmux delete-buffer -b "$BUFFER_NAME" 2>/dev/null || true
   rm -f "$TMP_BRIEF"
   echo "[ac-compact-peer] ac-pre-compact directive pasted; waiting for pulse refresh (watchdog ${WATCHDOG}s)"
@@ -170,9 +170,24 @@ EOF
   fi
 fi
 
-# Step 4: Fire /compact via tmux send-keys
-tmux send-keys -t "$TARGET" "/compact" Enter
-echo "[ac-compact-peer] /compact fired on $TARGET"
+# Step 4: Fire /compact — delegate to compact-cycle.sh, which adds idle-wait,
+# completion watch, and failure detection in a detached Compactor session.
+# --no-resume: fleet agents re-wake via their /loop cron, not a typed resume.
+# Fail-open to the legacy direct fire if the engine is missing.
+COMPACT_CYCLE="${COMPACT_CYCLE:-$HOME/OPS/.claude-config/bin/compact-cycle.sh}"
+if [[ -x "$COMPACT_CYCLE" ]]; then
+  if "$COMPACT_CYCLE" --target "$TARGET" --no-resume --grace 0; then
+    echo "[ac-compact-peer] delegated to compact-cycle (Compactor session watches completion)"
+  else
+    RC=$?
+    echo "[ac-compact-peer] WARN: compact-cycle refused (rc=$RC — lock held / target vanished). No direct fire; inspect ~/.claude-compact-cycle/." >&2
+  fi
+else
+  tmux send-keys -t "=$TARGET" "/compact"
+  sleep 0.6
+  tmux send-keys -t "=$TARGET" Enter
+  echo "[ac-compact-peer] /compact fired on $TARGET (legacy direct — compact-cycle.sh missing)"
+fi
 
 # Step 5: Log to runtime/log.jsonl (flock for atomicity)
 {

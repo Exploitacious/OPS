@@ -10,9 +10,12 @@ description: >
   "closeout", "/closeout", "do the thing" (the operator's wrap-up idiom),
   "synthesize before compact", "make sure everything is up to date",
   "make sure everything reflects reality", "clean up the workspace", or asks
-  about the pre-compact procedure. Also activates proactively when context
-  usage crosses ~65% and the session is in a wrap-up posture, or when a
-  session is ending after substantive work. Auto-detects fleet vs solo
+  about the pre-compact procedure. Also on "self-compact", "auto-compact",
+  "compact yourself", "run the full cycle", and whenever a [context-watch]
+  Stop-hook nag fires — those routes end in the automated self-compact cycle
+  (compact-cycle.sh) instead of a manual operator /compact. Also activates
+  proactively when context usage crosses ~65% and the session is in a wrap-up
+  posture, or when a session is ending after substantive work. Auto-detects fleet vs solo
   sessions and dispatches to the right durable-anchor surface (fleet journal
   via ac-pre-compact, project SESSION_HANDOFF.md, or a minimal solo note).
   Implements operating-doctrine Principle 2 — "Compaction is a pause, not
@@ -170,7 +173,61 @@ When activated:
    - If action is needed (uncommitted work, missing memory, stale task list, outdated handoff), do the action OR surface it to the user for confirmation if the action is irreversible (push to main, force operations, etc.).
 4. **Run the fifth stage (closeout hygiene)** — machine gate, memory routing, docs-reflect-reality, scratch sweep, stamp.
 5. **Print a one-screen readiness summary** so the operator sees what's locked in and can pull the trigger on `/compact`.
-6. **Stop there.** You don't run `/compact` yourself — it's the operator's call. You just make sure the runway is clear.
+6. **Choose the exit — automated is the DEFAULT.** In tmux, any wrap-up trigger counts as the go (two-phase autonomy: the go is the switch — "get ready to compact" means run the whole cycle, not "prepare and wait for me to type /compact"). Print the readiness summary, then run the self-compact cycle below. Take the manual exit (summary only, operator fires `/compact`) ONLY when: not in tmux; the operator explicitly claimed the trigger ("I'll compact myself", "manual compact", "don't fire it", "hold off"); or they asked to review/decide something first — an open ASK OPERATOR item means manual.
+
+## Self-compact cycle — automated pause, no operator in the loop
+
+The compact itself can be automated: `~/OPS/.claude-config/bin/compact-cycle.sh`
+is a deterministic bash compactor (no Claude inside) that types `/compact` into
+your pane, waits for compaction to complete, types your resume baton as the
+next message, and self-destructs. You do the judgment (synthesis + baton); it
+does the choreography.
+
+**This is the DEFAULT exit** for every activation in tmux — wrap-up phrases
+("get ready to compact", "do the thing", "wrap up"), the `[context-watch]`
+nag (the Stop hook `hooks/context-watch.sh`, registered in the Stage 1
+`settings.json` template), explicit asks ("self-compact", "run the full
+cycle"), and autonomous breaks all end here. Manual exit is the exception,
+only when the operator explicitly claimed the `/compact` ("I'll compact
+myself", "manual", "hold off") or an ASK OPERATOR item is still open (never
+compact over an unanswered question).
+
+Never fire before the synthesis + hygiene stages are complete: the whole
+point is that everything durable is already on disk when the compact fires.
+Since the operator may be watching, your closing line must SAY the cycle is
+armed and how to abort:
+`tmux kill-session -t '=Compactor-<Key>'` (the lock cleans up on signal).
+
+**Requires tmux** (`[ -n "$TMUX" ]`). Not in tmux → manual flow.
+
+Procedure:
+
+1. **Write the resume baton** to `~/.claude-compact-cycle/resume-<Key>.txt`,
+   where `<Key>` is the tmux session name sanitized to `[A-Za-z0-9-]`
+   (`tmux display-message -p '#S' | tr ':. ' '---' | tr -cd 'A-Za-z0-9-'`).
+   Content: a RESUME PROTOCOL block (format above) plus one line of
+   continuation framing. The compactor types this file **verbatim** as the
+   post-compact session's next user message — keep it under ~30 lines,
+   NEXT ACTION imperative, zero session-boundary vocabulary. The baton also
+   serves as the context-watch interlock: while it exists (<30 min old), the
+   Stop hook lets your end-of-turn through without re-nagging.
+2. **Spawn the compactor** (its own detached tmux session, `Compactor-<Key>`):
+   ```
+   ~/OPS/.claude-config/bin/compact-cycle.sh --target "$(tmux display-message -p '#S')"
+   ```
+   It prints `OK compactor spawned...` and returns immediately.
+3. **End your turn immediately.** One short closing line, then stop — no
+   further tool calls. The compactor waits for your pane to go idle (that's
+   why the turn must end), fires `/compact`, watches for completion, types the
+   baton, and dies. Extra tool calls don't break it — idle detection just
+   waits — but every one delays the cycle.
+
+Failure behavior: on compaction error or timeout the compactor **never types
+the resume** — the session stays paused with all synthesis safely on disk, and
+`~/.claude-compact-cycle/<Key>.status` + the matching log capture why. The
+baton is consumed (renamed `*.sent-<ts>`) only on success. Fleet panes get the
+same engine via `ac-compact-peer` (which delegates with `--no-resume` — fleet
+agents re-wake on their /loop cron instead of a typed resume).
 
 ## Readiness summary shape
 
