@@ -9,6 +9,8 @@
 #   archive-remote-claude.sh revive  <name>   Bring a parked session back: move it to the live registry and
 #                                             launch it now, resuming its conversation. Returns on reboot again.
 #   archive-remote-claude.sh list             List archived sessions (NAME  WORKDIR  SESSION_ID).
+#   archive-remote-claude.sh sweep            Health view of the LIVE registry (what boot-resumes): per-session
+#                                             STATUS/age/tmux-presence + case-collision scan. Read-only.
 #
 # <name> accepts any case/spacing; it is normalized to Title-Case-Hyphen the same way new-remote-claude.sh
 # does, so "morning briefing" matches the stored "Morning-Briefing".
@@ -28,8 +30,11 @@ case "$cmd" in
   list|ls)
     rc_archive_list
     ;;
+  sweep|status|health)
+    rc_sweep
+    ;;
   *)
-    echo "ERR_USAGE: archive-remote-claude.sh <archive|revive|list> [name]" >&2
+    echo "ERR_USAGE: archive-remote-claude.sh <archive|revive|list|sweep> [name]" >&2
     exit 2
     ;;
 esac
