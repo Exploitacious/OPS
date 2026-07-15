@@ -2,6 +2,29 @@
 
 Small, tracked helper scripts that ship with OPS and sync to every machine.
 
+## `compact-cycle.sh` — automated /compact for a Claude session in tmux
+
+The deterministic half of the automated compact ritual (the judgment half is
+the `pre-compact-synthesis` skill, which runs the synthesis and writes the
+resume baton BEFORE spawning this). A session cannot fire `/compact` on itself
+— this spawns a detached `Compactor-<Key>` tmux session (plain bash, no Claude)
+that waits for the target pane to go idle, types `/compact`, watches until
+compaction completes, types the baton (or `--resume` text) as the next user
+message, and self-destructs. On error/timeout it never types the resume — the
+target stays paused with synthesis already on disk.
+
+```
+compact-cycle.sh --target <Session|Session:win.pane> [--baton FILE] [--resume "TEXT"]
+                 [--no-resume] [--grace S] [--idle-timeout S] [--timeout S]
+```
+
+Runtime state (locks, logs, status, batons): `~/.claude-compact-cycle/`.
+Consumers: the skill's self-compact exit, the `[context-watch]` Stop-hook nag
+(`hooks/context-watch.sh`, registered in the Stage 1 `settings.json` template),
+and `WORKFORCE/bin/ac-compact-peer` (fleet, `--no-resume`). tmux gotcha baked
+in: targets use the `=Name:` exact form — bare names unique-prefix-match and
+pane-level commands reject bare `=Name`.
+
 ## `grabit` — file transfer over Tailscale
 
 Moves files between a (usually headless) OPS box and whatever machine you're

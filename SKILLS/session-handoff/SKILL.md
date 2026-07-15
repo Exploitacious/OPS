@@ -48,9 +48,14 @@ notifier always agree:
 bash ~/OPS/.claude-handoffs/key.sh
 ```
 
-Consumed batons move to `~/OPS/.claude-handoffs/archive/<key>-<written_at>.md`.
-Batons are profile-agnostic (plain filesystem) and git-tracked, so they
-cross profiles AND machines once committed + pushed.
+Consumed batons move to `~/OPS/.claude-handoffs/archive/<key>-<ts>.md`,
+where `<ts>` is the archive timestamp **with colons replaced by dashes**:
+`date -u +%Y-%m-%dT%H-%M-%SZ`. **Never put a `:` in the filename** — NTFS
+treats it as an alternate-data-stream separator, so a colon-named baton
+blocks `git checkout` on every Windows clone and stalls the whole sync.
+(The `written_at` frontmatter field below keeps its ISO colons — that's file
+content, not a filename.) Batons are profile-agnostic (plain filesystem) and
+git-tracked, so they cross profiles AND machines once committed + pushed.
 
 > Legacy: a single `ACTIVE_HANDOFF.md` was used before project-keying. The
 > notifier still surfaces one if its `cwd` matches the current session; on
@@ -97,7 +102,7 @@ write the portable baton.
    `~/OPS/.claude-handoffs/pending/` if absent). **Clobber guard:** if a
    PENDING baton already exists *for this same project key*, the previous
    handoff was never picked up — tell the user, and ask whether to overwrite
-   (archive the old one to `archive/<key>-<old_written_at>.md` first) or
+   (archive the old one to `archive/<key>-<old_ts>.md`, colon-free `<ts>`, first) or
    abort. Don't silently clobber an unconsumed baton. A baton for a
    *different* project key is unrelated — leave it alone.
 
@@ -197,7 +202,8 @@ the SessionStart banner announced a pending baton and the user acts on it.
 5. **Summarize** in one screen: the goal, where it was left, the proposed
    immediate next action. Then ask whether to proceed or adjust.
 6. **Archive the baton** — move it to
-   `archive/<project-key>-<written_at>.md`, set `status: consumed`, and
+   `archive/<project-key>-<ts>.md` (colon-free `<ts>` = `date -u +%Y-%m-%dT%H-%M-%SZ`;
+   never a `:` in the filename — see "Consumed batons" above), set `status: consumed`, and
    record `consumed_by` + `consumed_at`. Commit + push
    (`chore(handoff): consume <goal>`). This stops the SessionStart banner
    from re-firing for this project.
