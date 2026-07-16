@@ -25,6 +25,17 @@ This is the **audit-time** half of the knowledge-placement taxonomy. The
 in `CONTEXT/foreman-charter.md` § "Where knowledge goes." Both use the
 same four homes; this skill just applies them in bulk after the fact.
 
+**Positioning (2026-07-16):** routine drainage now happens continuously —
+every closeout runs the cache flush (`pre-compact-synthesis` skill
+§ "The fifth stage — closeout hygiene," step 2: route this session's
+entries + the flush queue, purge terminal projects, evict to the 16KB
+budget — per foreman-charter § "Eviction"; deletions, not stubs). This
+skill is the DEEP audit for what the continuous flush can't judge:
+cross-entry duplication, doctrine drift, stale standing facts. Run it
+quarterly, after doctrine changes, or when the session-briefing shows
+flush debt (index over the 16KB soft budget) that closeouts aren't
+clearing — not as the default response to a full index.
+
 ## Hard guardrails (do not skip)
 
 1. **Read-only audit first, always.** Run the classification workflow
@@ -96,8 +107,21 @@ Mirror of the charter's routing. Each entry resolves to exactly one:
      `docs/` fold → PR + `PENDING-MIGRATION` as in guardrail 3.)
    - *discard*: delete after approval.
    - *keep*: leave; commit any untracked keepers.
-4. **Update `MEMORY.md`.** Rebuild the index to reflect the surviving
-   set. Remove discarded/promoted lines; annotate pending migrations.
+4. **Update `MEMORY.md`.** The index is a GENERATED artifact — regenerate
+   it, don't hand-edit it (see
+   `WORKFORCE/protocol/lessons/2026-06-25__memory-index-generated.md`).
+   After the source files are deleted/edited, adjust each survivor's
+   `description:` frontmatter as needed (including `PENDING-MIGRATION`
+   annotations), then re-run `WORKFORCE/bin/ac-memory-index <memory-dir>`,
+   which rewrites the index atomically from frontmatter. If a hand-edit is
+   ever unavoidable, anchor line parsing on the `](file.md)` link
+   boundary, never on the first em-dash — the
+   `- [Title](file.md) — description` format doesn't guarantee the first
+   em-dash is the separator; titles themselves can contain em-dashes (a
+   2026-07-06 bulk shortening pass split on the em-dash, truncated such a
+   title, and dropped its markdown link entirely). Verify with
+   `ac-memory-index --check <memory-dir>` and confirm the output is
+   byte-identical to the file you wrote before committing.
 5. **Commit.** One clean commit (or tight series) in OPS; project-repo
    moves are separate PRs in their own repos.
 
