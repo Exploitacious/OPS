@@ -69,11 +69,14 @@ rc_deregister() {  # arg: name  (stop it returning on reboot)
 
 # Launch (or resume) ONE session in a fresh detached tmux session.
 # args: name workdir session_id [config_dir] ; echoes an OK/ERR/SKIP status line.
+# All tmux -t targets in this lib use "=$name" (exact match): bare names
+# unique-prefix-match in tmux, so with prefix families like Dev/Dev2 or
+# Ops/Opswork a bare -t can hit (or kill) the WRONG session.
 # A non-default config_dir launches the in-tmux command under CLAUDE_CONFIG_DIR=<dir> so a secondary
 # profile resumes its OWN transcript instead of silently starting fresh under the default profile.
 rc_launch() {
   local name="$1" workdir="$2" sid="$3" cfg="${4:-}"
-  if tmux has-session -t "$name" 2>/dev/null; then
+  if tmux has-session -t "=$name" 2>/dev/null; then
     echo "SKIP name=$name (already running)"; return 0
   fi
   [ -d "$workdir" ] || { echo "ERR_DIR name=$name dir=$workdir (skipped)" >&2; return 4; }
@@ -95,13 +98,13 @@ rc_launch() {
   fi
 
   tmux new-session -d -s "$name" -c "$workdir"
-  tmux send-keys -t "$name" "set -a; source '$ENVFILE' 2>/dev/null; set +a; ${cfgprefix}claude --remote-control '$name' $launchflag" Enter
+  tmux send-keys -t "=$name" "set -a; source '$ENVFILE' 2>/dev/null; set +a; ${cfgprefix}claude --remote-control '$name' $launchflag" Enter
   # First-run "enable project MCP servers?" prompt (create only); Enter accepts it. No-op on resume.
   sleep 10
-  tmux send-keys -t "$name" Enter
+  tmux send-keys -t "=$name" Enter
   sleep 2
 
-  local cwd; cwd="$(tmux display-message -p -t "$name" -F '#{pane_current_path}' 2>/dev/null)"
+  local cwd; cwd="$(tmux display-message -p -t "=$name" -F '#{pane_current_path}' 2>/dev/null)"
   echo "OK name=$name cwd=${cwd:-unknown} session_id=$sid mode=$mode profile=$profile remote_control=on"
 }
 
@@ -153,8 +156,8 @@ rc_archive() {  # arg: name (any casing/spacing) — live registry -> archive, k
   mv "$tmp" "$ARCHIVE"
   rc_deregister "$name"
   local tmuxstate="not running"
-  if tmux has-session -t "$name" 2>/dev/null; then
-    tmux kill-session -t "$name" && tmuxstate="killed"
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    tmux kill-session -t "=$name" && tmuxstate="killed"
   fi
   echo "OK archived name=$name session_id=$sid workdir=$workdir tmux=$tmuxstate (revive: archive-remote-claude.sh revive $name)"
 }
@@ -182,4 +185,82 @@ rc_revive() {  # arg: name (any casing/spacing) — archive -> live registry, th
 rc_archive_list() {  # print parked sessions: NAME  WORKDIR  SESSION_ID  PROFILE (config dir, "(default)" when unset)
   [ -f "$ARCHIVE" ] && [ -s "$ARCHIVE" ] || { echo "(no archived sessions)"; return 0; }
   awk -F'\t' 'NF>0 {printf "%-42s %-28s %-38s %s\n", $1, $2, $3, ($4==""?"(default)":$4)}' "$ARCHIVE"
+}
+
+# Locate a session's transcript file (echoes the path, empty if none). Mirror of
+# rc_transcript_exists but returns the path so callers can stat it.
+rc_transcript_path() {  # args: session_id [config_dir]
+  local sid="$1" cfg="${2:-}"; [ -n "$cfg" ] || cfg="$HOME/.claude"
+  find "$cfg/projects" -maxdepth 2 -name "$sid.jsonl" -print -quit 2>/dev/null
+}
+
+# Health view of the LIVE registry — the surface that actually boot-resumes. For each row shows a
+# STATUS flag, transcript age, whether it is really in tmux, and its profile, so stale/zombie rows
+# that would silently reboot into old context are visible at a glance. Read-only: parks nothing.
+#   ZOMBIE  in the registry but NOT in tmux -> reboot spawns a fresh/old session from its id
+#   STALE   transcript older than RC_STALE_DAYS (default 7) -> likely a finished purpose left unparked
+#   IDLE    live in tmux but not attached (normal for a background session)
+#   OK      live + attached (or freshly active)
+# Also flags case/format COLLISIONS: >1 live tmux session normalizing to one registry name (only the
+# canonically-named one may hold the row; a stray like "dev" vs "Dev" would otherwise clobber it).
+rc_sweep() {
+  local stale_days="${RC_STALE_DAYS:-7}" now; now="$(date +%s)"
+  echo "LIVE registry ($REGISTRY) — these boot-resume on reboot:"
+  if [ ! -s "$REGISTRY" ]; then
+    echo "  (empty — nothing boots)"
+  else
+    printf '  %-8s %-24s %-5s %-6s %-9s %s\n' STATUS NAME AGE TMUX PROFILE SESSION_ID
+    while IFS=$'\t' read -r name workdir sid cfg; do
+      [ -z "${name:-}" ] && continue
+      case "$name" in \#*) continue ;; esac
+      local cfgdir tp mt age_days age tmuxstate status prof
+      cfgdir="$cfg"; [ -n "$cfgdir" ] || cfgdir="$HOME/.claude"
+      tp="$(rc_transcript_path "$sid" "$cfgdir")"
+      if [ -n "$tp" ]; then
+        mt="$(date -r "$tp" +%s 2>/dev/null || echo "$now")"
+        age_days="$(( (now - mt) / 86400 ))"; age="${age_days}d"
+      else
+        mt="$now"; age_days=0; age="-"
+      fi
+      if tmux has-session -t "=$name" 2>/dev/null; then
+        if [ "$(tmux display-message -p -t "=$name" '#{session_attached}' 2>/dev/null)" = "1" ]; then
+          tmuxstate="live*"   # attached
+        else
+          tmuxstate="live"
+        fi
+      else
+        tmuxstate="gone"
+      fi
+      # status priority: ZOMBIE (not in tmux) > STALE (old transcript) > IDLE (detached) > OK
+      if [ "$tmuxstate" = "gone" ]; then
+        status="ZOMBIE"
+      elif [ -n "$tp" ] && [ "$age_days" -ge "$stale_days" ]; then
+        status="STALE"
+      elif [ "$tmuxstate" = "live" ]; then
+        status="IDLE"
+      else
+        status="OK"
+      fi
+      if [ -n "$cfg" ]; then prof="$(basename "$cfg")"; prof="${prof#.claude-}"; [ "$prof" = ".claude" ] && prof="default"; else prof="default"; fi
+      printf '  %-8s %-24s %-5s %-6s %-9s %s\n' "$status" "$name" "$age" "$tmuxstate" "$prof" "${sid:0:8}"
+    done < "$REGISTRY"
+  fi
+
+  # Collision scan: multiple LIVE tmux sessions whose raw names normalize to the same registry name.
+  if command -v tmux >/dev/null 2>&1; then
+    local collisions
+    collisions="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | while read -r s; do
+        [ -n "$s" ] && printf '%s\t%s\n' "$(rc_normalize_name "$s")" "$s"
+      done | awk -F'\t' '{c[$1]++; raw[$1]=raw[$1] " [" $2 "]"} END{for(k in c) if(c[k]>1) printf "  %s  <- %s\n", k, raw[k]}')"
+    if [ -n "$collisions" ]; then
+      echo
+      echo "COLLISIONS (multiple live tmux sessions map to one registry name — park/rename the stray):"
+      printf '%s\n' "$collisions"
+    fi
+  fi
+
+  local acount=0
+  [ -f "$ARCHIVE" ] && acount="$(awk 'NF>0' "$ARCHIVE" | grep -c .)"
+  echo
+  echo "Archived (parked, do NOT boot): $acount   —   park a live one: archive-remote-claude.sh archive <name>"
 }
