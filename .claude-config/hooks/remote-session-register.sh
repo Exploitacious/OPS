@@ -88,6 +88,28 @@ if [ -n "$(rc_resolve_name "$name" "$ARCHIVE")" ]; then
   exit 0
 fi
 
+# --- case/format collision guard ---
+# tmux names are case-sensitive but rc_normalize_name folds case + separators, so two live tmux
+# sessions ("dev" and "Dev") can map to ONE registry name. Protect an EXISTING canonical session
+# from being clobbered by a stray: if THIS session's raw name is not already canonical (raw !=
+# normalized) AND a live session spelled exactly canonical is present to hold the row, skip.
+# Gate on the canonical rival being present — NOT merely on a collision count — so that when no
+# canonical-named session exists, a non-canonical one (e.g. hand-typed "morning briefing") still
+# registers. A messy-but-present row beats no boot-resumable row. (tmux presence guaranteed by
+# the fast guards at the top.)
+if [ "$sname" != "$name" ]; then
+  canonical_present=0
+  while read -r other; do
+    [ "$other" = "$name" ] && canonical_present=1
+  done <<EOF
+$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+EOF
+  if [ "$canonical_present" = "1" ]; then
+    echo "SKIP name=$name (case/format collision: raw '$sname' is not canonical; the canonical session holds the registry row)"
+    exit 0
+  fi
+fi
+
 # --- upsert: same session re-registers with its newest id on every restart ---
 rc_register "$name" "$workdir" "$sid" "$cfg"
 echo "OK registered name=$name workdir=$workdir session_id=$sid profile=${cfg:-default}"
