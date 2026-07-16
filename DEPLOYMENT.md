@@ -143,15 +143,18 @@ In order:
 ### What Stage 2 does (Windows, `deploy.ps1`)
 
 Windows runs single-user, so the pipeline is shorter: symlink
-`~/.claude/{skills,commands,agents,workflows}`, wire `WORKFORCE/bin` onto the
-PowerShell `$PROFILE` PATH, initialize auto-memory git-sync
-(`ac-memory-init.ps1`), register a `OPS Daily Backup` scheduled task, and
-install the caveman plugin.
+`~/.claude/{skills,commands,agents,workflows}`, wire `WORKFORCE/bin` onto
+PATH via an untracked `profile.local.ps1` seam (one per PowerShell edition,
+under `Documents/PowerShell` and `Documents/WindowsPowerShell`) — never
+`$PROFILE` itself, since `$PROFILE` is a shim/symlink tied to the public
+linuxploitacious repo and `deploy.ps1` refuses to append there — initialize
+auto-memory git-sync (`ac-memory-init.ps1`), register a `OPS Daily Backup`
+scheduled task, and install the caveman plugin.
 
-**Windows parity gap:** the `claude-wrapper` (a root/user flock is meaningless
-on single-user Windows), the ultracode shim, and the trust-anchor seed are
-implemented only in `deploy.sh` — deferred to a dedicated Windows-parity
-session. Do not assume Windows hosts have these until that lands.
+**Windows parity gap:** the `claude-wrapper` remains Linux-only (a root/user
+flock is meaningless on single-user Windows). The ultracode shim and the
+trust-anchor seed ARE implemented in `deploy.ps1` (steps 4-5) — parity holds
+for those two.
 
 ### Verifying Stage 2
 
