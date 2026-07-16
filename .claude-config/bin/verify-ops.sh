@@ -152,7 +152,22 @@ check_handoffs() {
   [ -z "$stale" ] && ok "no stale pending handoffs" || warn "pending handoff baton(s) older than 7 days: $stale"
 }
 
-# 12. Ship gate for the public template: README must exist, and the build-time
+# 12. Autonomy-critical settings must stay on: a blocked run notifies via
+# push (charter § Full-autonomy); guard hooks must stay registered. Checks the
+# DEPLOYED settings surface (~/.claude/settings.json, Stage-1-owned), falling
+# back to the Stage-1 repo copy when the deploy has not run yet.
+check_autonomy_settings() {
+  local settings="$HOME/.claude/settings.json" bad=""
+  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
+  [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
+  grep -q '"agentPushNotifEnabled": true' "$settings" 2>/dev/null || bad="$bad agentPushNotifEnabled"
+  grep -q 'git-guard.sh' "$settings" 2>/dev/null || bad="$bad git-guard-unregistered"
+  grep -q 'secrets-guard.sh' "$settings" 2>/dev/null || bad="$bad secrets-guard-unregistered"
+  [ -x "$OPS/.claude-config/hooks/git-guard.sh" ] || bad="$bad git-guard-not-executable"
+  [ -z "$bad" ] && ok "autonomy-critical settings + guards intact" || fail "autonomy safety net degraded:$bad"
+}
+
+# 13. Ship gate for the public template: README must exist, and the build-time
 # scrub contract must be gone. GENERALIZATION-RULES.md is the private-content
 # denylist used to extract this template from the Operator's private harness —
 # it names identities that must never ship, so its presence at ship time is a
@@ -176,6 +191,7 @@ main() {
   check_skills_index
   check_projects_map
   check_handoffs
+  check_autonomy_settings
   check_ship_gate
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
