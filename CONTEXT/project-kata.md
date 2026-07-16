@@ -386,6 +386,38 @@ Secrets never live in the repo. The pattern:
 - `.env.example` documents the surface; `.env` (gitignored) holds
   the real values locally.
 
+### Image-publishing repos: GHCR retention workflow
+
+Any repo that publishes container images to GHCR gets a retention
+workflow at scaffold time — registries accumulate versions forever,
+and the cost surfaces only after thousands of stale versions pile
+up (one dashboard repo hit ~3,000 before its first cleanup).
+
+The standard shape is `ghcr-cleanup.yml` using
+`dataaxiom/ghcr-cleanup-action`, manual-first:
+
+- `workflow_dispatch` only — no schedule until the config has
+  proven itself on a real run.
+- A `dry_run` input defaulting to `true` — nothing deletes until
+  someone deliberately runs it dry, reviews, then runs it live.
+- Keep the last N tagged versions (10-25 depending on release
+  cadence).
+- `exclude-tags` for `latest`, `prod`, and any sha pins.
+
+Two platform gotchas, learned live:
+
+- **`workflow_dispatch` only fires from the repo's GitHub default
+  branch.** A cleanup workflow merged to a non-default working
+  branch (e.g. a fork's long-lived integration branch) cannot be
+  triggered until either the default branch is switched or the file
+  lands on the default. Check this before declaring the workflow
+  deployed.
+- **Guessed package names 404.** The workflow's package list must
+  name packages that actually exist in the registry — a plausible
+  but never-published name fails the run. Always dry-run first and
+  confirm the package exists and `latest`/pins are excluded before
+  the real deletion.
+
 ### A note on backlogs
 
 Per Rule 1, backlog files (`IDEAS.md`, `ROADMAP.md`,
