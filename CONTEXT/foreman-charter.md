@@ -257,9 +257,11 @@ needs the knowledge, not where you happened to learn it:
   git-synced store (`ac-memory-init` per profile; the briefing hook nudges
   when an unadopted pool appears); (b) pool content is *working state*, not
   durable lessons — when an entry hardens into a reusable lesson, the
-  closeout stage folds it up to `CONTEXT/projects/<p>-lessons.md` and leaves
-  a stub; (c) idle-project pools retire via the `ac-memory-gc` staging flow
-  (operator approves).
+  closeout stage folds it up to `CONTEXT/projects/<p>-lessons.md` and
+  **deletes the entry — no stub** (the read-order map below already routes
+  every project session to its lessons file; a stub spends an index line
+  saying so twice); (c) idle-project pools retire via the `ac-memory-gc`
+  staging flow (operator approves).
 - **`CONTEXT/projects/<project>-lessons.md`** (in OPS — synced + loaded
   on-demand) — any reusable lesson tied to one project's code, vendor, or
   infra. Tied to one project → it goes in that project's lessons file, NOT in
@@ -278,6 +280,31 @@ needs the knowledge, not where you happened to learn it:
   docs), harvest it up to OPS and delete the project-local copy (or
   leave a one-line pointer) — duplicates drift and go invisible to your
   other projects.
+
+### Eviction — memory is a write cache, not an archive (Operator design, 2026-07-16)
+
+Auto-memory holds the **working set** (in-flight project state) plus a small
+set of **standing facts** (user, cross-project, references). The long-term
+store is the repo: lessons files, docs, SoT. The cold archive is git — the
+`.claude-memory/` mirror is synced, so **deleting a memory entry is never
+data loss**; hoarding "just in case" only taxes every future session's
+context. Rules:
+
+- **Lifecycle.** Project and in-flight entries die when their project hits a
+  terminal state (closed, shipped, parked, or otherwise retired): the close
+  ritual and every closeout fold anything durable into the project's lessons
+  file and **delete the entries and their index lines**. No stubs.
+- **Soft budget: MEMORY.md ≤ ~16KB (~80 entries).** Every closeout that finds
+  the index over budget evicts the stalest entries as part of hygiene — fold
+  first if durable, then delete. The ~24.4KB platform ceiling (where the
+  index silently truncates) must never be reached; hitting it means closeouts
+  have been skipping the flush.
+- **Flush queue.** The write-time routing nudge (`secrets-guard`) appends
+  flagged entries to `~/.claude-compact-cycle/memory-flush-queue`; the
+  closeout consumes and clears it mechanically instead of relying on recall.
+- **`/memory-prune` is the deep audit** (quarterly, or after doctrine
+  changes) — not routine maintenance. Routine health is the closeout flush.
+
 - **Harness config** — behavior that must fire automatically (a default,
   a hook, a permission) goes in settings/hooks (Stage-1 linuxploitacious
   for durable knobs), not in prose that hopes to be read.

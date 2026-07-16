@@ -100,12 +100,18 @@ if [ "$MODE" = "post" ]; then
     fi
   done
   [ -n "$MATCH" ] || exit 0
+  # Queue the entry for the closeout flush (charter § Eviction) — the closeout
+  # consumes this file mechanically instead of relying on session recall.
+  QUEUE_DIR="$HOME/.claude-compact-cycle"
+  mkdir -p "$QUEUE_DIR" 2>/dev/null || true
+  printf '%s\t%s\tproject:%s\n' "$(date -Is)" "$FILE_PATH" "$MATCH" >> "$QUEUE_DIR/memory-flush-queue" 2>/dev/null || true
   {
     echo "memory-routing nudge: the entry just written ($(basename "$FILE_PATH")) is type:project and"
     echo "mentions '$MATCH' — per foreman-charter § 'Where knowledge goes', durable single-project"
     echo "lessons belong in CONTEXT/projects/${MATCH}-lessons.md (synced, loaded when working that"
     echo "project). Keep it in auto-memory only if it is genuinely cross-project or in-flight session"
-    echo "state; otherwise fold it into the lessons file and reduce the memory entry to a pointer."
+    echo "state; otherwise fold it into the lessons file and DELETE the memory entry (no stub —"
+    echo "charter § Eviction). Queued for the closeout flush either way."
   } >&2
   exit 2
 fi
