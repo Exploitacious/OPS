@@ -77,14 +77,15 @@ fi
 
 if [ "$MODE" = "post" ]; then
   # Routing nudge — only for substantive project-typed memory entries landing
-  # in a cross-project pool; stubs/pointers, indexes, and lessons files stay quiet.
+  # in a cross-project pool; indexes and lessons files stay quiet. Stub-phrased
+  # entries are NOT suppressed: under charter § Eviction stubs shouldn't exist,
+  # so a legacy stub is flush debt that belongs in the queue.
   case "$FILE_PATH" in
     "$HOME"/OPS/CONTEXT/projects/* | */OPS/CONTEXT/projects/*) exit 0 ;;  # already routed right
     */memory/MEMORY.md) exit 0 ;;                  # index, not an entry
   esac
   SIZE="$(wc -c < "$TMP")"
   [ "$SIZE" -ge 400 ] || exit 0
-  grep -qiE '(folded to|canonical entry lives|pointer stub)' "$TMP" && exit 0
   grep -qE '^\s*type:\s*project\s*$' "$TMP" || exit 0
 
   LESSONS_DIR="$HOME/OPS/CONTEXT/projects"
