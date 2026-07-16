@@ -179,6 +179,22 @@ the rules do not:
   hard runtime constraint). For sign-off between stages, run each stage
   as its own workflow.
 
+## The `args` trap (verified live, 2026-07-16)
+
+`args` can arrive **undefined or stringified** at the script even when the
+Workflow call passed a proper JSON object — `args.lanes.map(...)` then throws
+`undefined is not an object` before a single agent runs, and a recovery hint
+that re-quotes args as a string makes it worse. Rules:
+
+- For a one-shot script, **hardcode the inputs as a `const` literal** in the
+  script body; reserve `args` for genuinely parameterized saved workflows.
+- When you do use `args`, guard every access (`(args && args.lanes) || [...]`)
+  with a usable fallback, and have big payloads read from a file on disk by
+  the AGENTS (pass the path), not through `args`.
+- On failure, resume with `{scriptPath, resumeFromRunId}` after patching the
+  persisted script — completed agents replay from cache, so a pre-flight args
+  crash costs nothing.
+
 ## Resume + iteration
 
 Runs are resumable within the same session: completed `agent()` calls

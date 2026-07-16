@@ -82,12 +82,16 @@ if [ -s "$REM" ]; then
   fi
 fi
 
-# --- memory health (nudge until the index is back under the binary's limit) ---
+# --- memory health (two-tier: soft flush budget, hard platform ceiling) ---
+# Charter § Eviction: routine drainage happens at every closeout; the deep
+# /memory-prune audit is for drift, not maintenance.
 MEM="$CFG/projects/$ENCODED_CWD/memory/MEMORY.md"
 if [ -f "$MEM" ]; then
   sz="$(wc -c < "$MEM" 2>/dev/null | tr -d ' ')"
   if [ "${sz:-0}" -gt 24576 ]; then
-    printf ' Memory:  index ~%sKB > 24KB limit (entries truncated) — run /memory-prune\n' "$(( ${sz:-0} / 1024 ))"
+    printf ' Memory:  index ~%sKB OVER the 24KB platform ceiling (truncating NOW) — closeout flush overdue\n' "$(( ${sz:-0} / 1024 ))"
+  elif [ "${sz:-0}" -gt 16384 ]; then
+    printf ' Memory:  flush debt — index ~%sKB > 16KB soft budget; next closeout evicts to budget\n' "$(( ${sz:-0} / 1024 ))"
   fi
 fi
 

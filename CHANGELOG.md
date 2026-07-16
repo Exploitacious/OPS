@@ -4,6 +4,38 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-16 — closeout/memory wave: memory is a write cache, arming-order gate
+
+One-PR wave ported from a private harness under the CONTRIBUTING extraction
+discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
+
+- **Memory eviction lifecycle.** `foreman-charter.md` § "Eviction — memory is
+  a write cache, not an archive": auto-memory holds the working set plus a
+  small set of standing facts; the long-term store is the repo (lessons
+  files, docs), the cold archive is the git-synced mirror — deleting an entry
+  is never data loss. Terminal projects purge their entries (fold into the
+  lessons file, then delete — no stubs); `MEMORY.md` gets a ~16KB soft budget
+  under the ~24.4KB platform truncation ceiling.
+- **Closeout flush gate.** `pre-compact-synthesis` hygiene step 2 becomes a
+  three-part gate: this session's entries plus the write-time flush queue
+  (`secrets-guard.sh` now appends flagged entries to
+  `~/.claude-compact-cycle/memory-flush-queue`), terminal-project purge, and
+  budget eviction. `session-briefing.sh` memory health goes two-tier (flush
+  debt at 16KB vs platform ceiling at 24KB); `session-close` purges the
+  closing project's cache lines; `memory-prune` is repositioned as the
+  quarterly deep audit, not routine maintenance.
+- **Arming-order gate.** The self-compact cycle may only be armed after the
+  four artifacts are green, docs-reflect-reality has passed, and a conscious
+  knowledge-capture completeness check (the `transcript-mine` workflow since
+  the last-closeout stamp, on long/autonomous sessions). Anything unresolved
+  means DO NOT ARM — the automation removes the Operator's keystrokes, never
+  the synthesis.
+- **Also in the wave.** Migration-closeout checklist (the four vectors that
+  make a fresh agent regenerate a removed pattern) in `pre-compact-synthesis`;
+  the Workflow `args` trap (hardcode one-shot inputs; args can arrive
+  undefined/stringified) in `agent-delegation/05_dynamic_workflows.md`;
+  memory-index regeneration discipline in `memory-prune`.
+
 ## 2026-07-15 — backport wave: compact automation, session-persistence hardening, portable hooks
 
 Five-PR wave ported from a private harness under the CONTRIBUTING extraction
