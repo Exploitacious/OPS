@@ -21,31 +21,45 @@ set -uo pipefail
 MODE="${1:-pre}"
 [ "${SECRETS_GUARD:-on}" = "off" ] && exit 0
 
-SCAN="$HOME/OPS/.claude-config/bin/secrets-scan.sh"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/hooklib.sh"
+
+# Scanner lives alongside the hooks in .claude-config/bin; fall back to the
+# deployed ~/OPS location when the hook runs from a copy.
+SCAN="$HOOK_DIR/../bin/secrets-scan.sh"
+[ -x "$SCAN" ] || SCAN="$HOME/OPS/.claude-config/bin/secrets-scan.sh"
 [ -x "$SCAN" ] || exit 0
 
 TMP="$(mktemp)" || exit 0
 trap 'rm -f "$TMP"' EXIT
 
-# Parse the hook JSON: file_path to stdout, content/new_string into $TMP.
-FILE_PATH="$(python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-ti = d.get("tool_input") or {}
-path = ti.get("file_path") or ""
-content = ti.get("content") or ti.get("new_string") or ""
-with open(sys.argv[1], "w") as f:
-    f.write(content)
-sys.stdout.write(path)
-' "$TMP" 2>/dev/null)" || exit 0
+# Parse the hook JSON: file_path + content/new_string. The portable extractor
+# (jq -> python) replaces the old `python3 -c`, which was dead on Windows
+# (no python3 shim) and fell through `|| exit 0` = fail-open.
+RAW_INPUT="$(cat)"
+if ! FILE_PATH="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.file_path)"; then
+  # No JSON parser at all (can't happen on a provisioned box — jq is a hard
+  # dependency). This guard fires on EVERY Write|Edit but only cares about the
+  # narrow memory/lessons surfaces; blocking all writes to stop a
+  # credential-in-memory would be grossly disproportionate. Warn + allow.
+  echo "secrets-guard: no JSON parser (jq/python) available — write NOT scanned. Install jq." >&2
+  exit 0
+fi
 [ -n "$FILE_PATH" ] || exit 0
+CONTENT="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.content)"
+[ -n "$CONTENT" ] || CONTENT="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.new_string)"
+printf '%s' "$CONTENT" > "$TMP"
 
-# Guarded surfaces: any auto-memory pool + the lessons files.
+# Normalize Windows backslashes so the case-globs match native file_path forms
+# (Windows Claude Code may emit C:\...\memory\x.md).
+FILE_PATH="${FILE_PATH//\\//}"
+
+# Guarded surfaces: any auto-memory pool + the lessons files. Unanchored */
+# variants also catch drive-letter paths (C:/Users/... vs $HOME=/c/Users/...).
 case "$FILE_PATH" in
-  */memory/*.md | "$HOME"/OPS/.claude-memory/*/*.md | "$HOME"/OPS/CONTEXT/projects/*.md) ;;
+  */memory/*.md \
+  | */.claude-memory/*/*.md | "$HOME"/OPS/.claude-memory/*/*.md \
+  | */OPS/CONTEXT/projects/*.md | "$HOME"/OPS/CONTEXT/projects/*.md) ;;
   *) exit 0 ;;
 esac
 
@@ -65,7 +79,7 @@ if [ "$MODE" = "post" ]; then
   # Routing nudge — only for substantive project-typed memory entries landing
   # in a cross-project pool; stubs/pointers, indexes, and lessons files stay quiet.
   case "$FILE_PATH" in
-    "$HOME"/OPS/CONTEXT/projects/*) exit 0 ;;   # already routed right
+    "$HOME"/OPS/CONTEXT/projects/* | */OPS/CONTEXT/projects/*) exit 0 ;;  # already routed right
     */memory/MEMORY.md) exit 0 ;;                  # index, not an entry
   esac
   SIZE="$(wc -c < "$TMP")"

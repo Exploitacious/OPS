@@ -56,6 +56,7 @@ goal="$(grep -m1 -E '^# Handoff:' "$BATON" 2>/dev/null | sed -E 's/^# Handoff:[[
 # shows that dir's basename instead of "default" so the banner still tells
 # you which profile the baton is being read from.
 _cfg_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+_cfg_dir="${_cfg_dir//\\//}"   # normalize backslashes so a Windows path compares sanely
 cur="default"
 [ "$_cfg_dir" = "$HOME/.claude" ] || cur="$(basename "$_cfg_dir")"
 

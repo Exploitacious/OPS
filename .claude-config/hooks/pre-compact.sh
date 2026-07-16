@@ -60,24 +60,18 @@ if [[ ! -t 0 ]]; then
   PAYLOAD="$(cat 2>/dev/null || true)"
 fi
 
-# Best-effort payload parse. python3 is universal on Linux + macOS;
-# fall back to a string scan if it isn't.
+# Best-effort payload parse via the portable extractor (jq -> python). The old
+# `python3 -c` never ran on Windows Git Bash (no python3 shim), leaving
+# TRIGGER/REASON stuck at their defaults. This is telemetry, not a gate —
+# degrade quietly when no parser exists.
 TRIGGER="unknown"
-REASON=""
-EST_TOKENS=""
-if [[ -n "$PAYLOAD" ]] && command -v python3 >/dev/null 2>&1; then
-  read -r TRIGGER REASON EST_TOKENS < <(
-    printf '%s' "$PAYLOAD" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get('trigger', 'unknown'),
-          d.get('reason', '').replace('\\n', ' ')[:200] or '-',
-          d.get('estimated_tokens_removed', '-'))
-except Exception:
-    print('unknown - -')
-"
-  )
+REASON="-"
+EST_TOKENS="-"
+if [[ -n "$PAYLOAD" ]]; then
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooklib.sh"
+  _t="$(printf '%s' "$PAYLOAD" | hook_field trigger)"                   && [[ -n "$_t" ]] && TRIGGER="$_t"
+  _r="$(printf '%s' "$PAYLOAD" | hook_field reason)"                    && [[ -n "$_r" ]] && REASON="$(printf '%s' "$_r" | tr '\n' ' ' | cut -c1-200)"
+  _e="$(printf '%s' "$PAYLOAD" | hook_field estimated_tokens_removed)"  && [[ -n "$_e" ]] && EST_TOKENS="$_e"
 fi
 
 dbg "trigger=$TRIGGER reason=$REASON est_tokens=$EST_TOKENS"
