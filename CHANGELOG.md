@@ -4,6 +4,14 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-16 — flush-debt follow-up: stub-phrased entries no longer suppressed
+
+- `secrets-guard.sh`: the routing nudge previously stayed quiet for entries
+  phrased like stubs (`folded to` / `canonical entry lives` / `pointer stub`).
+  Under charter § Eviction stubs shouldn't exist — a legacy stub is flush
+  debt that belongs in the queue, so the suppression is removed and such
+  entries now get nudged + queued for the closeout flush.
+
 ## 2026-07-16 — closeout/memory wave: memory is a write cache, arming-order gate
 
 One-PR wave ported from a private harness under the CONTRIBUTING extraction
