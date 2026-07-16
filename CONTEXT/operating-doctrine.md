@@ -311,6 +311,24 @@ in the same pass. Drift between this file and its copies is checked
 by `verify-ops.sh`, a machine gate being added as part of the
 2026-07-06 doc-truth sweep.
 
+**Token cost is not a lever against doctrine compliance (Operator
+ruling, 2026-07-06).** The duplication above is one instance of a
+general rule. A harness audit's boot-tax lane once measured ~35-39K
+tokens per obedient cold boot and proposed trims; the Operator's
+ruling: the boot tax is worth it — "I would rather have compliant
+agents that operate the way I want, even if they use some more
+tokens to do so." Repetition is how these models internalize a
+non-default operating posture; the doctrine's weight IS the
+compliance mechanism. The harmful thing is not repetition but
+repeated CONTRADICTIONS — those teach agents to distrust the
+doctrine — which is what `verify-ops.sh`'s drift checks and the
+doc-truth discipline exist to prevent. So: never propose
+consolidating or trimming the always-loaded chain for token
+savings. Compliance-motivated restructuring (e.g. the
+worker-digest, which focuses attention rather than cutting mass)
+is fine. Distinct from the token-spend gate in P12, which governs
+workflow spend — a different decision.
+
 **Drop filler words:** just, really, basically, actually, simply,
 essentially, generally, certainly, definitely, obviously, clearly.
 

@@ -4,6 +4,16 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-16 — doctrine: token cost is not a lever against compliance
+
+- New operating-doctrine ruling (Operator, 2026-07-06, now written down):
+  never propose consolidating or trimming the always-loaded doctrine chain
+  for token savings — repetition is how agents internalize a non-default
+  posture; the harm is repeated contradictions, not repetition, and the
+  drift checks exist to prevent exactly those. Compliance-motivated
+  restructuring (worker-digest) stays fine; distinct from P12's
+  workflow-spend gate.
+
 ## 2026-07-16 — project-kata: GHCR retention workflow for image-publishing repos
 
 - New kata section: any repo publishing container images to GHCR gets a
