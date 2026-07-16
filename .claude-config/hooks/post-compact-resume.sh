@@ -58,15 +58,12 @@ fi
 # Extract `source` field. Best-effort; if parsing fails, exit silently
 # so we never gum up session start.
 SOURCE="unknown"
-if [[ -n "$PAYLOAD" ]] && command -v python3 >/dev/null 2>&1; then
-  SOURCE="$(printf '%s' "$PAYLOAD" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get('source', 'unknown'))
-except Exception:
-    print('unknown')
-" 2>/dev/null || echo "unknown")"
+if [[ -n "$PAYLOAD" ]]; then
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooklib.sh"
+  # Portable extractor (jq -> python). The old `python3 -c` never ran on
+  # Windows Git Bash (no python3 shim), so SOURCE stayed 'unknown' and the
+  # resume banner never fired.
+  _s="$(printf '%s' "$PAYLOAD" | hook_field source)" && [[ -n "$_s" ]] && SOURCE="$_s"
 fi
 
 # Only handle the post-compact resume case.

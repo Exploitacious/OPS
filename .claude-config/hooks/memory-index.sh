@@ -34,20 +34,41 @@ dbg() {
   return 0
 }
 
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/hooklib.sh"
+
 INDEXER="$HOME/OPS/WORKFORCE/bin/ac-memory-index"
-if [[ ! -x "$INDEXER" ]]; then
-  dbg "indexer not found/executable at $INDEXER — nothing to do"
+if [[ ! -f "$INDEXER" ]]; then
+  dbg "indexer not found at $INDEXER — nothing to do"
   exit 0
 fi
 
+# Read the SessionStart payload (non-blocking).
+PAYLOAD=""
+[[ ! -t 0 ]] && PAYLOAD="$(cat 2>/dev/null || true)"
+
 # Resolve the active memory dir.
 #   1. explicit override wins (testing)
-#   2. else $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/memory
-CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-ENCODED_CWD="$(pwd | sed 's|/|-|g')"   # Claude encodes cwd this way
-MEM_DIR="${MEMORY_INDEX_DIR:-$CLAUDE_CFG/projects/${ENCODED_CWD}/memory}"
+#   2. else derive it from transcript_path in the payload — Claude's OWN encoded
+#      path (<cfg>/projects/<encoded>/<id>.jsonl), so memory is the sibling
+#      <...>/memory. The old `pwd | sed` produced `-c-Users-...` on Windows
+#      Git Bash, never matching Claude's native `C--Users-...`, so MEMORY.md
+#      never regenerated there.
+#   3. else fall back to CLAUDE_CONFIG_DIR + pwd-encoded (correct on Linux).
+MEM_DIR="${MEMORY_INDEX_DIR:-}"
+if [[ -z "$MEM_DIR" && -n "$PAYLOAD" ]]; then
+  TRANSCRIPT="$(printf '%s' "$PAYLOAD" | hook_field transcript_path)" || TRANSCRIPT=""
+  if [[ -n "$TRANSCRIPT" ]]; then
+    MEM_DIR="$(hook_pathnorm "$(dirname "$TRANSCRIPT")")/memory"
+  fi
+fi
+if [[ -z "$MEM_DIR" ]]; then
+  CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  ENCODED_CWD="$(pwd | sed 's|/|-|g')"
+  MEM_DIR="$CLAUDE_CFG/projects/${ENCODED_CWD}/memory"
+fi
 
-dbg "claude_cfg=$CLAUDE_CFG encoded_cwd=$ENCODED_CWD mem_dir=$MEM_DIR"
+dbg "mem_dir=$MEM_DIR"
 
 # The memory dir may be a real dir OR a symlink into the OPS store; both
 # resolve fine here. If it doesn't exist yet (no memory written for this cwd
@@ -61,10 +82,13 @@ fi
 # MEMORY.md (never touches the memory files). Exit code 2 means some file
 # needed a kebab-fallback title (informational, not an error); we still
 # succeed so the session start is never blocked.
+# Invoke via a resolved interpreter — ac-memory-index's `#!/usr/bin/env python3`
+# shebang is dead on Windows (no python3 shim), so run it explicitly.
+PY="$(hook_python)" || { dbg "no python interpreter available — cannot run indexer"; exit 0; }
 if [[ "${MEMORY_INDEX_DEBUG:-0}" == "1" ]]; then
-  "$INDEXER" "$MEM_DIR" || true
+  "$PY" "$INDEXER" "$MEM_DIR" || true
 else
-  "$INDEXER" "$MEM_DIR" >/dev/null 2>&1 || true
+  "$PY" "$INDEXER" "$MEM_DIR" >/dev/null 2>&1 || true
 fi
 
 dbg "regenerated $MEM_DIR/MEMORY.md"
