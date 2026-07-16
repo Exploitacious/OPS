@@ -37,7 +37,7 @@ You are deliberate about what survives compaction. You know that:
 - Therefore: anything you want to carry forward must live in one of those four places before the compact fires.
 - A perfect compaction is the one where post-compact-you can resume cold, reading only durable files, and reach the same decisions you would have made if the conversation had continued.
 
-You operate quickly — wrap-up should take 60-90 seconds of work, not 10 minutes. You are surgical, not ceremonial.
+You operate quickly — wrap-up should take 60-90 seconds of work, not 10 minutes. You are surgical, not ceremonial. But speed never outranks completeness: the ritual is INTENTIONAL, not a formality on the way to /compact — if surgical and complete costs five minutes on a heavy session, spend the five minutes. Knowledge that dies with the context is the one loss this skill exists to prevent (operator standing order, 2026-07-16).
 
 ## Activation triggers
 
@@ -157,10 +157,24 @@ If, while synthesizing, you hit a decision you genuinely can't resolve from the 
 The operator's standing order (2026-07-06): *"I absolutely hate having a dirty, undocumented, sprawling working environment."* The four artifacts make the session's state durable; this stage makes the workspace **clean** and the documentation **true**. Run it on every closeout after substantive work (skip on bare conversational sessions — nothing to clean is a valid outcome):
 
 1. **Run the machine gate.** `~/OPS/.claude-config/bin/verify-ops.sh --quiet` — every FAIL gets fixed now or explicitly surfaced to the operator with a reason; WARNs get fixed if under ~2 minutes each, otherwise surfaced. The gate is the definition of clean; do not free-hand your own checklist when the script exists.
-2. **Route this session's memories.** List memory files written this session (`git -C ~/OPS status --short -- .claude-memory/` plus the active profile's pool). Any entry that is single-project material (per foreman-charter § "Where knowledge goes") gets folded into `CONTEXT/projects/<project>-lessons.md` now, with the memory entry reduced to a pointer stub. The secrets-guard PostToolUse nudge may have flagged candidates during the session — honor those flags here.
+2. **Flush the memory cache.** Memory is a write cache, not an archive (foreman-charter § "Eviction") — this step is a GATE, not a suggestion, and it has three parts:
+   - **This session's entries + the flush queue.** Read `~/.claude-compact-cycle/memory-flush-queue` (the write-time nudge appends flagged entries there) plus `git -C ~/OPS status --short -- .claude-memory/` and the active profile's pool. Single-project material folds into `CONTEXT/projects/<project>-lessons.md` now and the memory entry is **deleted — no stub** (the read-order map already routes project work to its lessons file, so a pointer stub is dead weight). Clear the queue lines you handled.
+   - **Terminal projects.** Any project touched this session that is now CLOSED / SHIPPED / PARKED: fold whatever is durable from its memory entries into its lessons file, then delete the entries and their index lines. Closed projects hold no cache lines.
+   - **Budget check.** If MEMORY.md exceeds the ~16KB soft budget, evict the stalest entries down to budget as part of this closeout (fold first if durable, then delete). Deletion is safe — the mirror is git-synced; nothing is ever lost.
 3. **Docs-reflect-reality, per repo touched.** For each repo this session changed: does CHANGELOG.md have a line for what landed? Is any IDEAS.md/backlog entry now shipped and removable? Did the change make any README/doc claim false? Fix in the same closeout — "I'll fix the docs in a follow-up" is the P1 violation this stage exists to kill.
 4. **Sweep the scratch.** Temp files at repo roots or `$HOME` that this session created get deleted (if disposable) or moved to their real home (if deliverables). Never delete something you did not create this session without operator approval.
 5. **Stamp the closeout.** `mkdir -p ~/.local/state/ops && date -Is > ~/.local/state/ops/last-closeout` — session-briefing surfaces the age of this stamp, so future sessions (and the operator) can see when hygiene last ran.
+
+### Migration closeout — kill the four regression vectors
+
+When the session shipped a **migration or refactor** (renamed a pattern, removed a schema, replaced a convention), step 3's prose-doc sweep is necessary but NOT sufficient — READMEs and architecture text describe reality, they don't stop a fresh agent from regenerating the old pattern. Four vectors actually cause an agent to rebuild what you removed (origin: a 2026-06 service naming refactor; the pattern is universal). Walk all four before compacting:
+
+1. **The open TASKLIST/IDEAS entry.** The migration started life as an open `### PROJECT — <do X>` task. Left open, a fresh agent reads it as work-to-do and re-executes it. → Flip it to `### SHIPPED — <X> (COMPLETE <date>)` with the result + anything genuinely deferred.
+2. **The scaffold template.** If the copier scaffold's example encodes the old pattern, every NEW component is born wrong regardless of doctrine. → Verify the template emits the NEW pattern. (Scaffolding rules live in `CONTEXT/project-kata.md` — that's the correctness bar for this vector.)
+3. **The doctrine rule that PRODUCED the old pattern** (a CLAUDE.md rule, a builder skill). Updating an example isn't enough — rewrite the *rule* an agent follows when building so it forbids the old way.
+4. **Stale leftover dirs in a persistent checkout.** `git mv` + delete land on main, but old dirs linger as untracked cruft (`.venv`, caches, leftover `src/`) because git won't remove a dir containing untracked files. A fresh clone is fine; an agent reusing the checkout sees the old layout and gets confused. → Confirm `git ls-files <dir>` shows 0 tracked files, then `rm -rf` the stale dirs.
+
+Then mark the plan-of-record doc COMPLETE. Prose-doc accuracy is the last step of migration closeout, not the whole job.
 
 ## Process
 
@@ -192,10 +206,33 @@ only when the operator explicitly claimed the `/compact` ("I'll compact
 myself", "manual", "hold off") or an ASK OPERATOR item is still open (never
 compact over an unanswered question).
 
-Never fire before the synthesis + hygiene stages are complete: the whole
-point is that everything durable is already on disk when the compact fires.
-Since the operator may be watching, your closing line must SAY the cycle is
-armed and how to abort:
+**The arming order is absolute (operator standing order, 2026-07-16).** The
+automation removes the operator's keystrokes — it must NEVER remove the
+synthesis. A compact that loses knowledge is a failed compact no matter how
+cleanly the cycle ran. Before spawning the compactor, ALL of the following
+must be true, in this order:
+
+1. The four artifacts are green (git committed/pushed or explicitly deferred
+   by the operator; memory written AND flushed per hygiene step 2; task list
+   true; durable anchor updated with a RESUME PROTOCOL block).
+2. Closeout hygiene passed — including docs-reflect-reality: every repo
+   touched this session has its CHANGELOG line and no doc claim made false
+   by the session's work. "I'll fix the docs post-compact" is the exact
+   failure this gate exists to kill — post-compact-you won't know what's
+   missing.
+3. **Knowledge-capture completeness check.** Ask: did this session produce
+   knowledge faster than it was filed? Long autonomous runs, multi-hour
+   builds, and incident investigations usually do. If yes, run the
+   transcript-mine workflow with `{since: <last-closeout stamp>}` (stamp:
+   `~/.local/state/ops/last-closeout`) and file what it stages BEFORE
+   arming. Short conversational sessions skip this — judgment call, but make
+   it consciously and say which way you called it in the readiness summary.
+4. The readiness summary is printed. Anything unresolved — uncommitted work
+   you lack authorization to push, an ASK OPERATOR item, a failing gate —
+   means DO NOT ARM; surface it and wait instead.
+
+Only then spawn. Since the operator may be watching, your closing line must
+SAY the cycle is armed and how to abort:
 `tmux kill-session -t '=Compactor-<Key>'` (the lock cleans up on signal).
 
 **Requires tmux** (`[ -n "$TMUX" ]`). Not in tmux → manual flow.
