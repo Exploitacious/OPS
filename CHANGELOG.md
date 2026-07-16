@@ -4,6 +4,15 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-16 — project-kata: GHCR retention workflow for image-publishing repos
+
+- New kata section: any repo publishing container images to GHCR gets a
+  retention workflow at scaffold time (`ghcr-cleanup.yml`, manual-first,
+  `dry_run` defaulting to true, keep-last-N, `exclude-tags` for
+  `latest`/`prod`/sha pins) — plus the two platform gotchas learned live
+  (`workflow_dispatch` only fires from the default branch; guessed package
+  names 404).
+
 ## 2026-07-16 — flush-debt follow-up: stub-phrased entries no longer suppressed
 
 - `secrets-guard.sh`: the routing nudge previously stayed quiet for entries
