@@ -164,6 +164,50 @@ fi
 
 dbg "snapshot written: $SNAPSHOT_FILE"
 
+# ── Session work-log (feeds the session-close reconciliation gate) ──────────
+# Append a compact-time segment so a multi-compact session's full activity is
+# reconstructable at CLOSE for time entry. This is the MECHANICAL spine (git
+# delta + elapsed since session start); the pre-compact-synthesis skill adds a
+# narrative line separately. Best-effort — a failure here never blocks the
+# compact. NOTE: this only records; it never reconciles. WIP/work-tracking
+# reconciliation is a session-CLOSE act (session-close skill), never a compact.
+command -v work_session_key >/dev/null 2>&1 \
+  || . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooklib.sh" 2>/dev/null || true
+WORK_KEY="$(work_session_key 2>/dev/null || true)"
+if [[ -n "$WORK_KEY" ]]; then
+  RUNDIR="$HOME/.claude-compact-cycle"
+  mkdir -p "$RUNDIR" 2>/dev/null || true
+  WORKLOG="$RUNDIR/work-log-$WORK_KEY"
+  START_STAMP="$RUNDIR/session-start-$WORK_KEY"
+  STARTED="-"; ELAPSED="-"
+  if [[ -f "$START_STAMP" ]]; then
+    STARTED="$(grep -m1 '^started_at=' "$START_STAMP" 2>/dev/null | cut -d= -f2-)"
+    if [[ -n "$STARTED" ]]; then
+      _s0="$(date -d "$STARTED" +%s 2>/dev/null || echo 0)"
+      if [[ "$_s0" -gt 0 ]]; then
+        _d=$(( $(date +%s) - _s0 )); (( _d < 0 )) && _d=0
+        ELAPSED="$(printf '%dh%02dm' $(( _d/3600 )) $(( (_d%3600)/60 )))"
+      fi
+    fi
+  fi
+  {
+    echo "## segment $NOW_LOCAL — trigger=$TRIGGER elapsed=$ELAPSED"
+    echo "repo=${GIT_ROOT:--} branch=$GIT_BRANCH cwd=$(pwd)"
+    echo "recent_commits:"
+    printf '%s\n' "$GIT_LAST_COMMITS" | sed 's/^/  /'
+    echo "diffstat:"
+    printf '%s\n' "$GIT_DIFFSTAT" | sed 's/^/  /'
+    echo ""
+  } >> "$WORKLOG" 2>/dev/null || true
+  # Cap the log so a pause-forever session can't grow it unbounded (mirrors the
+  # snapshot retention below). Newest ~500 lines is many segments' worth.
+  wl_lines="$(wc -l < "$WORKLOG" 2>/dev/null || echo 0)"
+  if [[ "${wl_lines:-0}" -gt 500 ]]; then
+    tail -n 500 "$WORKLOG" > "$WORKLOG.tmp" 2>/dev/null && mv "$WORKLOG.tmp" "$WORKLOG" 2>/dev/null || rm -f "$WORKLOG.tmp" 2>/dev/null
+  fi
+  dbg "work-log segment appended: $WORKLOG"
+fi
+
 # ── Retention ───────────────────────────────────────────────────────────
 # Long-running workspaces accumulate one snapshot per compaction
 # forever. Cap at the newest N so the projects dir doesn't grow
