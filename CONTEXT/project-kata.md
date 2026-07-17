@@ -317,6 +317,11 @@ build/
 *.log
 ```
 
+`.claude/` is in the baseline for Claude Code and desktop-agent
+workflows. If the project uses other agent tooling (`.cursor/`,
+`.aider/`, etc.), add those too. None of these should ever be
+committed.
+
 **`README.md`** — at minimum, project name and a one-line description.
 
 ### Public-repo additions
@@ -381,12 +386,48 @@ Secrets never live in the repo. The pattern:
 - `.env.example` documents the surface; `.env` (gitignored) holds
   the real values locally.
 
+### Image-publishing repos: GHCR retention workflow
+
+Any repo that publishes container images to GHCR gets a retention
+workflow at scaffold time — registries accumulate versions forever,
+and the cost surfaces only after thousands of stale versions pile
+up (one dashboard repo hit ~3,000 before its first cleanup).
+
+The standard shape is `ghcr-cleanup.yml` using
+`dataaxiom/ghcr-cleanup-action`, manual-first:
+
+- `workflow_dispatch` only — no schedule until the config has
+  proven itself on a real run.
+- A `dry_run` input defaulting to `true` — nothing deletes until
+  someone deliberately runs it dry, reviews, then runs it live.
+- Keep the last N tagged versions (10-25 depending on release
+  cadence).
+- `exclude-tags` for `latest`, `prod`, and any sha pins.
+
+Two platform gotchas, learned live:
+
+- **`workflow_dispatch` only fires from the repo's GitHub default
+  branch.** A cleanup workflow merged to a non-default working
+  branch (e.g. a fork's long-lived integration branch) cannot be
+  triggered until either the default branch is switched or the file
+  lands on the default. Check this before declaring the workflow
+  deployed.
+- **Guessed package names 404.** The workflow's package list must
+  name packages that actually exist in the registry — a plausible
+  but never-published name fails the run. Always dry-run first and
+  confirm the package exists and `latest`/pins are excluded before
+  the real deletion.
+
 ### A note on backlogs
 
 Per Rule 1, backlog files (`IDEAS.md`, `ROADMAP.md`,
 `BACKLOG.md`) are not canonical entry points. They live in
 `docs/`, not at the root. A backlog at the root is the most common
 form of root sprawl in practice — resist it.
+
+Keep the backlog one flat file (`docs/IDEAS.md`), not a
+`docs/ideas/` subfolder. Folders of improvement files become
+graveyards.
 
 ---
 
@@ -536,6 +577,43 @@ Four files to read. Everything else is on demand.
 
 ---
 
+## Sandboxed-agent git constraint
+
+**Scope: sandboxed agent environments only** — any agent surface
+that runs shell commands inside a sandbox against a host-mounted
+filesystem (Anthropic's desktop app is the common case). Claude
+Code, chat Claude, and any other environment have no such
+constraint and handle git normally. Don't carry this rule outside
+the sandbox.
+
+**Inside the sandbox, 99% of repo work is fine.** Edit files, read
+files, restructure folders, run scripts, browse history — all
+normal. A sandboxed session is a perfectly capable environment for
+working in a repo.
+
+**The narrow exception** is git write operations (`add`, `commit`,
+`push`, `merge`, `rebase`, `reset`, `tag`, etc.) run through the
+sandbox shell. These create `.git/index.lock` files on the mounted
+filesystem that persist after the command finishes and break
+subsequent git operations on the host.
+
+The rule:
+
+- Read-only git commands (`status`, `log`, `diff`, `show`,
+  `branch -l`) — fine in the sandbox.
+- File edits, scaffolding, doc work, code changes — fine in the
+  sandbox. The lock-file issue is about the `git` CLI specifically,
+  not about touching files in a repo.
+- Git write commands — don't run them from the sandbox shell.
+  Either let the Operator run them outside the sandbox, or switch
+  to Claude Code if a continuous build-commit-iterate cycle is
+  needed.
+
+This is a tooling workaround, not a kata rule. It lives here so it
+has a single home.
+
+---
+
 ## Operator overlays
 
 Everything above this section is portable — apply it to any repo,
@@ -549,8 +627,8 @@ This section ships as a template. `BOOTSTRAP.md` fills it in on
 first run — it asks a short set of structured questions (repo home
 path, organization name(s), license defaults, which file plays the
 spec/rulebook role) and writes the answers here as a living record.
-Until bootstrap has run, treat the entry below as illustrative only
-— it is not real configuration.
+Until bootstrap has run, treat the entries below as illustrative
+only — they are not real configuration.
 
 ### EXAMPLE — project portfolio + license defaults
 
@@ -575,7 +653,30 @@ If a personal project is going public and a license is wanted, ask
 before defaulting — don't auto-attach a work organization's name to
 a personal repo.
 
-Add further overlay entries below this one the same way, as your
+### EXAMPLE — layered IDEAS files
+
+*(Synthetic, same caveat as above.)*
+
+The kata keeps each repo's backlog at `docs/IDEAS.md`. A portfolio
+overlay can extend the same discipline upward, so every scope has a
+place to park ideas that span its members but don't fit any single
+one:
+
+```
+~/OPS/IDEAS.md                            # harness-itself + general
+~/OPS/PROJECTS/IDEAS.md                   # cross-cluster portfolio
+~/OPS/PROJECTS/<org>/IDEAS.md             # cluster-wide (shared doctrine, a vendor matrix)
+~/OPS/PROJECTS/<org>/<repo>/docs/IDEAS.md # repo-scoped (lives in the repo's own git, per the kata)
+```
+
+Each file declares its scope at the top and routes anything
+narrower down to the next level. IDEAS and TODO are interchangeable
+in this layout — pick one and stick with it per file. CHANGELOGs
+are not duplicated at cluster level (a cluster folder is a
+grouping, not a project — track its changes via the parent harness
+CHANGELOG).
+
+Add further overlay entries below these the same way, as your
 setup accumulates rules that are true of your machine but not true
 of the kata in general (spec-slot naming, how-we-work file, backlog
-tag taxonomy, IDEAS.md layering, and similar).
+tag taxonomy, and similar).

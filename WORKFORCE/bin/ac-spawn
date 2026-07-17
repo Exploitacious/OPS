@@ -104,7 +104,7 @@ command -v claude >/dev/null 2>&1 || die "claude CLI not in PATH"
 [[ -f "$AC_FLEET/protocol/messaging.md"    ]] || die "messaging.md missing at $AC_FLEET/protocol/"
 
 # Lazily create the tmux session if absent
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
   echo "[ac-spawn] creating tmux session: $SESSION"
   tmux new-session -d -s "$SESSION" -n "main"
 fi
@@ -118,7 +118,7 @@ fi
 # Avoid collisions with existing windows
 i=0
 WINDOW="$WINDOW_BASE"
-while tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -Fxq "$WINDOW"; do
+while tmux list-windows -t "=$SESSION" -F "#{window_name}" 2>/dev/null | grep -Fxq "$WINDOW"; do
   i=$((i+1))
   WINDOW="${WINDOW_BASE}-${i}"
 done
@@ -166,7 +166,7 @@ fi
 # Spawn the window detached. NOTE: do NOT pass a positional prompt arg
 # to claude. Shell parsing on long multi-line prompts is flaky. We
 # launch claude bare and then paste-buffer the brief.
-tmux new-window -t "$SESSION" -n "$WINDOW" -d "$CLAUDE_CMD"
+tmux new-window -t "=$SESSION" -n "$WINDOW" -d "$CLAUDE_CMD"
 
 # Wait for claude to boot. The welcome screen + prompt box need to be
 # rendered before paste-buffer will land in the input box.
@@ -176,7 +176,7 @@ TARGET="${SESSION}:${WINDOW}"
 echo "[ac-spawn] waiting for claude to render input prompt in $TARGET ..."
 for i in $(seq 1 30); do
   sleep 1
-  if tmux capture-pane -t "$TARGET" -p -S -10 2>/dev/null | grep -qE '❯|>'; then
+  if tmux capture-pane -t "=$TARGET" -p -S -10 2>/dev/null | grep -qE '❯|>'; then
     break
   fi
 done
@@ -189,11 +189,11 @@ done
 # Lesson: WORKFORCE/protocol/lessons/2026-05-13__ac-spawn-paste-buffer-bug.md
 BUFFER_NAME="ac-brief-${SCOPE_SAFE}-$$"
 tmux load-buffer -b "$BUFFER_NAME" "$BRIEF_PATH"
-tmux paste-buffer -b "$BUFFER_NAME" -t "$TARGET"
+tmux paste-buffer -b "$BUFFER_NAME" -t "=$TARGET"
 sleep 1
-tmux send-keys -t "$TARGET" Enter   # confirm paste-preview pill
+tmux send-keys -t "=$TARGET" Enter   # confirm paste-preview pill
 sleep 0.5
-tmux send-keys -t "$TARGET" Enter   # actually submit
+tmux send-keys -t "=$TARGET" Enter   # actually submit
 tmux delete-buffer -b "$BUFFER_NAME" 2>/dev/null || true
 
 # Audit-log the spawn

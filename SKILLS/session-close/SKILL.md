@@ -30,7 +30,12 @@ its final `/compact`:
 - **Docs match reality**: README / CHANGELOG / lessons files updated for what
   this session actually shipped, in the same pass — not "later".
 - **Memory**: durable lessons, decisions, and feedback from this session are
-  written to the memory pool (one fact per file, indexed).
+  written to the memory pool (one fact per file, indexed) — then the cache is
+  purged for whatever this close terminates: per `foreman-charter.md` §
+  "Eviction — memory is a write cache, not an archive", the closing project's
+  entries fold into `CONTEXT/projects/<project>-lessons.md` and get
+  **deleted** (index lines too — no stubs). Close means the write cache holds
+  nothing for this work anymore.
 - **Tasks**: the session's task list is resolved — completed, or explicitly
   re-homed with the Operator's sign-off. Nothing silently abandoned.
 - **Leftovers**: if a genuinely open thread survives all of the above, write a

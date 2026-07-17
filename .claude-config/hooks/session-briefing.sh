@@ -23,7 +23,19 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPS_DIR="${OPS_DIR:-$HOME/OPS}"
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SETTINGS="$CFG/settings.json"
+
+# Encoded cwd: prefer Claude's OWN encoded path from transcript_path in the
+# SessionStart payload (basename of its parent dir). The `pwd | sed` form is
+# `-c-Users-...` on Windows Git Bash, never matching Claude's native
+# `C--Users-...`, which left SNAP_DIR + the memory-health path wrong there.
 ENCODED_CWD="$(pwd | sed 's|/|-|g')"
+if [[ ! -t 0 ]]; then
+  _payload="$(cat 2>/dev/null || true)"
+  if [[ -n "$_payload" ]]; then
+    _tp="$(printf '%s' "$_payload" | hook_field transcript_path 2>/dev/null)" || _tp=""
+    [[ -n "$_tp" ]] && ENCODED_CWD="$(basename "$(hook_pathnorm "$(dirname "$_tp")")")"
+  fi
+fi
 
 # --- worker posture ---
 gate="Sonnet 5 1M default worker"
@@ -70,12 +82,16 @@ if [ -s "$REM" ]; then
   fi
 fi
 
-# --- memory health (nudge until the index is back under the binary's limit) ---
+# --- memory health (two-tier: soft flush budget, hard platform ceiling) ---
+# Charter § Eviction: routine drainage happens at every closeout; the deep
+# /memory-prune audit is for drift, not maintenance.
 MEM="$CFG/projects/$ENCODED_CWD/memory/MEMORY.md"
 if [ -f "$MEM" ]; then
   sz="$(wc -c < "$MEM" 2>/dev/null | tr -d ' ')"
   if [ "${sz:-0}" -gt 24576 ]; then
-    printf ' Memory:  index ~%sKB > 24KB limit (entries truncated) — run /memory-prune\n' "$(( ${sz:-0} / 1024 ))"
+    printf ' Memory:  index ~%sKB OVER the 24KB platform ceiling (truncating NOW) — closeout flush overdue\n' "$(( ${sz:-0} / 1024 ))"
+  elif [ "${sz:-0}" -gt 16384 ]; then
+    printf ' Memory:  flush debt — index ~%sKB > 16KB soft budget; next closeout evicts to budget\n' "$(( ${sz:-0} / 1024 ))"
   fi
 fi
 

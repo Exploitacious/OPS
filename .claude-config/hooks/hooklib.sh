@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# hooklib.sh — shared helpers for OPS hooks. SOURCED, never executed.
+# hooklib.sh — shared helpers for the OPS hooks. SOURCED, never executed.
 #
 # The hooks originally parsed their PreToolUse / compaction JSON payloads with
 # an inline `python3 -c ...` heredoc. Windows (Git Bash) has NO `python3` shim
 # — winget ships python.exe / py.exe only — so every such call resolved to 127
 # and the surrounding `|| exit 0` silently DISABLED the hook: git-guard's hard
-# gates, secrets-guard, and the compaction resume banner all became no-ops
-# (Windows-parity gap #4 / #17).
+# gates, secrets-guard, and the compaction resume banner all became no-ops.
 #
 # hook_field replaces that with a portable extractor: jq first (a hard harness
 # dependency, present on Windows AND Linux), then python3 / python / py. If NO
@@ -61,7 +60,7 @@ sys.stdout.write("" if cur is None else str(cur))' "$path" 2>/dev/null)"; then
 # Resolve a Python interpreter: python3 (Linux/macOS) then python / py (Windows
 # has NO python3 shim). Prints the command name; returns 2 if none found. Used
 # to run python-shebang'd helpers (e.g. ac-memory-index) portably instead of
-# relying on the dead `#!/usr/bin/env python3` line on Windows (gap #10).
+# relying on the dead `#!/usr/bin/env python3` line on Windows.
 hook_python() {
   # VERIFY each candidate actually reports "Python 3" before returning it: on
   # Windows `python3` is frequently a broken App-Execution-Alias stub that
@@ -93,10 +92,10 @@ hook_pathnorm() {
 # MUST match the resume-baton key formula in the pre-compact-synthesis skill so
 # all surfaces agree on one name for a session:
 #     tmux name | tr ':. ' '---' | keep [A-Za-z0-9-]
-# In tmux: the live (post-boot-normalization) session name — stable for the life
-# of the session, which is why session-work-init.sh registers LAST at boot.
-# Outside tmux: fall back to the encoded cwd (the workspace-key convention) so a
-# non-tmux session still keys deterministically. Prints the key; never fails.
+# In tmux: the live session name — stable for the life of the session, which is
+# why session-work-init.sh registers LAST at boot. Outside tmux: fall back to
+# the encoded cwd (the workspace-key convention) so a non-tmux session still
+# keys deterministically. Prints the key; never fails.
 work_session_key() {
   local raw
   if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then

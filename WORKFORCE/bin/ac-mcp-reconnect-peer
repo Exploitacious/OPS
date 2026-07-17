@@ -60,7 +60,7 @@ done
 [[ -z "$PEER_NAME" ]] && { echo "--peer-name required" >&2; exit 1; }
 [[ -z "$REASON" ]] && REASON="MCP reconnect requested by $NAME"
 
-if ! tmux list-panes -t "$TARGET" >/dev/null 2>&1; then
+if ! tmux list-panes -t "=$TARGET" >/dev/null 2>&1; then
   echo "target pane '$TARGET' not found in tmux" >&2
   exit 2
 fi
@@ -85,7 +85,7 @@ BODY
 fi
 
 # Fire /mcp
-tmux send-keys -t "$TARGET" "/mcp" Enter
+tmux send-keys -t "=$TARGET" "/mcp" Enter
 echo "[ac-mcp-reconnect-peer] /mcp fired on $TARGET"
 
 # Log

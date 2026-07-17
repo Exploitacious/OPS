@@ -9,9 +9,14 @@ features (`declare -A`, `${var,,}`, `mapfile`), and `flock`. macOS
 shell + OPS-context experience only; fleet coordination does
 not run there.
 
-After deployment, this directory is on `PATH` (wired into your
-shellrc by OPS Stage 2 — `~/OPS/.claude-config/deploy.sh` on
-Linux/macOS, `deploy.ps1` on Windows). Call by name from anywhere.
+After deployment, this directory is on `PATH` (wired by OPS
+Stage 2 — `deploy.sh` appends the `~/.<shell>rc.local` seam on
+Linux/macOS; `deploy.ps1` appends the `profile.local.ps1` seam on
+Windows, so a Bash-tool session launched from that PowerShell
+inherits it). Call by name from anywhere. On Windows only the
+cross-platform helpers are used (`ac-memory-init.ps1`,
+`ac-memory-index`); the fleet-coordination scripts stay Linux-only
+per the note above.
 
 ---
 

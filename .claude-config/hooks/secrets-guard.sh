@@ -21,31 +21,45 @@ set -uo pipefail
 MODE="${1:-pre}"
 [ "${SECRETS_GUARD:-on}" = "off" ] && exit 0
 
-SCAN="$HOME/OPS/.claude-config/bin/secrets-scan.sh"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/hooklib.sh"
+
+# Scanner lives alongside the hooks in .claude-config/bin; fall back to the
+# deployed ~/OPS location when the hook runs from a copy.
+SCAN="$HOOK_DIR/../bin/secrets-scan.sh"
+[ -x "$SCAN" ] || SCAN="$HOME/OPS/.claude-config/bin/secrets-scan.sh"
 [ -x "$SCAN" ] || exit 0
 
 TMP="$(mktemp)" || exit 0
 trap 'rm -f "$TMP"' EXIT
 
-# Parse the hook JSON: file_path to stdout, content/new_string into $TMP.
-FILE_PATH="$(python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-ti = d.get("tool_input") or {}
-path = ti.get("file_path") or ""
-content = ti.get("content") or ti.get("new_string") or ""
-with open(sys.argv[1], "w") as f:
-    f.write(content)
-sys.stdout.write(path)
-' "$TMP" 2>/dev/null)" || exit 0
+# Parse the hook JSON: file_path + content/new_string. The portable extractor
+# (jq -> python) replaces the old `python3 -c`, which was dead on Windows
+# (no python3 shim) and fell through `|| exit 0` = fail-open.
+RAW_INPUT="$(cat)"
+if ! FILE_PATH="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.file_path)"; then
+  # No JSON parser at all (can't happen on a provisioned box — jq is a hard
+  # dependency). This guard fires on EVERY Write|Edit but only cares about the
+  # narrow memory/lessons surfaces; blocking all writes to stop a
+  # credential-in-memory would be grossly disproportionate. Warn + allow.
+  echo "secrets-guard: no JSON parser (jq/python) available — write NOT scanned. Install jq." >&2
+  exit 0
+fi
 [ -n "$FILE_PATH" ] || exit 0
+CONTENT="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.content)"
+[ -n "$CONTENT" ] || CONTENT="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.new_string)"
+printf '%s' "$CONTENT" > "$TMP"
 
-# Guarded surfaces: any auto-memory pool + the lessons files.
+# Normalize Windows backslashes so the case-globs match native file_path forms
+# (Windows Claude Code may emit C:\...\memory\x.md).
+FILE_PATH="${FILE_PATH//\\//}"
+
+# Guarded surfaces: any auto-memory pool + the lessons files. Unanchored */
+# variants also catch drive-letter paths (C:/Users/... vs $HOME=/c/Users/...).
 case "$FILE_PATH" in
-  */memory/*.md | "$HOME"/OPS/.claude-memory/*/*.md | "$HOME"/OPS/CONTEXT/projects/*.md) ;;
+  */memory/*.md \
+  | */.claude-memory/*/*.md | "$HOME"/OPS/.claude-memory/*/*.md \
+  | */OPS/CONTEXT/projects/*.md | "$HOME"/OPS/CONTEXT/projects/*.md) ;;
   *) exit 0 ;;
 esac
 
@@ -63,14 +77,15 @@ fi
 
 if [ "$MODE" = "post" ]; then
   # Routing nudge — only for substantive project-typed memory entries landing
-  # in a cross-project pool; stubs/pointers, indexes, and lessons files stay quiet.
+  # in a cross-project pool; indexes and lessons files stay quiet. Stub-phrased
+  # entries are NOT suppressed: under charter § Eviction stubs shouldn't exist,
+  # so a legacy stub is flush debt that belongs in the queue.
   case "$FILE_PATH" in
-    "$HOME"/OPS/CONTEXT/projects/*) exit 0 ;;   # already routed right
+    "$HOME"/OPS/CONTEXT/projects/* | */OPS/CONTEXT/projects/*) exit 0 ;;  # already routed right
     */memory/MEMORY.md) exit 0 ;;                  # index, not an entry
   esac
   SIZE="$(wc -c < "$TMP")"
   [ "$SIZE" -ge 400 ] || exit 0
-  grep -qiE '(folded to|canonical entry lives|pointer stub)' "$TMP" && exit 0
   grep -qE '^\s*type:\s*project\s*$' "$TMP" || exit 0
 
   LESSONS_DIR="$HOME/OPS/CONTEXT/projects"
@@ -86,12 +101,18 @@ if [ "$MODE" = "post" ]; then
     fi
   done
   [ -n "$MATCH" ] || exit 0
+  # Queue the entry for the closeout flush (charter § Eviction) — the closeout
+  # consumes this file mechanically instead of relying on session recall.
+  QUEUE_DIR="$HOME/.claude-compact-cycle"
+  mkdir -p "$QUEUE_DIR" 2>/dev/null || true
+  printf '%s\t%s\tproject:%s\n' "$(date -Is)" "$FILE_PATH" "$MATCH" >> "$QUEUE_DIR/memory-flush-queue" 2>/dev/null || true
   {
     echo "memory-routing nudge: the entry just written ($(basename "$FILE_PATH")) is type:project and"
     echo "mentions '$MATCH' — per foreman-charter § 'Where knowledge goes', durable single-project"
     echo "lessons belong in CONTEXT/projects/${MATCH}-lessons.md (synced, loaded when working that"
     echo "project). Keep it in auto-memory only if it is genuinely cross-project or in-flight session"
-    echo "state; otherwise fold it into the lessons file and reduce the memory entry to a pointer."
+    echo "state; otherwise fold it into the lessons file and DELETE the memory entry (no stub —"
+    echo "charter § Eviction). Queued for the closeout flush either way."
   } >&2
   exit 2
 fi
