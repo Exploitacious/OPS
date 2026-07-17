@@ -56,6 +56,32 @@ Do NOT invoke when:
 - Context is high but the user is mid-task and pushing through
 - The session is bare exploration with nothing to preserve (no git changes, no in-flight tasks, no new learnings worth memorizing)
 
+## Pause or close? Disambiguate before you compact
+
+This skill is the **PAUSE** ritual — the session continues after `/compact`, so
+it deliberately does NOT touch time, tickets, or the board. Nagging about time
+on work that isn't finished is wrong; that reconciliation belongs at the END of
+the work, not at a mid-stream pause.
+
+The WIP & work-tracking reconciliation gate lives in the **session-close** skill
+and fires only when a session is actually ending. The trap: "close out", "wrap
+up", and "done" are ambiguous — they can mean "pause here" OR "I'm finished". If
+you pause-and-compact when the Operator was actually done, their time / tickets
+/ WIP never get reconciled — the exact miss this whole system exists to prevent.
+
+So when the wrap-up trigger is **ambiguous** (anything other than an explicit
+compact/pause signal), ask ONE quick question before doing anything:
+
+- **Continuing this work next session?** → PAUSE: run this skill, compact, leave
+  work-tracking alone (the work isn't done).
+- **Done — finishing the day or this purpose?** → invoke **session-close**
+  instead: it runs this same synthesis, THEN reconciles time / tickets / board /
+  tasks, THEN tears the session down.
+
+Explicit "compact" / "let's compact" / "pre-compact" are unambiguous PAUSE
+signals — proceed to compact, no need to ask. Only disambiguate the genuinely
+ambiguous end-of-work phrases.
+
 ## The four artifacts to verify
 
 Operating-doctrine P2 names four durable artifacts that survive compaction in solo Claude Code sessions. Walk them in order:
@@ -152,6 +178,31 @@ Every durable artifact you write (handoff, journal, memory, the closing readines
 
 If, while synthesizing, you hit a decision you genuinely can't resolve from the code + context, do not bake a guess into the anchor. Surface it to the operator. When they answer, **write the resolution to a `project` memory** (not just into the anchor) so the question dies permanently — an answer that lives only in this conversation gets re-asked at the next compaction. The anchor's ASK OPERATOR list is for questions still open at synthesis time; resolved ones become memories.
 
+## Feed the session work-log (lightweight breadcrumb for the eventual close)
+
+A session can compact several times before it's finally closed, and the
+close-time WIP/work-tracking gate (in `session-close`) needs the *whole*
+session's story, not just what's left after the last compact. The PreCompact
+hook already appends a mechanical segment (git delta + elapsed) to
+`~/.claude-compact-cycle/work-log-<KEY>` on every compact; add ONE short
+narrative line here so the eventual close reads what actually happened, not just
+commit subjects:
+
+```bash
+. ~/OPS/.claude-config/hooks/hooklib.sh
+KEY="$(work_session_key)"
+{
+  echo "## narrative $(date -Is)"
+  echo "did: <one or two lines — what this segment actually accomplished>"
+  echo "tracked: <any ticket/item id, board card, or task touched, or ->"
+  echo ""
+} >> "$HOME/.claude-compact-cycle/work-log-$KEY" 2>/dev/null || true
+```
+
+That's the whole step — a breadcrumb, NOT a second reconciliation gate.
+**Compaction never logs time or updates a tracked item.** Skip it entirely if
+nothing substantive happened this segment.
+
 ## The fifth stage — closeout hygiene (workspace clean + docs true)
 
 The operator's standing order (2026-07-06): *"I absolutely hate having a dirty, undocumented, sprawling working environment."* The four artifacts make the session's state durable; this stage makes the workspace **clean** and the documentation **true**. Run it on every closeout after substantive work (skip on bare conversational sessions — nothing to clean is a valid outcome):
@@ -180,12 +231,17 @@ Then mark the plan-of-record doc COMPLETE. Prose-doc accuracy is the last step o
 
 When activated:
 
+**First — pause or close?** If the trigger was an ambiguous end-of-work phrase
+("close out", "wrap up", "done"), disambiguate (see "Pause or close?" above)
+before compacting. The Operator finishing for the day → hand to `session-close`
+(it reconciles time/WIP first). Only a genuine pause proceeds here.
+
 1. **Read the existing pre-compact snapshot** at `~/.claude/projects/<workspace>/pre-compact-<latest>.md` if it exists — the hook script may already have run. Don't re-do its mechanical work.
 2. **Diagnose session type** — fleet vs solo-with-handoff vs solo-bare. Branch the rest of the work.
 3. **Walk the four artifacts in order.** For each:
    - State its current state in 1 sentence.
    - If action is needed (uncommitted work, missing memory, stale task list, outdated handoff), do the action OR surface it to the user for confirmation if the action is irreversible (push to main, force operations, etc.).
-4. **Run the fifth stage (closeout hygiene)** — machine gate, memory routing, docs-reflect-reality, scratch sweep, stamp.
+4. **Append the work-log rollup** — one narrative line (see "Feed the session work-log" above) so a multi-compact session's eventual close has the story. Skip if nothing substantive happened. Then **run the fifth stage (closeout hygiene)** — machine gate, memory routing, docs-reflect-reality, scratch sweep, stamp.
 5. **Print a one-screen readiness summary** so the operator sees what's locked in and can pull the trigger on `/compact`.
 6. **Choose the exit — automated is the DEFAULT.** In tmux, any wrap-up trigger counts as the go (two-phase autonomy: the go is the switch — "get ready to compact" means run the whole cycle, not "prepare and wait for me to type /compact"). Print the readiness summary, then run the self-compact cycle below. Take the manual exit (summary only, operator fires `/compact`) ONLY when: not in tmux; the operator explicitly claimed the trigger ("I'll compact myself", "manual compact", "don't fire it", "hold off"); or they asked to review/decide something first — an open ASK OPERATOR item means manual.
 

@@ -149,14 +149,23 @@ default. Fold answers into `working-preferences.md` § "Output Defaults".
    `working-preferences.md` § "Project Work" already promises bootstrap does
    this — deliver on it.
 
-5. **Seed the auto-memory pool.** Write a handful of durable "who the Operator
+5. **`CONTEXT/work-tracking.md`** — fill in the Operator's real time / ticket /
+   board tools from Round A recon (which PSA or ticketing system, how time gets
+   logged, any kanban board, a personal task tracker), replacing the EXAMPLE
+   blocks; delete any block for a surface they don't use. This is the only file
+   the `session-close` reconciliation gate reads to learn how to log time and
+   update work items at close. Leave it accurate or leave it empty — the gate
+   degrades gracefully when a surface is unconfigured — but never leave stale
+   EXAMPLE content pretending to be a real system.
+
+6. **Seed the auto-memory pool.** Write a handful of durable "who the Operator
    is" entries into the cross-project auto-memory pool (`.claude-memory/`,
    adopted via `ac-memory-init`), following `CONTEXT/foreman-charter.md`
    § "Where knowledge goes". Capture role, domain, stack, and the chosen
    autonomy posture — the facts every future session should inherit without
    re-reading. Pointers only, never secret values (secrets-guard blocks those).
 
-6. **Write the marker.** Create `CONTEXT/.bootstrapped` recording the stage and
+7. **Write the marker.** Create `CONTEXT/.bootstrapped` recording the stage and
    date (see "The marker" below). Its presence is what flips `CLAUDE.md`
    startup step 0 from bootstrap to normal operation. After this write, the
    harness is fully usable.

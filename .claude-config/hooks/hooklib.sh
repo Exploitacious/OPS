@@ -86,3 +86,24 @@ hook_pathnorm() {
     printf '%s' "$1"
   fi
 }
+
+# work_session_key — the stable per-session key for session-scoped state files
+# under ~/.claude-compact-cycle/ (session-start stamp, work-log, resume baton).
+# MUST match the resume-baton key formula in the pre-compact-synthesis skill so
+# all surfaces agree on one name for a session:
+#     tmux name | tr ':. ' '---' | keep [A-Za-z0-9-]
+# In tmux: the live session name — stable for the life of the session, which is
+# why session-work-init.sh registers LAST at boot. Outside tmux: fall back to
+# the encoded cwd (the workspace-key convention) so a non-tmux session still
+# keys deterministically. Prints the key; never fails.
+work_session_key() {
+  local raw
+  if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    raw="$(tmux display-message -p '#S' 2>/dev/null || true)"
+    if [ -n "$raw" ]; then
+      printf '%s' "$raw" | tr ':. ' '---' | tr -cd 'A-Za-z0-9-'
+      return 0
+    fi
+  fi
+  printf '%s' "$(pwd)" | sed 's|/|-|g' | tr -cd 'A-Za-z0-9-'
+}
