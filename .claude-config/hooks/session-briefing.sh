@@ -17,6 +17,9 @@
 # say, so the banner never becomes noise the operator learns to ignore.
 set -uo pipefail
 
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/hooklib.sh"
+
 OPS_DIR="${OPS_DIR:-$HOME/OPS}"
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SETTINGS="$CFG/settings.json"
@@ -96,6 +99,31 @@ CLOSE="$STATE_DIR/last-closeout"
 if [ -f "$CLOSE" ]; then
   age_days="$(( ( $(date +%s) - $(date -d "$(cat "$CLOSE")" +%s 2>/dev/null || echo 0) ) / 86400 ))"
   [ "${age_days:-0}" -ge 3 ] && hyg="$hyg last closeout ${age_days}d ago ·"
+fi
+# work-tracking backstop: a session that did work but never ran session-close (so
+# its reconciliation gate never fired) leaves a session-start stamp behind —
+# session-close deletes it on reconcile. A stamp whose tmux session is GONE =
+# abandoned, its work likely unreconciled. Skip this session's own key and any
+# still-live tmux (paused / parallel sessions are not abandoned).
+RUN="$HOME/.claude-compact-cycle"
+CUR_KEY="$(work_session_key 2>/dev/null || echo)"
+if [ -d "$RUN" ]; then
+  _now="$(date +%s)"; _orphans=0
+  for st in "$RUN"/session-start-*; do
+    [ -e "$st" ] || continue
+    k="$(basename "$st")"; k="${k#session-start-}"
+    [ -n "$CUR_KEY" ] && [ "$k" = "$CUR_KEY" ] && continue
+    raw="$(grep -m1 '^tmux=' "$st" 2>/dev/null | cut -d= -f2-)"
+    if [ -n "$raw" ] && [ "$raw" != "-" ] && command -v tmux >/dev/null 2>&1; then
+      tmux has-session -t "$raw" 2>/dev/null && continue   # still alive — not abandoned
+    else
+      # no tmux to check against: only flag if the stamp is clearly stale (>18h)
+      mt="$(stat -c %Y "$st" 2>/dev/null || echo "$_now")"
+      [ "$(( (_now - mt) / 3600 ))" -lt 18 ] && continue
+    fi
+    _orphans=$((_orphans + 1))
+  done
+  [ "${_orphans:-0}" -gt 0 ] && hyg="$hyg ${_orphans} session(s) abandoned without a work-tracking reconciliation — work may be unlogged (run session-close to reconcile) ·"
 fi
 # unadopted memory pools: real dirs (not symlinks) mean git-sync misses them
 for md in "$CFG"/projects/*/memory; do

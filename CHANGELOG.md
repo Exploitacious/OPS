@@ -4,6 +4,32 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-17 — session-close work-tracking reconciliation gate
+
+- **`session-close` gains a WIP & work-tracking reconciliation step** (new step
+  2): before a session tears down, it reconstructs which repos the session
+  touched (from a per-session start stamp + compact-time work-log, scoped by git
+  delta with automation commits filtered out) and reconciles each unit of work
+  against the systems the Operator declares in the new `CONTEXT/work-tracking.md`
+  — logging time, advancing a board card, or **drafting the entry text** when no
+  tool is wired. Config-driven and additive: an unconfigured OPS still
+  reconciles by drafting and reminding. It hardcodes no ticketing, time, or
+  board system.
+- **New SessionStart hook `session-work-init.sh`** stamps
+  `~/.claude-compact-cycle/session-start-<KEY>` once per session
+  (write-if-absent, survives compacts/resumes) so the gate can bound a session's
+  span even when it never compacts. `session-work-selftest.sh` locks the stamp
+  invariants; new shared `hooklib.sh` provides the portable
+  `work_session_key` / JSON helpers the hooks depend on.
+- **`pre-compact.sh`** now appends a mechanical work-log segment per compact, and
+  **`pre-compact-synthesis`** gains a "pause vs close" disambiguation plus a
+  one-line narrative breadcrumb — so a multi-compact session's whole story
+  reaches the eventual close. Pause never touches time or tickets; only
+  `session-close` reconciles.
+- **`session-briefing.sh`** now sources `hooklib.sh` and carries a backstop that
+  flags sessions abandoned without a reconciliation run (their work may be
+  unlogged).
+
 ## 2026-07-08 — session-close skill
 
 - `SKILLS/session-close/`: the third session ending. Pause = closeout +
