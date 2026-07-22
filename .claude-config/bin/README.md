@@ -26,6 +26,34 @@ plus mid-turn PostToolUse injections from 86%; both registered in the Stage 1
 `--no-resume`). tmux gotcha baked in: targets use the `=Name:` exact form —
 bare names unique-prefix-match and pane-level commands reject bare `=Name`.
 
+## `claude-window-ping.sh` — scheduled 5h-window opener
+
+Cron-fired dumb pipe: sends one headless `ping` to a brand-new Claude Code
+session per configured profile so the 5-hour usage window starts counting at
+times the Operator chooses, with nobody at the keyboard. MCP stripped
+(`--strict-mcp-config` + empty config), runs from `$HOME`, outside tmux — so
+ping sessions never enter the remote-session registry and load no project
+context.
+
+```
+45 5  * * * $HOME/OPS/.claude-config/bin/claude-window-ping.sh
+0  11 * * * $HOME/OPS/.claude-config/bin/claude-window-ping.sh
+15 16 * * * $HOME/OPS/.claude-config/bin/claude-window-ping.sh
+```
+
+Knobs: `CC_WINDOW_PING_PROFILES` (space-separated `name=config_dir` pairs,
+default `default=$HOME/.claude`; a pair without `=` is skipped loud with an
+rc=2 status row), `CC_WINDOW_PING_MODEL` (default `sonnet`),
+`CC_WINDOW_PING_TIMEOUT` (seconds per profile, default 180 — worst-case wall
+time is N profiles x timeout). Surfaces: `~/.local/state/window-ping/ping.log`
+(append log) and `last-status.tsv` (atomic tmp+mv; rc verbatim, 124 = timeout,
+127 = binary missing, 2 = config error), which `hooks/session-briefing.sh`
+reads to flag a failed or stale (default ≥25h, `CC_WINDOW_PING_STALE_HOURS`)
+ping at next session start. Overlapping runs are serialized by a non-blocking
+flock. `claude-window-ping-selftest.sh` proves every unattended path against
+a mock binary — no real API usage. Machine-local: Stage 2 does not deploy the
+crontab; add the lines by hand per box.
+
 ## `grabit` — file transfer over Tailscale
 
 Moves files between a (usually headless) OPS box and whatever machine you're

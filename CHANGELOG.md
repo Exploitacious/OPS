@@ -4,6 +4,35 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-22 — scheduled 5h-window pings (claude-window-ping.sh)
+
+- **New `bin/claude-window-ping.sh`** — cron-fired dumb pipe that opens the
+  Claude 5-hour usage window at Operator-chosen times: one headless
+  MCP-stripped `ping` to a brand-new session per configured profile
+  (`CC_WINDOW_PING_PROFILES`, space-separated `name=config_dir` pairs,
+  default `default=$HOME/.claude`; model via `CC_WINDOW_PING_MODEL`, default
+  `sonnet`). Why: when your day has predictable blocks, pre-arming the shared
+  window clock means the countdown is already running when you sit down. Runs
+  from `$HOME`, outside tmux (ping sessions never enter the reboot-resume
+  registry). The crontab is machine-local by design — install lines live in
+  the script header and `bin/README.md`.
+- **`session-briefing.sh` gains a quiet-when-clean `Ping:` line** — flags a
+  failed last ping (per profile, with rc) or a stale one
+  (`CC_WINDOW_PING_STALE_HOURS`, default 25h) at next session start; silent
+  when the feature isn't installed (no status file) or the last run was clean
+  and recent. A silent ping failure means the window never opened and nobody
+  was present to notice — the next session's briefing is where it gets seen.
+- **Hardened for unattended cron duty (review round):** malformed profile
+  pairs are skipped loud (logged + rc=2 status row) instead of silently
+  pinging a garbage config dir; whitespace-only config writes a loud
+  `config` rc=2 row instead of a fresh-but-empty status the briefing reads
+  as clean; the missing-binary path shares the atomic tmp+mv write; a
+  non-blocking flock serializes overlapping runs; tmp litter from killed
+  runs is swept; per-profile timeout promoted to `CC_WINDOW_PING_TIMEOUT`
+  (default 180s). **`claude-window-ping-selftest.sh`** (new) proves all of it
+  against a mock binary — profile routing, rc propagation (incl. 124/127),
+  malformed/empty config, lock behavior, tmp hygiene — zero real API usage.
+
 ## 2026-07-22 — context-watch: escalation ladder + mid-turn injection
 
 - **`context-watch.sh` rewritten from a single flat threshold into a 4-tier
