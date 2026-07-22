@@ -187,7 +187,8 @@ directly.
 
 - **Hooks** — the scripts in `.claude-config/hooks/` (SessionStart briefing +
   foreman-charter injection, pre-compact snapshot, post-compact resume,
-  handoff-check, memory-index, and the secrets/git guards) are registered in
+  handoff-check, memory-index, the context-watch escalation ladder
+  (Stop + PostToolUse), and the secrets/git guards) are registered in
   `settings.json`, which is a **Level 1 file owned by Stage 1**
   (linuxploitacious). Its hook entries point at these scripts by path, so the
   hooks come alive as soon as Stage 1 has deployed `settings.json` and this repo
