@@ -22,6 +22,16 @@ prehistory is deliberately not part of it.
   when the feature isn't installed (no status file) or the last run was clean
   and recent. A silent ping failure means the window never opened and nobody
   was present to notice — the next session's briefing is where it gets seen.
+- **Hardened for unattended cron duty (review round):** malformed profile
+  pairs are skipped loud (logged + rc=2 status row) instead of silently
+  pinging a garbage config dir; whitespace-only config writes a loud
+  `config` rc=2 row instead of a fresh-but-empty status the briefing reads
+  as clean; the missing-binary path shares the atomic tmp+mv write; a
+  non-blocking flock serializes overlapping runs; tmp litter from killed
+  runs is swept; per-profile timeout promoted to `CC_WINDOW_PING_TIMEOUT`
+  (default 180s). **`claude-window-ping-selftest.sh`** (new) proves all of it
+  against a mock binary — profile routing, rc propagation (incl. 124/127),
+  malformed/empty config, lock behavior, tmp hygiene — zero real API usage.
 
 ## 2026-07-22 — context-watch: escalation ladder + mid-turn injection
 
