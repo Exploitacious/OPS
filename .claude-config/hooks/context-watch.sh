@@ -5,7 +5,7 @@
 #   stop      (default) Stop hook: block the stop with an escalating nag telling
 #             the agent to run the compact ritual (pre-compact-synthesis skill
 #             -> compact-cycle.sh self-compact).
-#   posttool  PostToolUse hook: once usage reaches URGENT, inject the same
+#   posttool  PostToolUse hook: once usage reaches URGENT, inject a matching
 #             warning MID-TURN via additionalContext. Stop hooks only fire
 #             between turns — a long tool-calling turn once ran from 65% to 98%
 #             before its first Stop event and lost the room to synthesize. This
@@ -170,6 +170,12 @@ try:
 except Exception:
     last_ctx = last_tier = last_post = 0
 
+if ctx < last_ctx or ctx < last_post:
+    # Context SHRANK since the last nag (a /compact ran mid-session under the
+    # same session id): the stale high-water marks would suppress every re-nag
+    # below CRITICAL for the rest of the session — start a fresh epoch.
+    last_ctx = last_tier = last_post = 0
+
 pct = ctx * 100 // win
 left = max(0, win - ctx) // 1000
 ctx_k, win_k = ctx // 1000, win // 1000
@@ -184,7 +190,13 @@ how = ("run the pre-compact-synthesis skill in SELF-COMPACT mode: full synthesis
 if mode == "posttool":
     if pgap is None:
         sys.exit(0)
-    if last_post and ctx < last_post + pgap:
+    # Tier crossing fires immediately here too (the ladder-wide guarantee):
+    # derive the tier the last injection happened at from its recorded ctx.
+    last_ptier = 0
+    for i, t in enumerate(tiers, 1):
+        if last_post >= t[1]:
+            last_ptier = i
+    if last_post and tier <= last_ptier and ctx < last_post + pgap:
         sys.exit(0)
     # Record BEFORE emitting so a crash can never inject-spam.
     try:

@@ -24,9 +24,15 @@ prehistory is deliberately not part of it.
   sessions to arm the mid-turn half; the ladder itself goes live immediately
   since the Stop registration already points at this script.
 - **`context-watch-selftest.sh`** locks the ladder invariants (tier fires,
-  throttles, escalation-overrides-throttle, every-stop CRITICAL, loop guard,
-  posttool injection + throttles, kill switches, window scaling, legacy
-  single-int state upgrade). Fail-open like the hook: no python3 => SKIP.
+  throttles, escalation-overrides-throttle in BOTH modes, every-stop
+  CRITICAL, loop guard, posttool injection + throttles, literal state-field
+  integrity across the two write paths, post-compact epoch reset — a
+  mid-session /compact shrinks context, and a stale high-water mark would
+  otherwise suppress every re-nag below CRITICAL — kill switches, window
+  scaling, legacy single-int state upgrade + both legacy overrides). The
+  four core guarantees are mutation-verified: each selftest case fails when
+  its clause is surgically removed. Fail-open like the hook: no python3 =>
+  SKIP.
   Legacy `CC_COMPACT_NAG_TOKENS` / `CC_COMPACT_RENAG_TOKENS` overrides still
   honored (tier 1); `CC_CONTEXT_WATCH=0` kills all modes,
   `CC_CONTEXT_WATCH_POSTTOOL=0` the mid-turn half only.
