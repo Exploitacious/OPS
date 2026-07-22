@@ -19,11 +19,12 @@ compact-cycle.sh --target <Session|Session:win.pane> [--baton FILE] [--resume "T
 ```
 
 Runtime state (locks, logs, status, batons): `~/.claude-compact-cycle/`.
-Consumers: the skill's self-compact exit, the `[context-watch]` Stop-hook nag
-(`hooks/context-watch.sh`, registered in the Stage 1 `settings.json` template),
-and `WORKFORCE/bin/ac-compact-peer` (fleet, `--no-resume`). tmux gotcha baked
-in: targets use the `=Name:` exact form — bare names unique-prefix-match and
-pane-level commands reject bare `=Name`.
+Consumers: the skill's self-compact exit, the `[context-watch]` escalation
+ladder (`hooks/context-watch.sh` — Stop nags at 65/78/86/92% of the window
+plus mid-turn PostToolUse injections from 86%; both registered in the Stage 1
+`settings.json` template), and `WORKFORCE/bin/ac-compact-peer` (fleet,
+`--no-resume`). tmux gotcha baked in: targets use the `=Name:` exact form —
+bare names unique-prefix-match and pane-level commands reject bare `=Name`.
 
 ## `grabit` — file transfer over Tailscale
 

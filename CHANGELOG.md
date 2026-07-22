@@ -4,6 +4,39 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-22 — context-watch: escalation ladder + mid-turn injection
+
+- **`context-watch.sh` rewritten from a single flat threshold into a 4-tier
+  escalation ladder** scaled off `CC_CONTEXT_WINDOW` (default 1M): 65% NOTICE
+  (re-nag +75K) / 78% WARNING (+40K) / 86% URGENT (+20K) / 92% CRITICAL (every
+  stop). Crossing into a higher tier fires immediately regardless of growth,
+  and the message language escalates per tier. Why: one polite nag repeated at
+  a flat interval is easy for a deep-in-the-work session to defer until the
+  window is gone.
+- **New `posttool` mode closes the mega-turn blind spot.** Stop hooks only
+  fire between turns — a long tool-calling turn can run from 65% to
+  window-death without ever seeing a nag. Registered as a PostToolUse hook
+  (matcher `.*`, arg `posttool`) in the Stage 1 `settings.json` template, it
+  injects the warning mid-turn via `additionalContext` from 86% (+15K
+  throttle, +8K at CRITICAL). **Existing copies:** hook config is
+  session-cached and `settings.json` is Stage-1-owned — re-run Stage 1 (or add
+  the PostToolUse entry to your `settings.json` by hand) and relaunch
+  sessions to arm the mid-turn half; the ladder itself goes live immediately
+  since the Stop registration already points at this script.
+- **`context-watch-selftest.sh`** locks the ladder invariants (tier fires,
+  throttles, escalation-overrides-throttle in BOTH modes, every-stop
+  CRITICAL, loop guard, posttool injection + throttles, literal state-field
+  integrity across the two write paths, post-compact epoch reset — a
+  mid-session /compact shrinks context, and a stale high-water mark would
+  otherwise suppress every re-nag below CRITICAL — kill switches, window
+  scaling, legacy single-int state upgrade + both legacy overrides). The
+  four core guarantees are mutation-verified: each selftest case fails when
+  its clause is surgically removed. Fail-open like the hook: no python3 =>
+  SKIP.
+  Legacy `CC_COMPACT_NAG_TOKENS` / `CC_COMPACT_RENAG_TOKENS` overrides still
+  honored (tier 1); `CC_CONTEXT_WATCH=0` kills all modes,
+  `CC_CONTEXT_WATCH_POSTTOOL=0` the mid-turn half only.
+
 ## 2026-07-17 — session-close work-tracking reconciliation gate
 
 - **`session-close` gains a WIP & work-tracking reconciliation step** (new step
