@@ -148,5 +148,24 @@ done
 if [ -n "$hyg" ]; then
   printf ' Hygiene:%s\n' "${hyg% ·}"
 fi
+
+# --- window-ping health (quiet-when-clean): the cron dumb-pipe that opens the
+# 5h usage window at fixed times (bin/claude-window-ping.sh). Silent when the
+# feature isn't installed on this machine (no status file) or the last run was
+# clean and recent; loud when a profile ping failed or cron stopped firing —
+# either way the Operator's window never started and nobody was there to see.
+WP="$HOME/.local/state/window-ping/last-status.tsv"
+if [ -f "$WP" ]; then
+  wpfail="$(awk -F'\t' '$2 != "0" {printf "%s rc=%s @ %s; ", $1, $2, $3}' "$WP" 2>/dev/null)"
+  if [ -n "$wpfail" ]; then
+    printf ' Ping:    last window-ping FAILED — %ssee ~/.local/state/window-ping/ping.log\n' "$wpfail"
+  else
+    wp_mt="$(stat -c %Y "$WP" 2>/dev/null || echo 0)"
+    wp_age_h="$(( ( $(date +%s) - wp_mt ) / 3600 ))"
+    wp_stale_h="${CC_WINDOW_PING_STALE_HOURS:-25}"   # >25h = no ping in a day; cron likely dead
+    [ "$wp_mt" -gt 0 ] && [ "$wp_age_h" -ge "$wp_stale_h" ] && \
+      printf ' Ping:    window-ping has not fired in %sh (cron dead?) — check crontab + ping.log\n' "$wp_age_h"
+  fi
+fi
 printf '============================================================\n'
 exit 0
