@@ -4,6 +4,39 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-24 — Opus 5 adoption: model tiers, effort rules, deliverable brand kit
+
+- **Model policy moves to Claude Opus 5** — the main-session boot default and
+  the `opus` worker alias both point at the plain `claude-opus-5` id (1M
+  context is Opus 5's default AND max, so no `[1m]` suffix). Same $/token as
+  Opus 4.8, separate rate-limit bucket, strictly stronger on hard
+  coding/agentic lanes. Sonnet 5 stays the default worker
+  (`ANTHROPIC_DEFAULT_SONNET_MODEL`), Sonnet 5 200K stays the trivial tier.
+  Updated in `CONTEXT/foreman-charter.md`, `CONTEXT/operating-doctrine.md`
+  (P12 + changelog), and `SKILLS/agent-delegation/04_foreman_estimation.md`.
+  (Stage-1 settings pins ship from the deployer repo — update
+  `ANTHROPIC_DEFAULT_OPUS_MODEL` and the top-level `model` key there if you
+  maintain your own fork of the stage-1.)
+- **Opus 5 behavioral calibration** (from Anthropic's "Prompting Claude
+  Opus 5" guide): the charter's delegate-bias language was overshot against
+  Opus 4.8's under-delegation — Opus 5 delegates readily, so a spawn-
+  discipline block now bounds it (one agent when one suffices; no mid-task
+  self-re-check spawns). The **completed-work review sweep is affirmed as a
+  standing requirement regardless of model** — Opus 5's self-verification
+  trims only duplicate mid-task re-checking, never the end-of-work reviewer
+  pass.
+- **Effort rules codified** — effort-decreases are the Operator's token-
+  saving lever: honored without friction, never auto-restored mid-session,
+  never applied autonomously by the AI, and never to review/verify lanes.
+  (Opus 5 holds quality unusually well at `low`/`medium`, which is what makes
+  an Operator-requested economy pass cheap.)
+- **New brand-voice template section: "Client Deliverable Brand Kit"** —
+  Opus-class models produce markedly better office documents (.docx/.pptx/
+  .xlsx) when handed a concrete brand spec (logo, colors, fonts, section
+  order, contact block) instead of "professional and clean." The template
+  ships an EXAMPLE block to replace during bootstrap; found as the sole
+  confirmed gap in a 16-agent audit of the prompting guide vs this harness.
+
 ## 2026-07-22 — scheduled 5h-window pings (claude-window-ping.sh)
 
 - **New `bin/claude-window-ping.sh`** — cron-fired dumb pipe that opens the

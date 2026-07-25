@@ -178,18 +178,26 @@ the Operator are aligned, spend main context checking work, not doing it. Inline
 reserved for the genuinely trivial and for tightly-sequential synthesis
 that delegation would only fragment (e.g. authoring this doctrine).
 
-**Sonnet-5-1M is the default worker; the foreman runs Opus.** The default
-session model is Opus 4.8 `[1m]` — orchestration judgment lives in the main
-thread. Spawn sub-agents as **Sonnet 5 1M** by default (`model: 'sonnet'`);
-drop to **Sonnet 5 200K** (`model: 'haiku'`) for trivial/mechanical lanes;
-escalate to **Opus 4.8 1M** (`model: 'opus'`) for a genuinely hard sub-task
-(subtle reasoning, audits, security-sensitive builds — not bulk edits). Sonnet
-5 weighs far less against the usage limits than Opus for the same labor. This
-keeps the expensive model where it earns its cost — deciding *what* — and the
-cheap model where the tokens are spent — *doing* it. A 1M-subagent
-usage-credit gate can, on some accounts, force sub-agents down to ≤200K
-context — if that gate ever fires, drop to the 200K aliases until it lifts
-(see `operating-doctrine.md` **P12**).
+**Sonnet-5-1M is the default worker; the foreman runs Opus 5.** The default
+session model is Opus 5 (1M native — 1M is its default AND max, so the plain
+`claude-opus-5` id, no `[1m]` suffix) — orchestration judgment lives in the
+main thread. Heavier frontier models, where the Operator's plan includes
+them, are a deliberate `/model` switch for planning-heavy sessions, not the
+daily boot default. Spawn sub-agents as **Sonnet 5 1M** by default
+(`model: 'sonnet'`); drop to **Sonnet 5 200K** (`model: 'haiku'`) for
+trivial/mechanical lanes; escalate to **Opus 5** (`model: 'opus'`) for a
+genuinely hard sub-task (subtle reasoning, audits, security-sensitive
+builds — not bulk edits). Sonnet 5 weighs far less against the usage limits
+than Opus for the same labor. This keeps the expensive model where it earns
+its cost — deciding *what* — and the cheap model where the tokens are
+spent — *doing* it. **Effort decreases are the Operator's token-saving
+lever** — honor a `/effort` drop without pushback and never auto-restore it
+mid-session; never autonomously downgrade a lane's effort to economize,
+least of all a review/verify lane. (Opus 5 holds quality unusually well at
+`low`/`medium`, which is what makes an Operator-requested economy pass
+cheap.) A 1M-subagent usage-credit gate can, on some accounts, force
+sub-agents down to ≤200K context — if that gate ever fires, drop to the 200K
+aliases until it lifts (see `operating-doctrine.md` **P12**).
 
 **Right-size every brief — 1M is headroom, not a dumping ground.** Workers now
 run at up to 1M context, but bigger context is not better work, and
@@ -209,6 +217,24 @@ any work — a real fixed cost per spawn. Delegate work that genuinely
 parallelizes or would overflow one context; do trivial or tightly-
 sequential work inline. "Delegate once aligned" means *delegate the real
 labor* — not spawn an agent for a one-file edit.
+
+**Opus 5 calibration (2026-07-24).** The delegate-bias language above was
+deliberately overshot against Opus 4.8, which under-delegated; Opus 5
+reaches for sub-agents readily on its own, so the overshoot now compounds
+instead of correcting. Running on Opus 5, apply the bias with discipline:
+one agent when one suffices; never delegate what a handful of tool calls
+finishes; don't spawn extra mid-task re-check agents for work you are
+still holding (Opus 5 self-verifies as it goes — redundant mid-task
+re-checks are pure token burn).
+
+**The completed-work review sweep is a STANDING requirement — regardless
+of model.** Opus 5's self-verification does not replace it: every
+completed body of work still gets its reviewer pass (`ops-reviewer` lane,
+adversarial verify stage, or you reading every changed line) before it
+integrates, merges, or reaches the Operator. What the calibration above
+trims is only *duplicate mid-task self-checking*; the end-of-work
+double-checker sweep is deliberate workflow design, not a model-era
+artifact. When in doubt, run the sweep.
 
 ## How you brief (stakes mode, never caveman)
 

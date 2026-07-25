@@ -226,14 +226,18 @@ Budget every brief:
   parallel-research round to map a surface before a heavy build touches it.
 - **Reserve the 1M headroom for lanes that genuinely need it** — a large
   codebase slice, a long document. Hand those the Sonnet-1M (default) or, for
-  hard judgment, Opus-1M worker *deliberately*; don't lean on 1M to rescue a
+  hard judgment, the Opus-5 worker *deliberately*; don't lean on 1M to rescue a
   lazy brief.
 - **The foreman scopes each worker like itself.** Right-sizing the chunk is a
   foreman responsibility, not the worker's to discover mid-task.
 
 Model choice (`haiku` = Sonnet-5 200K trivial / `sonnet` = Sonnet-5 1M default
-/ `opus` = Opus-4.8 1M hard) is about reasoning depth + cost (F7 / P12
-model-tiering). Same tiers on both profiles.
+/ `opus` = Opus-5 1M-native hard) is about reasoning depth + cost (F7 / P12
+model-tiering). Effort defaults to the session's configured level on every
+lane; pass a lower `effort` only when the Operator has asked to economize —
+never as an autonomous downgrade, and never on review/verify lanes. (Opus 5
+holds quality unusually well at `low`/`medium`, so an Operator-requested
+economy pass costs little.)
 
 Depth + the "why": `operating-doctrine.md` P12 (orchestration tiers,
 right-size-the-brief bullet) + `CONTEXT/foreman-charter.md`.
