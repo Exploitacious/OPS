@@ -220,6 +220,15 @@ harness expects — the same shape used across the doctrine:
    as calibration anchors.
 6. **Changelog** table — so the profile is explicitly a living document; invite
    the Operator to refine it as you observe more.
+7. **Client Deliverable Brand Kit** — the section `brand-voice.md` ships as an
+   EXAMPLE block. Ask the Operator for (or locate on the box) their real logo
+   file, brand colors, fonts, default document section order, and contact
+   block — current models produce markedly better office documents when handed
+   these specifics. If a design system or brand kit already exists elsewhere
+   (a website repo, a marketing folder), keep it the source of truth and
+   record only the essentials plus a pointer. If no brand assets exist yet,
+   write that down explicitly in the section — a truthful "no brand kit yet;
+   ask before styling deliverables" beats an invented palette.
 
 Ground every claim in the text (P3) — quote real lines; never fabricate a
 "sample." An honest profile built from ten real emails beats an invented one.
@@ -231,8 +240,9 @@ pick and react; iterate two or three rounds until the samples read like them.
 Record the converged samples and the stated preferences as the starter voice,
 and note in the changelog that it's preference-based pending a real corpus.
 
-Overwrite `CONTEXT/brand-voice.md` with the result and bump the marker to
-`stage=2`.
+Overwrite `CONTEXT/brand-voice.md` with the result — every section, including
+the Client Deliverable Brand Kit (filled, or honestly marked empty) — and bump
+the marker to `stage=2`.
 
 ---
 
