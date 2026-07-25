@@ -143,6 +143,40 @@ like a professional wrote it.
 - Code blocks for anything technical (scripts, API payloads, config).
 - Tables only when comparing options or displaying structured data.
 
+## Client Deliverable Brand Kit (.docx / .pptx / .xlsx)
+
+<!--
+  Answers: when the AI produces an office document on the Operator's behalf,
+  what concrete brand spec should it hit? Current models produce markedly
+  better deliverables when handed specifics instead of "professional and
+  clean" — logo file + placement, exact colors, fonts, a default section
+  order, and the contact block. If a design system exists elsewhere (a
+  website repo, a brand-kit folder), keep it the source of truth and put only
+  the essentials + a pointer here. Delete the EXAMPLE block and replace with
+  the real kit; if no brand assets exist yet, say so explicitly so the AI
+  asks instead of inventing.
+-->
+
+**EXAMPLE — replace on bootstrap:**
+
+- **Company name:** customer-facing text uses **Example Corp** (trade name);
+  "Example Corporation LLC" only where a legal name is required. Never mix
+  the two in one document.
+- **Logo:** `path/to/logo-primary.png` — title page top; small header repeat
+  on later pages optional.
+- **Colors:** white background; headings and links brand blue `#1a4f8b`;
+  body near-black; accent `#e07020` used surgically (callouts, key metrics)
+  — overuse kills the effect.
+- **Typography:** headings Font-A, body Font-B; fall back to the closest
+  clean system font where embedding fails. Monospace only for technical
+  data.
+- **Default section order:** title page (logo, title, client, date) →
+  executive summary → body sections → recommendations / next steps →
+  contact footer.
+- **Contact block:** phone · email · website.
+- **Length:** match length to what the task needs — no filler sections, no
+  redundant summaries, no boilerplate padding.
+
 ## Email Patterns
 
 <!--

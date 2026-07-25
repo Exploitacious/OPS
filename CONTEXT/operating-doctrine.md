@@ -670,14 +670,20 @@ deliberately.
 - Delegate↔workflow boundary: orchestration worth codifying, needs
   more than ~10 agents, or wants adversarial verification baked in →
   workflow.
-- **Model tiering: Opus foreman; Sonnet-5-1M default worker; Opus for the
-  hard lanes.** The default session model is Opus 4.8 1M (the orchestration
-  judgment). Spawn sub-agents at **Sonnet 5 1M** by default
-  (`model: 'sonnet'` on the Agent tool / `opts.model` in a workflow); drop
-  to **Sonnet 5 200K** (`model: 'haiku'`) for trivial/mechanical lanes where
-  the 1M window is wasted; escalate to **Opus 4.8 1M** (`model: 'opus'`) for
-  genuinely hard sub-tasks (subtle reasoning, audits, security-sensitive
-  builds — not bulk edits). Sonnet 5 weighs far less against the usage limits
+- **Model tiering: Opus 5 foreman; Sonnet-5-1M default worker; Opus 5 for the
+  hard lanes.** The default session model is Opus 5, 1M native (the
+  orchestration judgment; heavier frontier models are a deliberate `/model`
+  switch, not the boot default). Spawn sub-agents at **Sonnet 5 1M** by
+  default (`model: 'sonnet'` on the Agent tool / `opts.model` in a workflow);
+  drop to **Sonnet 5 200K** (`model: 'haiku'`) for trivial/mechanical lanes
+  where the 1M window is wasted; escalate to **Opus 5** (`model: 'opus'`, 1M
+  native — no `[1m]` suffix) for genuinely hard sub-tasks (subtle reasoning,
+  audits, security-sensitive builds — not bulk edits). Effort-decreases are
+  the Operator's token-saving lever — honor them without friction, never
+  auto-restore mid-session, and never autonomously downgrade a lane (least
+  of all review/verify) to economize; Opus 5 holds quality unusually well at
+  `low`/`medium`, which is what makes an Operator-requested economy pass
+  cheap. Sonnet 5 weighs far less against the usage limits
   than Opus and is a strong worker; the expensive model decides *what*, the
   cheap one does it. A 1M-subagent usage-credit gate can, on some accounts,
   force sub-agents down to ≤200K context — if that gate ever fires, re-point
@@ -891,6 +897,21 @@ that's how systems fork.
   `working-preferences.md` — user-identity layer.
 
 ---
+
+Last updated: 2026-07-24 (Opus 5 adoption pass — **Opus 5 is the main-session
+boot default** (plain `claude-opus-5` id; 1M native, no `[1m]` suffix) and the
+`opus` worker alias repoints to it (same $/token as Opus 4.8, separate
+rate-limit bucket, strictly stronger hard lanes). P12 tiering bullet updated;
+effort-decreases codified as the Operator's token-saving lever (never
+autonomous, never auto-restored mid-session, never on review/verify lanes).
+Behavioral deltas from Anthropic's "Prompting Claude Opus 5" guide folded into
+the foreman charter: delegation calibration (Opus 5 delegates readily — the
+anti-4.8 overshoot now compounds; spawn discipline added) and the
+completed-work review sweep affirmed as a standing requirement regardless of
+model (Opus 5 self-verification trims only duplicate mid-task re-checks). An
+audit of verify language across the ops-* agent lanes + brief template found
+it all structural (foreman-verifies-worker / evidence-in-report) — nothing
+stripped.)
 
 Last updated: 2026-06-30 (worker-model policy update — supersedes an earlier
 "≤200K cap"). A 1M-subagent usage-credit gate that previously forced ≤200K
