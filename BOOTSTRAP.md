@@ -60,6 +60,16 @@ so recon is transparent, not spooky.
 - **Existing Claude Code setup:** list `~/.claude/skills/` and read
   `~/.claude/settings.json` (model aliases, effort, env) if present — a
   returning user may carry preferences worth honoring rather than overwriting.
+- **Which foreman this plan can run:**
+  ```bash
+  .claude-config/bin/model-probe.sh --refresh
+  ```
+  Settles the main-session pin for this machine — Fable 5 where the plan
+  allows it, Opus 4.8 otherwise — so the Operator's first real session boots
+  the right foreman instead of erroring on an unavailable model. Model
+  availability is plan-dependent and most Operators don't know their own
+  entitlements, so detect it and report the verdict in the recon summary;
+  never turn it into an interview question.
 - **Repos under `~`:** a shallow scan for `.git` dirs (e.g.
   `find ~ -maxdepth 3 -name .git -type d 2>/dev/null | head -40`) sketches
   what the Operator actually builds — languages, org names, project count.

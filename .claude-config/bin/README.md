@@ -54,6 +54,36 @@ flock. `claude-window-ping-selftest.sh` proves every unattended path against
 a mock binary — no real API usage. Machine-local: Stage 2 does not deploy the
 crontab; add the lines by hand per box.
 
+## `model-probe.sh` — settle the foreman model pin for this machine
+
+The foreman seat is a role, not a model: Fable 5 where the Operator's plan
+grants it, Opus 4.8 everywhere else. Entitlements are plan-dependent and most
+Operators don't know their own, so this detects them instead of asking — one
+throwaway headless round-trip against the Fable model id — and writes the
+verdict into the top-level `model` key of the deployed `settings.json`.
+
+```
+model-probe.sh                   probe + apply the verdict (default)
+model-probe.sh --refresh         probe + apply the verdict
+model-probe.sh --status          print pin / last verdict / override / sticky
+model-probe.sh --force fable     pin Fable and stop probing (Operator override)
+model-probe.sh --force opus48    pin Opus 4.8 and stop probing
+model-probe.sh --clear-override  drop the override, resume probing
+```
+
+State: `~/.local/state/ops/model-probe-{result,override,fable-capable}` plus a
+pre-edit `model-probe-settings.bak` (atomic tmp+mv, non-blocking flock). The
+sticky `fable-capable` marker is why one bad day cannot demote a Fable box —
+where Fable is available it is usage-capped, so a quota-shaped or timed-out
+probe leaves the pin alone and only a clean non-quota failure falls back. The
+pin is rewritten in place on the existing `model` line (settings.json is
+resolved through `readlink -f` first, so the edit lands on the real file
+instead of replacing the Stage 1 symlink); a `settings.json` with no `model`
+key is left structurally alone. Callers: `deploy.sh` (Stage 2, non-fatal),
+`BOOTSTRAP.md` Stage 0 recon, and the `harness-update` skill's post-sync
+gates. `verify-ops.sh --quiet` checks the resulting pin. Test hooks:
+`OPS_MODEL_PROBE_{SETTINGS,MODEL,BIN,TIMEOUT,STATE_DIR}`.
+
 ## `grabit` — file transfer over Tailscale
 
 Moves files between a (usually headless) OPS box and whatever machine you're

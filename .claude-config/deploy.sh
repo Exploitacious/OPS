@@ -14,6 +14,7 @@
 #   5. Initialize Claude Code auto-memory git-sync (ac-memory-init)
 #   6. Schedule daily backup cron entry
 #   7. Install caveman Claude Code plugin
+#   8. Settle the main-session model pin for this machine (bin/model-probe.sh)
 #
 # Idempotent. Safe to re-run after any OPS git pull.
 # Full procedure: see ~/OPS/DEPLOYMENT.md.
@@ -422,6 +423,29 @@ if result="$(seed_trust "$jf")"; then
     set) msg_ok "Trust anchor set for \$HOME in ${jf}" ;;
     ok)  msg_ok "Trust anchor already present in ${jf}" ;;
   esac
+fi
+
+# --- Model availability probe ---
+# Which foreman this machine can actually run is plan-dependent, so the pin
+# stage 1 shipped is a guess until something checks. The probe settles it
+# (Fable 5 where the plan allows, Opus 4.8 otherwise) at the END of deploy,
+# once the CLI and config surface it needs are wired.
+#
+# Deliberately NON-FATAL: a probe that cannot reach the API must not fail an
+# otherwise-good deploy — the pin stays whatever stage 1 wrote, and the next
+# session's own probe (BOOTSTRAP recon / harness-update gate) re-settles it.
+echo ""
+c_yel "Settling model pin for this machine..."
+
+MODEL_PROBE="${CONFIG_DIR}/bin/model-probe.sh"
+if [[ ! -x "$MODEL_PROBE" ]]; then
+  msg_warn "model-probe.sh not present at $MODEL_PROBE — skipping (pin left as stage 1 wrote it)."
+elif [[ -z "$CLAUDE_BIN" ]]; then
+  msg_warn "Claude CLI not found — skipping model probe (pin left as stage 1 wrote it)."
+elif "$MODEL_PROBE" --refresh; then
+  msg_ok "Model pin settled."
+else
+  msg_warn "model-probe.sh exited rc=$? — pin left as stage 1 wrote it; re-run: $MODEL_PROBE --refresh"
 fi
 
 echo ""

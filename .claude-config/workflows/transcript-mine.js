@@ -64,7 +64,7 @@ const MINE_SCHEMA = {
 phase('Scout')
 const scout = await agent(
   `Read-only scout for a transcript-mining run over the Operator's Claude Code session history. List MAIN-SESSION transcripts modified since ${ARGS.since}: files matching <config>/projects/<workspace>/<uuid>.jsonl under ~/.claude/projects/ (and any second profile dir, e.g. a CLAUDE_CONFIG_DIR pool, if one is in use) — EXCLUDE anything under a subagents/ subdirectory (worker transcripts are noise; their conclusions surfaced in the parent) and files under 20KB (too small to hold unfiled lessons). Use find with -newermt '${ARGS.since}' and stat for sizes. Decode each workspace dir name to a human project label (a dir like ...-OPS-PROJECTS-ExampleOrg-sample-app decodes to sample-app). Return up to ${LIMIT * 3} candidates sorted ${ORDER === 'small-first' ? 'smallest first' : 'newest first'}; the foreman takes the top ${LIMIT}. You change nothing. StructuredOutput per schema.`,
-  { label: 'scout', phase: 'Scout', schema: SCOUT_SCHEMA, model: 'haiku' }
+  { label: 'scout', phase: 'Scout', schema: SCOUT_SCHEMA, model: 'sonnet' }
 )
 if (!scout || !scout.transcripts.length) return { staged: [], note: 'no transcripts matched since=' + ARGS.since }
 

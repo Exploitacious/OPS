@@ -670,24 +670,51 @@ deliberately.
 - Delegate↔workflow boundary: orchestration worth codifying, needs
   more than ~10 agents, or wants adversarial verification baked in →
   workflow.
-- **Model tiering: Opus 5 foreman; Sonnet-5-1M default worker; Opus 5 for the
-  hard lanes.** The default session model is Opus 5, 1M native (the
-  orchestration judgment; heavier frontier models are a deliberate `/model`
-  switch, not the boot default). Spawn sub-agents at **Sonnet 5 1M** by
-  default (`model: 'sonnet'` on the Agent tool / `opts.model` in a workflow);
-  drop to **Sonnet 5 200K** (`model: 'haiku'`) for trivial/mechanical lanes
-  where the 1M window is wasted; escalate to **Opus 5** (`model: 'opus'`, 1M
-  native — no `[1m]` suffix) for genuinely hard sub-tasks (subtle reasoning,
-  audits, security-sensitive builds — not bulk edits). Effort-decreases are
-  the Operator's token-saving lever — honor them without friction, never
-  auto-restore mid-session, and never autonomously downgrade a lane (least
-  of all review/verify) to economize; Opus 5 holds quality unusually well at
-  `low`/`medium`, which is what makes an Operator-requested economy pass
-  cheap. Sonnet 5 weighs far less against the usage limits
-  than Opus and is a strong worker; the expensive model decides *what*, the
-  cheap one does it. A 1M-subagent usage-credit gate can, on some accounts,
-  force sub-agents down to ≤200K context — if that gate ever fires, re-point
-  the SONNET/OPUS aliases to non-`[1m]` models until it lifts.
+- **Model tiering: Fable 5 foreman where the plan allows it, Opus 4.8
+  otherwise; Opus 5 the default build/review worker; Sonnet 5 the light
+  lanes.** The main-session pin is decided per machine, not at runtime:
+  Stage 1 ships it and `.claude-config/bin/model-probe.sh` sets it to
+  **Fable 5** (`claude-fable-5[1m]`) where the probe succeeds and **Opus
+  4.8** (`claude-opus-4-8[1m]`) on anything else. Fable is best at context,
+  nuance, and instruction-following, which is why orchestration judgment
+  lives there wherever it is available — and on the plans that carry it, it
+  is usage-capped, so it is the one tier that gets rationed: the Fable
+  thread writes briefs, delegates, decides, and reviews worker output *in
+  the main thread*, and does not read/build/verify inline past a handful of
+  tool calls. **Never spawn Fable as a sub-agent** — no `model: 'fable'`
+  worker alias exists, and spending a capped tier on work Opus 5 handles is
+  the precise waste the cap punishes; worker-output review is the main
+  thread's job, not a Fable sub-agent's. **Opus 4.8** — what the `opus`
+  alias and the `/model` Opus entry now resolve to — is the primary foreman
+  on plans without Fable and the fallback on plans with it: same charter,
+  taken when Fable's usage is spent or the task is uncomplicated and already
+  decided. It is reliable at fan-out, follow-through, and review but weaker
+  on big-picture judgment and unprompted better-way suggestions, so
+  compensate with explicit written plans and review of every returned lane.
+  **Opus 5** (`claude-opus-5`, 1M native — no `[1m]` suffix) is the default
+  worker and never a foreman: Operator-observed, as an orchestrator it loses
+  the thread, ignores context it was given, introduces regressions, and
+  doom-loops on apology-reverts; as an executor of a precise brief it is
+  excellent. Reach it by exact ID — the `ops-worker`, `ops-reviewer`, and
+  `ops-auditor` agent types hard-pin it in frontmatter, and workflow lanes
+  take `model: 'claude-opus-5'`. Do not pass an alias override on an `ops-*`
+  spawn except a deliberate `model: 'sonnet'` downshift. **Sonnet 5**
+  (`model: 'sonnet'` → `claude-sonnet-5[1m]`) takes investigation,
+  mechanical edits, and routine lanes; foremen rotate Opus 5 ↔ Sonnet 5 by
+  job complexity on their own judgment. **Haiku is banned harness-wide** —
+  never reference the alias in a config, doc, script, or spawn.
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL` stays pinned to `claude-sonnet-5` as a
+  TRIPWIRE so anything that still asks for haiku (a third-party plugin, a
+  stray `model: 'haiku'`) silently gets Sonnet 5; never remove that key,
+  because removing it resurrects real Haiku 4.5. Effort defaults to `xhigh`
+  everywhere; effort-decreases are the Operator's token-saving lever — honor
+  them without friction, never auto-restore mid-session, and never
+  autonomously downgrade a lane (least of all review/verify) to economize.
+  Opus 5 holds quality unusually well at `low`/`medium`, which is what makes
+  an Operator-requested economy pass on a worker lane cheap. A 1M-subagent
+  usage-credit gate can, on some accounts, force sub-agents down to ≤200K
+  context — if that gate ever fires, re-point the worker aliases at
+  non-`[1m]` models until it lifts.
 - **Right-size every brief — the 1M window is headroom, not a license to
   dump.** Workers now run at up to 1M context, but bigger context is
   not better work: a tightly-scoped brief beats a bloated one, and Sonnet-1M's
@@ -897,6 +924,42 @@ that's how systems fork.
   `working-preferences.md` — user-identity layer.
 
 ---
+
+Last updated: 2026-07-28 (Model-policy pass — Operator directive; the four
+model roles re-cut end to end, and the primary foreman is now ROLE-BASED
+rather than one fixed model. **Fable 5 is the primary foreman wherever the
+Operator's plan carries it**, and the main-session pin is no longer hand-set:
+Stage 1 (linuxploitacious) ships it and `.claude-config/bin/model-probe.sh`
+probes each machine, pinning `claude-fable-5[1m]` when the probe succeeds and
+`claude-opus-4-8[1m]` on anything else — same charter either way. On the plans
+that carry Fable it is usage-capped, so this pass adds the thrift rule a
+rationed tier needs: Fable orchestrates ONLY (briefs, delegation, decisions,
+and worker-output review in the MAIN THREAD), does not read/build/verify
+inline past a handful of tool calls, and is **never spawned as a sub-agent**
+(no `model:'fable'` worker alias exists, and a Fable sub-agent burns the
+capped tier on work Opus 5 does fine). **The `opus` alias repoints to
+`claude-opus-4-8[1m]`** (Stage 1) — the `/model` Opus entry is a FOREMAN slot
+now, NOT a worker tier: primary on plans without Fable, fallback on plans with
+it for when Fable's usage is spent or the task is uncomplicated and
+pre-decided; its weaker big-picture judgment and thinner better-way
+suggestions are compensated with explicit written plans and review of every
+lane. **Opus 5 is demoted to default build/review worker and is never a
+foreman** — Operator-observed, as an orchestrator it loses the thread, ignores
+context it was given, introduces regressions, and doom-loops on
+apology-reverts, while as an executor of a precise brief it is excellent. It
+is now reached only by exact ID `claude-opus-5`: hard-pinned in the
+`ops-worker` / `ops-reviewer` / `ops-auditor` frontmatter, or passed as
+`model:'claude-opus-5'` in a Workflow lane. **Sonnet 5** (`model:'sonnet'`)
+keeps the light/routine lanes; foremen rotate Opus 5 ↔ Sonnet 5 by
+complexity. **Haiku is BANNED harness-wide** —
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` stays pinned to `claude-sonnet-5` as a
+TRIPWIRE so any third-party plugin or stray `model:'haiku'` silently gets
+Sonnet 5; the key is never removed (removing it resurrects real Haiku 4.5) and
+the alias is never referenced in our own configs, docs, or scripts. P12's
+tiering bullet and the foreman charter's tier block were rewritten to match,
+and the charter's delegate-bias calibration was re-scoped to the two foreman
+models. The standing completed-work review sweep is unchanged and still
+model-independent.)
 
 Last updated: 2026-07-24 (Opus 5 adoption pass — **Opus 5 is the main-session
 boot default** (plain `claude-opus-5` id; 1M native, no `[1m]` suffix) and the

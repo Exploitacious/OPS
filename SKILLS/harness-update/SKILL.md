@@ -120,11 +120,15 @@ untouched-local UPDATE from a diverged-local CONFLICT. It lives under
    ~/OPS/.claude-config/bin/secrets-scan.sh <changed files>
    bash -n <each changed shell script>
    node --check <each changed .js>
+   ~/OPS/.claude-config/bin/model-probe.sh --refresh
    ```
 
    `verify-ops.sh` is the drift gate; `secrets-scan.sh` catches a credential
    riding in on a ported file. All green before step 7 — a red gate is a stop,
-   not a note (P6).
+   not a note (P6). `model-probe.sh --refresh` runs last because a sync can
+   change model policy: it re-settles the main-session pin against what THIS
+   machine's plan can actually run, so an upstream foreman change doesn't land
+   as a next-boot error.
 
 7. **One commit; update the marker.** Land a single Conventional Commit that
    lists the features pulled — e.g.

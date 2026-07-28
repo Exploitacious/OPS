@@ -4,6 +4,55 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-07-28 — Fable-primary model policy + availability probe
+
+- **The foreman seat is now role-based, not model-based** — the main session
+  boots **Fable 5 where the Operator's plan allows it, Opus 4.8 otherwise**,
+  and the charter it runs is identical either way. Nothing in the harness
+  branches on which one answered. Where Fable is available it is usage-capped,
+  so the foreman orchestrates only — briefs, delegation, decisions, reviewing
+  worker output in the main thread — and **never spawns itself as a subagent**
+  (there is no `fable` worker alias; a Fable worker would burn the scarce tier
+  on work Opus 5 does fine).
+- **New `bin/model-probe.sh`** — availability is plan-dependent and Operators
+  generally don't know their own entitlements, so the harness detects it
+  instead of asking. The probe checks whether Fable can actually run on this
+  machine and settles the main-session pin accordingly, caching the verdict
+  under `~/.local/state/ops` so every later boot reads the answer instead of
+  re-probing; `--refresh` re-runs the detection, `--force` overrides the
+  verdict when the Operator knows better than the probe. Wired into
+  `deploy.sh` (best-effort, non-fatal — a probe that can't reach the API must
+  not fail an otherwise-good deploy), into `BOOTSTRAP.md` Stage 0 recon (so
+  the first real session boots the right foreman), and into the
+  `harness-update` skill's post-sync gates (a sync can change model policy).
+- **`ops-worker`, `ops-reviewer`, and `ops-auditor` hard-pinned to
+  `claude-opus-5`** by exact id, not the `opus` alias — that alias is the
+  *foreman* slot now, and a worker resolving through it would spawn the
+  scarce tier. Opus 5 is the default build/review worker and never a foreman:
+  as an executor of a precise brief it is excellent, as an orchestrator it
+  loses the thread. The two `harness-audit` judgment lanes (chief reviewer,
+  completeness critic) moved off the alias for the same reason;
+  `ops-investigator` and the routine workflow lanes stay on Sonnet 5.
+- **Haiku is banned harness-wide**, enforced as a stage-1 tripwire rather than
+  a rule anyone has to remember: `ANTHROPIC_DEFAULT_HAIKU_MODEL` is pinned to
+  `claude-sonnet-5`, so anything still requesting the haiku tier silently gets
+  Sonnet 5. Never remove that key — removing it resurrects real Haiku. The
+  `transcript-mine` scout lane, the last in-repo `haiku` caller, now names
+  `sonnet` directly.
+- **`session-briefing.sh` reports both model seats** — the `Config:` line
+  gained `main=<pin>  ·  fallback(opus)=<alias>` in place of the single
+  `opus=` field, and the worker line now reads `Opus 5 default worker ·
+  Sonnet 5 light lanes`. Which foreman actually booted is the first thing a
+  session needs to know when the answer varies by machine.
+- **`verify-ops.sh` gains `check_model_policy`** — the drift gate now fails
+  when the pins disagree with this policy (a worker pointed at the alias, a
+  haiku reference reintroduced, the tripwire key removed), so the convention
+  is machine-enforced instead of doc-enforced.
+- (Stage-1 settings pins ship from the deployer repo: it now writes the
+  top-level `model` key as `claude-fable-5[1m]` and repoints
+  `ANTHROPIC_DEFAULT_OPUS_MODEL` to `claude-opus-4-8[1m]`. Pull the stage-1
+  repo too, or update those keys yourself if you maintain your own fork.)
+
 ## 2026-07-24 — Opus 5 adoption: model tiers, effort rules, deliverable brand kit
 
 - **Model policy moves to Claude Opus 5** — the main-session boot default and
