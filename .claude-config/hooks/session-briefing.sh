@@ -38,19 +38,24 @@ if [[ ! -t 0 ]]; then
 fi
 
 # --- worker posture ---
-gate="Sonnet 5 1M default worker"
+gate="Opus 5 default worker · Sonnet 5 light lanes"
 
 # --- config posture (parse flat keys from the resolved settings.json) ---
 val() { grep -iE "\"$1\"[[:space:]]*:" "$SETTINGS" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*//; s/[",]//g; s/[[:space:]]*$//'; }
 ac="$(val autoCompactEnabled)"; if [ "$ac" = "false" ]; then acs="OFF (manual /compact)"; else acs="ON"; fi
 eff="$(val effortLevel)"; [ -n "$eff" ] || eff="default"
-model="${ANTHROPIC_DEFAULT_OPUS_MODEL:-default}"
+# Main-session (foreman) pin read from the shared stage-1 settings.json, not
+# from $CFG/$SETTINGS: that file is the same for every profile, while the
+# fallback below is a distinct env var rather than a settings.json key.
+main_model="$(jq -r '.model // "default"' "$HOME/.claude/settings.json" 2>/dev/null)"
+[ -n "$main_model" ] || main_model="default"
+fallback_model="${ANTHROPIC_DEFAULT_OPUS_MODEL:-default}"
 
 printf '============================================================\n'
 printf ' SESSION BRIEFING\n'
 printf '============================================================\n'
 printf ' Worker:  %s\n' "$gate"
-printf ' Config:  autocompact %s  ·  effort %s  ·  opus=%s\n' "$acs" "$eff" "$model"
+printf ' Config:  autocompact %s  ·  effort %s  ·  main=%s  ·  fallback(opus)=%s\n' "$acs" "$eff" "$main_model" "$fallback_model"
 printf ' Ultra:   ultracode is session-set via the alias (--settings); /effort to change\n'
 
 # --- project lessons pointer (two-tier memory: project knowledge lives on-demand here) ---

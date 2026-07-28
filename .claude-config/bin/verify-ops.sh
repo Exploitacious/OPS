@@ -179,6 +179,35 @@ check_ship_gate() {
   [ -z "$bad" ] && ok "ship gate: README present, no build markers" || fail "ship gate:$bad"
 }
 
+# 14. Model policy. Two rules, two severities. FAIL: no real haiku model id may
+# be the VALUE of a model key — haiku is banned harness-wide, and one haiku
+# value silently downgrades every lane that resolves through that key. Only
+# values are inspected, never key names: ANTHROPIC_DEFAULT_HAIKU_MODEL is a
+# deliberate tripwire that must keep pointing at a non-haiku model, so the key
+# existing is the healthy state. WARN: the session pin should be one of the two
+# foreman tiers model-probe.sh manages, but an Operator may pin something else
+# on purpose, so a different pin is a nudge and not a gate. Same deployed-then-
+# stage-1 settings fallback as check_autonomy_settings.
+check_model_policy() {
+  local settings="$HOME/.claude/settings.json" haiku pin
+  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
+  [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
+  haiku="$(grep -oE '"(ANTHROPIC_DEFAULT_[A-Z0-9_]+_MODEL|model)"[[:space:]]*:[[:space:]]*"[^"]*"' "$settings" \
+    | sed -E 's/^"[^"]*"[[:space:]]*:[[:space:]]*"(.*)"$/\1/' | grep -i haiku | tr '\n' ' ')"
+  # Anchored at top-level indentation so a nested "model" in someone's custom
+  # config cannot be mistaken for the session pin. No match = no WARN: a file
+  # formatted differently is not evidence of a bad pin.
+  pin="$(grep -oE '^  "model"[[:space:]]*:[[:space:]]*"[^"]*"' "$settings" | head -1 \
+    | sed -E 's/^.*"([^"]*)"$/\1/')"
+  if [ -n "$haiku" ]; then
+    fail "haiku model id(s) in settings.json (haiku is banned harness-wide): $haiku"
+  elif [ -n "$pin" ] && [ "$pin" != "claude-fable-5[1m]" ] && [ "$pin" != "claude-opus-4-8[1m]" ]; then
+    warn "session pin \"$pin\" is not a managed foreman tier (model-probe.sh sets claude-fable-5[1m] or claude-opus-4-8[1m])"
+  else
+    ok "model policy: pin + haiku tripwire sane"
+  fi
+}
+
 main() {
   check_root
   check_readme_tree
@@ -193,6 +222,7 @@ main() {
   check_handoffs
   check_autonomy_settings
   check_ship_gate
+  check_model_policy
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
 }

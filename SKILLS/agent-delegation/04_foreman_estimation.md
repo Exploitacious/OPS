@@ -201,13 +201,15 @@ Brief-time budget (above) bounds how long you spend *writing* a brief.
 This bounds how much you ask the worker to *hold*. Different ceilings;
 both bind.
 
-**Workers run at up to 1M on both profiles** — Sonnet 5 1M is the default
-worker as of 2026-06-30; the Personal credit gate that used to force ≤200K
-fan-out no longer fires (platform change — see linuxploitacious `CLAUDE.md`
-§ "Subagent model tiers"). But a bigger window is not a license to dump:
-bigger context is not better work, and Sonnet-1M's price premium only applies
-past 200K input. Scope every brief as tightly as the task allows — most lanes
-should still fit well under 200K and stay there.
+**Workers run at up to 1M on both profiles** — Opus 5 (exact ID
+`claude-opus-5`) is the default build/review worker as of 2026-07-28, with
+Sonnet 5 1M (`model: "sonnet"`) for light/routine lanes; the Personal credit
+gate that used to force ≤200K fan-out no longer fires (platform change —
+see linuxploitacious `CLAUDE.md` § "Model roles (Fable-primary)"). But a bigger
+window is not a license to dump: bigger context is not better work, and
+Sonnet-1M's price premium only applies past 200K input. Scope every brief
+as tightly as the task allows — most lanes should still fit well under 200K
+and stay there.
 
 Budget every brief:
 
@@ -225,19 +227,24 @@ Budget every brief:
   over 150 files each, a registry-driven loop one item per agent, a
   parallel-research round to map a surface before a heavy build touches it.
 - **Reserve the 1M headroom for lanes that genuinely need it** — a large
-  codebase slice, a long document. Hand those the Sonnet-1M (default) or, for
-  hard judgment, the Opus-5 worker *deliberately*; don't lean on 1M to rescue a
-  lazy brief.
+  codebase slice, a long document. Hand those to Opus 5 (`claude-opus-5`,
+  1M-native, the default) or, for light/routine lanes, downshift to Sonnet 5
+  1M (`model: "sonnet"`) *deliberately*; don't lean on 1M to rescue a lazy
+  brief.
 - **The foreman scopes each worker like itself.** Right-sizing the chunk is a
   foreman responsibility, not the worker's to discover mid-task.
 
-Model choice (`haiku` = Sonnet-5 200K trivial / `sonnet` = Sonnet-5 1M default
-/ `opus` = Opus-5 1M-native hard) is about reasoning depth + cost (F7 / P12
-model-tiering). Effort defaults to the session's configured level on every
-lane; pass a lower `effort` only when the Operator has asked to economize —
-never as an autonomous downgrade, and never on review/verify lanes. (Opus 5
-holds quality unusually well at `low`/`medium`, so an Operator-requested
-economy pass costs little.)
+Model choice — `claude-opus-5` exact-ID (via ops-worker/ops-reviewer/
+ops-auditor) is the default build/review worker; `sonnet` (Sonnet 5 1M)
+covers light/routine lanes; rotate between them by complexity (F7 / P12
+model-tiering). The `opus` alias is the Opus 4.8 fallback-foreman slot, not
+a worker tier — never pass it on a worker spawn. `haiku` is banned (the
+tripwire routes it to Sonnet 5 regardless). Same tiers on both profiles.
+Effort defaults to the session's configured level on every lane; pass a
+lower `effort` only when the Operator has asked to economize — never as an
+autonomous downgrade, and never on review/verify lanes. (Opus 5 holds
+quality unusually well at `low`/`medium`, so an Operator-requested economy
+pass costs little.)
 
 Depth + the "why": `operating-doctrine.md` P12 (orchestration tiers,
 right-size-the-brief bullet) + `CONTEXT/foreman-charter.md`.

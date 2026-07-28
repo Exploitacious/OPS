@@ -162,7 +162,7 @@ const chief = await agent(
 
 LANE OUTPUTS:
 ` + JSON.stringify(lanes, null, 1),
-  { label: 'chief-reviewer', phase: 'Rank', schema: CHIEF_SCHEMA, model: 'opus' }
+  { label: 'chief-reviewer', phase: 'Rank', schema: CHIEF_SCHEMA, model: 'claude-opus-5' }
 )
 
 if (!chief) throw new Error('chief reviewer returned null')
@@ -229,7 +229,7 @@ LANE SUMMARIES:
 CHIEF FINDINGS:
 ` +
         JSON.stringify(chief.top_findings.map((f) => ({ id: f.id, title: f.title, severity: f.severity })), null, 1),
-      { label: 'completeness-critic', phase: 'Verify', schema: CRITIC_SCHEMA, model: 'opus' }
+      { label: 'completeness-critic', phase: 'Verify', schema: CRITIC_SCHEMA, model: 'claude-opus-5' }
     ),
 ])
 

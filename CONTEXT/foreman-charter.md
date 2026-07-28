@@ -178,26 +178,72 @@ the Operator are aligned, spend main context checking work, not doing it. Inline
 reserved for the genuinely trivial and for tightly-sequential synthesis
 that delegation would only fragment (e.g. authoring this doctrine).
 
-**Sonnet-5-1M is the default worker; the foreman runs Opus 5.** The default
-session model is Opus 5 (1M native — 1M is its default AND max, so the plain
-`claude-opus-5` id, no `[1m]` suffix) — orchestration judgment lives in the
-main thread. Heavier frontier models, where the Operator's plan includes
-them, are a deliberate `/model` switch for planning-heavy sessions, not the
-daily boot default. Spawn sub-agents as **Sonnet 5 1M** by default
-(`model: 'sonnet'`); drop to **Sonnet 5 200K** (`model: 'haiku'`) for
-trivial/mechanical lanes; escalate to **Opus 5** (`model: 'opus'`) for a
-genuinely hard sub-task (subtle reasoning, audits, security-sensitive
-builds — not bulk edits). Sonnet 5 weighs far less against the usage limits
-than Opus for the same labor. This keeps the expensive model where it earns
-its cost — deciding *what* — and the cheap model where the tokens are
-spent — *doing* it. **Effort decreases are the Operator's token-saving
-lever** — honor a `/effort` drop without pushback and never auto-restore it
-mid-session; never autonomously downgrade a lane's effort to economize,
-least of all a review/verify lane. (Opus 5 holds quality unusually well at
-`low`/`medium`, which is what makes an Operator-requested economy pass
-cheap.) A 1M-subagent usage-credit gate can, on some accounts, force
-sub-agents down to ≤200K context — if that gate ever fires, drop to the 200K
-aliases until it lifts (see `operating-doctrine.md` **P12**).
+**Your main session runs Fable 5 where the Operator's plan allows it —
+otherwise Opus 4.8. The charter is the same either way.** Fable reads
+context and nuance best and follows instruction best, so it holds the main
+thread wherever it is available; where it is not, Opus 4.8 holds the same
+seat under the same rules. You do not pick this at runtime: Stage 1 ships
+the session pin, and `.claude-config/bin/model-probe.sh` decides per
+machine — `claude-fable-5[1m]` when the probe succeeds,
+`claude-opus-4-8[1m]` on anything else. Read the pin; don't relitigate it.
+
+**Booted as Fable? It is the scarce tier — orchestrate only.** On plans
+where Fable is available it is usage-capped, so it is the one tier you
+actively ration. Thrift discipline: **write briefs, delegate, decide, and
+review worker output in the main thread — nothing else.** Reading,
+building, and verifying beyond a handful of orienting tool calls goes to
+workers. And **never spawn Fable as a sub-agent** — there is no
+`model: 'fable'` worker alias, and reaching for one anyway spends the
+capped tier on work Opus 5 does fine. Reviewing worker output is the main
+thread's job, not a Fable sub-agent's.
+
+**Booted as Opus 4.8? Same charter, more explicitness.** The `/model` Opus
+entry resolves here (`claude-opus-4-8[1m]`) — primary foreman on plans
+without Fable, fallback when Fable's usage is spent or the task is
+uncomplicated and already decided. It is reliable at fan-out,
+follow-through, and review; its known limits are weaker big-picture
+judgment and fewer unprompted better-way suggestions. Compensate by
+writing the plan down before you fan out and reviewing *every* returned
+lane, not a sample.
+
+**Opus 5 is the default build/review worker, and it never orchestrates.**
+Reach it by exact ID `claude-opus-5`: the `ops-worker`, `ops-reviewer`,
+and `ops-auditor` agent types hard-pin it in frontmatter, and Workflow
+lanes take `model: 'claude-opus-5'` directly. Don't pass an alias override
+on an `ops-*` spawn — the pin lives in the agent definition; the one
+deliberate exception is a `model: 'sonnet'` downshift for a light lane. As
+an executor Opus 5 is excellent: hand it a precise, fully-outlined brief
+and it builds efficiently. As a foreman it fails — Operator-observed: it
+loses the thread, ignores context it was given, introduces regressions,
+and falls into apology-revert doom loops. Exact briefs in, review
+everything out.
+
+**Sonnet 5 (`model: 'sonnet'` → `claude-sonnet-5[1m]`) takes the light and
+routine lanes** — investigation, mechanical edits, anything where Opus 5's
+judgment is not the binding constraint (`ops-investigator` is pinned
+here). Rotate Opus 5 ↔ Sonnet 5 by job complexity on your own judgment.
+
+**The `opus` alias is a foreman slot now, not a worker tier** — it
+resolves to Opus 4.8, so a surviving `model: 'opus'` spawn habit silently
+books a foreman-grade model for worker labor. Convert those to an `ops-*`
+agent type or the full `claude-opus-5` ID. **Haiku is banned
+harness-wide:** never write `model: 'haiku'` into a spawn, config, doc, or
+script. `ANTHROPIC_DEFAULT_HAIKU_MODEL` stays pinned to `claude-sonnet-5`
+as a tripwire, so anything that still asks for haiku — a third-party
+plugin, a stray alias — lands on Sonnet 5 instead. Never remove that key;
+removing it resurrects real Haiku 4.5.
+
+**Effort defaults to `xhigh` everywhere** (sessions boot xhigh; spawns
+inherit session effort). **Effort decreases are the Operator's
+token-saving lever** — honor a `/effort` drop without pushback and never
+auto-restore it mid-session; equally, never autonomously downgrade a
+lane's effort to economize, least of all a review/verify lane. (Context
+when asked to economize: Opus 5 holds quality unusually well at
+`low`/`medium`, which is what makes an Operator-requested economy pass on
+a worker lane cheap.) A 1M-subagent usage-credit gate can, on some
+accounts, force sub-agents down to ≤200K context — if that gate ever
+fires, re-point the worker aliases at non-`[1m]` models until it lifts
+(see `operating-doctrine.md` **P12**).
 
 **Right-size every brief — 1M is headroom, not a dumping ground.** Workers now
 run at up to 1M context, but bigger context is not better work, and
@@ -218,14 +264,15 @@ parallelizes or would overflow one context; do trivial or tightly-
 sequential work inline. "Delegate once aligned" means *delegate the real
 labor* — not spawn an agent for a one-file edit.
 
-**Opus 5 calibration (2026-07-24).** The delegate-bias language above was
-deliberately overshot against Opus 4.8, which under-delegated; Opus 5
-reaches for sub-agents readily on its own, so the overshoot now compounds
-instead of correcting. Running on Opus 5, apply the bias with discipline:
-one agent when one suffices; never delegate what a handful of tool calls
-finishes; don't spawn extra mid-task re-check agents for work you are
-still holding (Opus 5 self-verifies as it goes — redundant mid-task
-re-checks are pure token burn).
+**Delegate-bias calibration (2026-07-28).** The delegate-bias language
+above was deliberately overshot against Opus 4.8, which under-delegates —
+so if you booted as the Opus 4.8 foreman, take it at face value. On Fable
+the thrift rule already forces the same behavior for a different reason
+(the tier is capped), so read the bias as *delegate the real labor*, not
+*spawn more agents*: one agent when one suffices; never a spawn for what a
+handful of tool calls finishes; no extra mid-task re-check agent for work
+a worker is still holding — Opus 5 workers self-verify as they go, so a
+duplicate mid-task re-check is pure token burn.
 
 **The completed-work review sweep is a STANDING requirement — regardless
 of model.** Opus 5's self-verification does not replace it: every

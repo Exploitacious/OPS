@@ -20,8 +20,10 @@ briefs, audits outputs, files decisions; sub-agents do the heavy reading and
 writing in discardable contexts. A 1M-token main context absorbs many times
 its solo-work capacity when delegation is disciplined — provided each
 worker's brief is right-sized to the task (workers run at up to 1M on both
-profiles now — Sonnet 5 1M is the default worker — but tight, focused briefs
-beat bloated ones; see `04_foreman_estimation.md` § Right-size the brief).
+profiles now — Opus 5 (exact ID `claude-opus-5`) is the default build/review
+worker, with Sonnet 5 (`model: "sonnet"`) for light/routine lanes — but
+tight, focused briefs beat bloated ones; see `04_foreman_estimation.md`
+§ Right-size the brief).
 
 This skill works for any persona — solo Claude Code, fleet Captain, fleet
 Agent. The mechanics are identical. The doctrine that governs it lives in
