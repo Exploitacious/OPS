@@ -671,8 +671,8 @@ deliberately.
   more than ~10 agents, or wants adversarial verification baked in →
   workflow.
 - **Model tiering: Fable 5 foreman where the plan allows it, Opus 4.8
-  otherwise; Opus 5 the default build/review worker; Sonnet 5 the light
-  lanes.** The main-session pin is decided per machine, not at runtime:
+  otherwise; Opus 4.8 the default build/review/audit worker; Sonnet 5 the
+  light lanes.** The main-session pin is decided per machine, not at runtime:
   Stage 1 ships it and `.claude-config/bin/model-probe.sh` sets it to
   **Fable 5** (`claude-fable-5[1m]`) where the probe succeeds and **Opus
   4.8** (`claude-opus-4-8[1m]`) on anything else. Fable is best at context,
@@ -682,8 +682,8 @@ deliberately.
   thread writes briefs, delegates, decides, and reviews worker output *in
   the main thread*, and does not read/build/verify inline past a handful of
   tool calls. **Never spawn Fable as a sub-agent** — no `model: 'fable'`
-  worker alias exists, and spending a capped tier on work Opus 5 handles is
-  the precise waste the cap punishes; worker-output review is the main
+  worker alias exists, and spending a capped tier on work Opus 4.8 handles
+  is the precise waste the cap punishes; worker-output review is the main
   thread's job, not a Fable sub-agent's. **Opus 4.8** — what the `opus`
   alias and the `/model` Opus entry now resolve to — is the primary foreman
   on plans without Fable and the fallback on plans with it: same charter,
@@ -691,16 +691,20 @@ deliberately.
   decided. It is reliable at fan-out, follow-through, and review but weaker
   on big-picture judgment and unprompted better-way suggestions, so
   compensate with explicit written plans and review of every returned lane.
-  **Opus 5** (`claude-opus-5`, 1M native — no `[1m]` suffix) is the default
-  worker and never a foreman: Operator-observed, as an orchestrator it loses
-  the thread, ignores context it was given, introduces regressions, and
-  doom-loops on apology-reverts; as an executor of a precise brief it is
-  excellent. Reach it by exact ID — the `ops-worker`, `ops-reviewer`, and
-  `ops-auditor` agent types hard-pin it in frontmatter, and workflow lanes
-  take `model: 'claude-opus-5'`. Do not pass an alias override on an `ops-*`
-  spawn except a deliberate `model: 'sonnet'` downshift. **Sonnet 5**
-  (`model: 'sonnet'` → `claude-sonnet-5[1m]`) takes investigation,
-  mechanical edits, and routine lanes; foremen rotate Opus 5 ↔ Sonnet 5 by
+  That same Opus 4.8 is **also the default build/review/audit worker**
+  (Operator directive 2026-08-20): the `ops-worker`, `ops-reviewer`, and
+  `ops-auditor` agent types hard-pin `claude-opus-4-8[1m]` in frontmatter,
+  and workflow lanes take `model: 'claude-opus-4-8[1m]'` — the `[1m]` suffix
+  is required, because 1M is not Opus 4.8's default context. Do not pass an
+  alias override on an `ops-*` spawn except a deliberate `model: 'sonnet'`
+  downshift. **Opus 5 (`claude-opus-5`) is BANNED** — it held the worker seat
+  until 2026-08-20, but as a fan-out worker it showed disproportionate
+  cache-write churn and message round-trips, self-checking redundantly
+  against the harness's own review/verify lanes, for no quality edge over
+  Opus 4.8; the drift gate greps for `claude-opus-5` in spawn pins and fails
+  on a reappearance, the same enforcement the Haiku tripwire gets. **Sonnet
+  5** (`model: 'sonnet'` → `claude-sonnet-5[1m]`) takes investigation,
+  mechanical edits, and routine lanes; foremen rotate Opus 4.8 ↔ Sonnet 5 by
   job complexity on their own judgment. **Haiku is banned harness-wide** —
   never reference the alias in a config, doc, script, or spawn.
   `ANTHROPIC_DEFAULT_HAIKU_MODEL` stays pinned to `claude-sonnet-5` as a
@@ -710,8 +714,8 @@ deliberately.
   everywhere; effort-decreases are the Operator's token-saving lever — honor
   them without friction, never auto-restore mid-session, and never
   autonomously downgrade a lane (least of all review/verify) to economize.
-  Opus 5 holds quality unusually well at `low`/`medium`, which is what makes
-  an Operator-requested economy pass on a worker lane cheap. A 1M-subagent
+  The worker tier holds quality unusually well at `low`/`medium`, which is
+  what makes an Operator-requested economy pass on a worker lane cheap. A 1M-subagent
   usage-credit gate can, on some accounts, force sub-agents down to ≤200K
   context — if that gate ever fires, re-point the worker aliases at
   non-`[1m]` models until it lifts.
@@ -924,6 +928,24 @@ that's how systems fork.
   `working-preferences.md` — user-identity layer.
 
 ---
+
+Last updated: 2026-08-20 (Opus 5 BAN — Operator directive. As the fan-out
+worker, Opus 5 showed disproportionate cache-write churn and message
+round-trips against Opus 4.8 for equivalent output, self-checking redundantly
+against the harness's own review/verify lanes — a large share of the usage
+budget for no quality edge. **Opus 4.8 (`claude-opus-4-8[1m]`) is now the
+default build/review/audit worker AND the fallback foreman; Opus 5
+(`claude-opus-5`) is BANNED harness-wide, like Haiku.** The `[1m]` suffix is
+required on Opus 4.8 — unlike Opus 5, 1M is not its default context.
+Load-bearing pins flipped in
+`.claude-config/agents/ops-{worker,reviewer,auditor}.md` and both lanes of
+`.claude-config/workflows/harness-audit.js`; the P12 tiering bullet, the
+foreman-charter tier block, the session-briefing worker line, and the
+`agent-delegation` skill were rewritten to match. Enforcement mirrors the
+Haiku tripwire: `verify-ops.sh` greps the agent + workflow spawn pins for
+`claude-opus-5` and FAILs on a hit, so a reappearance cannot land quietly.
+The entries below are HISTORY — where they name Opus 5 as the worker tier,
+this entry supersedes them.)
 
 Last updated: 2026-07-28 (Model-policy pass — Operator directive; the four
 model roles re-cut end to end, and the primary foreman is now ROLE-BASED

@@ -208,6 +208,30 @@ check_model_policy() {
   fi
 }
 
+# 15. Opus 5 ban (Operator directive 2026-08-20). Opus 4.8 is the default
+# build/review/audit worker; claude-opus-5 is banned harness-wide the same way
+# haiku is, because as a fan-out worker it burned disproportionate cache-write
+# and round-trips for no quality edge. Enforced here rather than trusted to
+# prose: a stale pin is invisible until it has already spent the budget.
+# Scoped to SPAWN PINS only — agent frontmatter, Workflow lane objects, and the
+# settings the gate already resolves — so the doctrine's own ban text (which
+# must name the banned id to be readable) never trips its own gate.
+check_opus5_ban() {
+  local hits settings="$HOME/.claude/settings.json"
+  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
+  hits="$(grep -rnE "model:[[:space:]]*['\"]?claude-opus-5" \
+    "$OPS/.claude-config/agents" "$OPS/.claude-config/workflows" 2>/dev/null)"
+  if [ -f "$settings" ] && grep -qE 'claude-opus-5' "$settings" 2>/dev/null; then
+    hits="$hits"$'\n'"settings.json references claude-opus-5"
+  fi
+  hits="$(printf '%s' "$hits" | sed '/^$/d')"
+  if [ -z "$hits" ]; then
+    ok "no claude-opus-5 spawn pins (Opus 5 ban intact)"
+  else
+    fail "claude-opus-5 is BANNED but still pinned (repin to claude-opus-4-8[1m]):"$'\n'"$hits"
+  fi
+}
+
 main() {
   check_root
   check_readme_tree
@@ -223,6 +247,7 @@ main() {
   check_autonomy_settings
   check_ship_gate
   check_model_policy
+  check_opus5_ban
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
 }

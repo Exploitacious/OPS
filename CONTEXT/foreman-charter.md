@@ -194,7 +194,7 @@ review worker output in the main thread — nothing else.** Reading,
 building, and verifying beyond a handful of orienting tool calls goes to
 workers. And **never spawn Fable as a sub-agent** — there is no
 `model: 'fable'` worker alias, and reaching for one anyway spends the
-capped tier on work Opus 5 does fine. Reviewing worker output is the main
+capped tier on work Opus 4.8 does fine. Reviewing worker output is the main
 thread's job, not a Fable sub-agent's.
 
 **Booted as Opus 4.8? Same charter, more explicitness.** The `/model` Opus
@@ -206,28 +206,33 @@ judgment and fewer unprompted better-way suggestions. Compensate by
 writing the plan down before you fan out and reviewing *every* returned
 lane, not a sample.
 
-**Opus 5 is the default build/review worker, and it never orchestrates.**
-Reach it by exact ID `claude-opus-5`: the `ops-worker`, `ops-reviewer`,
-and `ops-auditor` agent types hard-pin it in frontmatter, and Workflow
-lanes take `model: 'claude-opus-5'` directly. Don't pass an alias override
-on an `ops-*` spawn — the pin lives in the agent definition; the one
-deliberate exception is a `model: 'sonnet'` downshift for a light lane. As
-an executor Opus 5 is excellent: hand it a precise, fully-outlined brief
-and it builds efficiently. As a foreman it fails — Operator-observed: it
-loses the thread, ignores context it was given, introduces regressions,
-and falls into apology-revert doom loops. Exact briefs in, review
-everything out.
+**Opus 4.8 is also the default build/review/audit worker, and Opus 5 is
+BANNED (Operator directive 2026-08-20).** The `ops-worker`, `ops-reviewer`,
+and `ops-auditor` agent types hard-pin `claude-opus-4-8[1m]` in
+frontmatter, and Workflow lanes take `model: 'claude-opus-4-8[1m]'`
+directly — the `[1m]` suffix is required, because 1M is not Opus 4.8's
+default context. Don't pass an alias override on an `ops-*` spawn — the pin
+lives in the agent definition; the one deliberate exception is a
+`model: 'sonnet'` downshift for a light lane. Opus 5 held the worker seat
+until 2026-08-20; as a fan-out worker it showed disproportionate
+cache-write churn and message round-trips — self-checking redundantly
+against a harness that already runs its own review/verify lanes — for no
+quality edge over Opus 4.8, so the Operator retired it. **Never write
+`claude-opus-5` into a spawn, frontmatter, Workflow lane, config, doc, or
+script** — the drift gate greps for it and fails on a reappearance, the
+same enforcement the Haiku tripwire gets.
 
 **Sonnet 5 (`model: 'sonnet'` → `claude-sonnet-5[1m]`) takes the light and
-routine lanes** — investigation, mechanical edits, anything where Opus 5's
-judgment is not the binding constraint (`ops-investigator` is pinned
-here). Rotate Opus 5 ↔ Sonnet 5 by job complexity on your own judgment.
+routine lanes** — investigation, mechanical edits, anything where Opus
+4.8's judgment is not the binding constraint (`ops-investigator` is pinned
+here). Rotate Opus 4.8 ↔ Sonnet 5 by job complexity on your own judgment.
 
-**The `opus` alias is a foreman slot now, not a worker tier** — it
-resolves to Opus 4.8, so a surviving `model: 'opus'` spawn habit silently
-books a foreman-grade model for worker labor. Convert those to an `ops-*`
-agent type or the full `claude-opus-5` ID. **Haiku is banned
-harness-wide:** never write `model: 'haiku'` into a spawn, config, doc, or
+**The `opus` alias resolves to the foreman tier, not to a distinct worker
+tier** — it points at Opus 4.8, the same model the `ops-*` agent types pin,
+so prefer the agent type over a bare `model: 'opus'` spawn: the agent
+definition carries the doctrine prompt, and the alias carries nothing.
+**Opus 5 and Haiku are banned harness-wide:** never write
+`model: 'claude-opus-5'` or `model: 'haiku'` into a spawn, config, doc, or
 script. `ANTHROPIC_DEFAULT_HAIKU_MODEL` stays pinned to `claude-sonnet-5`
 as a tripwire, so anything that still asks for haiku — a third-party
 plugin, a stray alias — lands on Sonnet 5 instead. Never remove that key;
@@ -238,7 +243,7 @@ inherit session effort). **Effort decreases are the Operator's
 token-saving lever** — honor a `/effort` drop without pushback and never
 auto-restore it mid-session; equally, never autonomously downgrade a
 lane's effort to economize, least of all a review/verify lane. (Context
-when asked to economize: Opus 5 holds quality unusually well at
+when asked to economize: the worker tier holds quality unusually well at
 `low`/`medium`, which is what makes an Operator-requested economy pass on
 a worker lane cheap.) A 1M-subagent usage-credit gate can, on some
 accounts, force sub-agents down to ≤200K context — if that gate ever
@@ -271,11 +276,11 @@ the thrift rule already forces the same behavior for a different reason
 (the tier is capped), so read the bias as *delegate the real labor*, not
 *spawn more agents*: one agent when one suffices; never a spawn for what a
 handful of tool calls finishes; no extra mid-task re-check agent for work
-a worker is still holding — Opus 5 workers self-verify as they go, so a
+a worker is still holding — workers self-verify as they go, so a
 duplicate mid-task re-check is pure token burn.
 
 **The completed-work review sweep is a STANDING requirement — regardless
-of model.** Opus 5's self-verification does not replace it: every
+of model.** A worker's own self-verification does not replace it: every
 completed body of work still gets its reviewer pass (`ops-reviewer` lane,
 adversarial verify stage, or you reading every changed line) before it
 integrates, merges, or reaches the Operator. What the calibration above

@@ -4,7 +4,38 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-08-20 — Opus 5 banned; Opus 4.8 is the worker tier
+
+- **Operator directive.** As the fan-out worker, Opus 5 showed
+  disproportionate cache-write churn and message round-trips against Opus 4.8
+  for equivalent output — self-checking redundantly against a harness that
+  already runs its own review and verify lanes, for no quality edge. It spent
+  a large share of the usage budget buying nothing.
+- **Change.** Opus 4.8 (`claude-opus-4-8[1m]`) is now the default
+  build/review/audit worker **and** the fallback foreman. Opus 5
+  (`claude-opus-5`) is banned harness-wide, like Haiku. The `[1m]` suffix is
+  required on Opus 4.8 — unlike Opus 5, 1M is not its default context, so a
+  bare id silently books a 200K worker.
+- **Pins flipped:** `.claude-config/agents/ops-{worker,reviewer,auditor}.md`
+  frontmatter, and both judgment lanes (chief reviewer, completeness critic)
+  in `.claude-config/workflows/harness-audit.js`. `ops-investigator` and the
+  routine workflow lanes stay on Sonnet 5; rotation is now Opus 4.8 ↔
+  Sonnet 5.
+- **Doctrine synced:** `CONTEXT/foreman-charter.md` tier block,
+  `CONTEXT/operating-doctrine.md` P12 tiering bullet + a dated entry,
+  `SKILLS/agent-delegation/{SKILL.md,04_foreman_estimation.md}`, and the
+  worker line in `.claude-config/hooks/session-briefing.sh`.
+- **Machine enforcement:** `verify-ops.sh` gains check 15
+  (`check_opus5_ban`) — FAILs if `claude-opus-5` appears as a spawn pin in
+  any agent, workflow, or settings surface. Scoped to pins, not prose, so the
+  doctrine can still name the banned id. Mirrors the Haiku tripwire: a rule a
+  machine cannot check is a rule that silently rots.
+
 ## 2026-07-28 — Fable-primary model policy + availability probe
+
+> **Superseded 2026-08-20:** Opus 5 is now BANNED harness-wide; Opus 4.8
+> (`claude-opus-4-8[1m]`) is the default build/review/audit worker. Where this
+> entry names Opus 5 as the worker tier, read it as history — see the 2026-08-20 entry.
 
 - **The foreman seat is now role-based, not model-based** — the main session
   boots **Fable 5 where the Operator's plan allows it, Opus 4.8 otherwise**,
@@ -54,6 +85,9 @@ prehistory is deliberately not part of it.
   repo too, or update those keys yourself if you maintain your own fork.)
 
 ## 2026-07-24 — Opus 5 adoption: model tiers, effort rules, deliverable brand kit
+
+> **Superseded 2026-08-20:** the Opus 5 adoption described here was reversed —
+> Opus 5 is now BANNED and Opus 4.8 is the worker tier. See the 2026-08-20 entry.
 
 - **Model policy moves to Claude Opus 5** — the main-session boot default and
   the `opus` worker alias both point at the plain `claude-opus-5` id (1M

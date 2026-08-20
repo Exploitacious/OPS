@@ -38,7 +38,7 @@ if [[ ! -t 0 ]]; then
 fi
 
 # --- worker posture ---
-gate="Opus 5 default worker · Sonnet 5 light lanes"
+gate="Opus 4.8 default worker · Sonnet 5 light lanes"
 
 # --- config posture (parse flat keys from the resolved settings.json) ---
 val() { grep -iE "\"$1\"[[:space:]]*:" "$SETTINGS" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*//; s/[",]//g; s/[[:space:]]*$//'; }
