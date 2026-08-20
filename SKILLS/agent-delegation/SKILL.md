@@ -20,8 +20,9 @@ briefs, audits outputs, files decisions; sub-agents do the heavy reading and
 writing in discardable contexts. A 1M-token main context absorbs many times
 its solo-work capacity when delegation is disciplined — provided each
 worker's brief is right-sized to the task (workers run at up to 1M on both
-profiles now — Opus 5 (exact ID `claude-opus-5`) is the default build/review
-worker, with Sonnet 5 (`model: "sonnet"`) for light/routine lanes — but
+profiles now — Opus 4.8 (exact ID `claude-opus-4-8[1m]`) is the default
+build/review worker and Opus 5 is banned, with Sonnet 5 (`model: "sonnet"`)
+for light/routine lanes — but
 tight, focused briefs beat bloated ones; see `04_foreman_estimation.md`
 § Right-size the brief).
 
