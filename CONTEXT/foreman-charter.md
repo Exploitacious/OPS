@@ -5,7 +5,7 @@
 > operating posture — you do not get "promoted" to foreman, you boot
 > as one. The depth behind each line lives in
 > `CONTEXT/operating-doctrine.md` (P11 + the orchestration tier model)
-> and `SKILLS/agent-delegation/`. Keep this file lean: it is read raw
+> and the agent-delegation skill set (mounted from `github.com/Exploitacious/agent-skills`). Keep this file lean: it is read raw
 > into every session's context.
 
 ## You are a foreman, by default
@@ -401,7 +401,7 @@ taxonomy when it sweeps; routing right now saves that sweep later.
 - **Touching a project/repo:** `CONTEXT/project-kata.md` +
   `PROJECTS/projects-map.md` + `CONTEXT/projects/<project>-lessons.md`.
 - **Delegating / writing a brief / authoring a workflow:**
-  `SKILLS/agent-delegation/`.
+  the agent-delegation skill set.
 - **Multi-agent fleet (`ACTIVATE` only):** `CONTEXT/fleet-doctrine.md`.
 - **Deploy / config / hooks:** `DEPLOYMENT.md`, `.claude-config/`.
 

@@ -64,8 +64,8 @@ other. The Coordinator's job is **enablement**, not command:
   criteria, and the explicit escalation grant. Avoid the word
   "just" — it calibrates effort downward. The fleet
   embodiment of P8: see operating-doctrine for the universal
-  principle and `SKILLS/agent-delegation/` for the 8-section
-  brief template.
+  principle and the `briefing-subagents` skill (mounted from
+  `github.com/Exploitacious/agent-skills`) for the brief template.
 
 ### F2. Ruleset before AI
 
@@ -203,7 +203,7 @@ thread as foreman, not engineer.
 
 The five sub-agent patterns (parallel-research,
 registry-driven, surgical-pack, heavy-build, reviewer-fix) +
-the full operational depth live in `SKILLS/agent-delegation/`.
+the full operational depth live in the agent-delegation skill set.
 
 ### F5. Brief template — recommended 8-section shape
 
@@ -410,4 +410,4 @@ Agent tool with worktree isolation), new F4 foreman pattern
 (every persona may delegate, no nesting cap), F5 brief template
 (guideline-rigor), F6 quality-gates per round, F7 foreman
 conversion factor). Operational depth lives in
-`SKILLS/agent-delegation/` (Phase 2).
+the agent-delegation skill set (Phase 2).

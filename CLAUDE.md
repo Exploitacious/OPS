@@ -134,7 +134,7 @@ session-time pointers below are enough for orientation:
 **Claude Skills & Projects (single source of truth):**
 - Canonical location: `SKILLS/<entry>/`. Each entry holds both `SKILL.md` (Claude Code) and `00_System_Prompt.md` + numbered knowledge files (Claude.ai GUI Project). Same knowledge files serve both consumers.
 - Deployment: `~/.claude/skills/` is a direct symlink/junction → `OPS/SKILLS/`. One hop. See `DEPLOYMENT.md` for the full two-stage deploy procedure.
-- For doctrine — when to build a Skill vs a Project vs both, file formats, anti-patterns, build checklist — invoke the `meta-skill-creator` skill or read `SKILLS/meta-skill-creator/`. Do not duplicate that documentation here; reference it.
+- For doctrine — when to build a Skill vs a Project vs both, file formats, anti-patterns, build checklist — invoke the `meta-skill-creator` skill (mounted from `github.com/Exploitacious/agent-skills`). Do not duplicate that documentation here; reference it.
 - When asked to update or iterate on any skill or project, work in `SKILLS/<entry>/`. Never edit `~/.claude/skills/` — it's a symlink view.
 
 **Deploying OPS on a new machine:** see `DEPLOYMENT.md`. Two stages — `linuxploitacious` does host setup + clones OPS; `~/OPS/.claude-config/deploy.{ps1,sh}` wires the rest. Idempotent. On the very first Claude Code session after a fresh deploy, startup step 0 hands off to `BOOTSTRAP.md` to learn who the Operator is.

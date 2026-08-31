@@ -24,9 +24,14 @@ What it gives you, out of the box:
 - **A fleet coordination layer.** A full multi-agent system (`WORKFORCE/`):
   Coordinator + Agent personalities, a messaging/lifecycle protocol, and an
   `ac-*` toolbelt for spawning, tasking, and reorienting agents.
-- **A skills system.** Portable Claude Code Skills (and their Claude.ai GUI
-  Project twins) for the recurring work — delegation, memory pruning, skill
-  authoring, file transfer, and more.
+- **A skills system.** Local Claude Code Skills (and their Claude.ai GUI Project
+  twins) for the recurring work that binds to OPS's own hooks and layout — memory
+  pruning, pre-compact synthesis, session lifecycle, file transfer, and more. The
+  portable technique skills (delegation, skill authoring) aren't vendored here:
+  OPS *mounts* them from a shared skill source rather than carrying a copy that
+  drifts. The default source is
+  [`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills);
+  an org or private source mounts alongside it. See `SKILLS/README.md`.
 
 ## Opinionated by design
 

@@ -506,7 +506,7 @@ not as contractors producing output for grading.
 
 The expanded operational template (8-section brief, 5 sub-agent
 patterns, conversion-factor table) lives in
-`SKILLS/agent-delegation/`. This principle is the universal
+the agent-delegation skill set (mounted from `github.com/Exploitacious/agent-skills`). This principle is the universal
 distillation that applies to every brief regardless of
 delegation primitive.
 
@@ -621,7 +621,7 @@ children are not.
 
 The expanded foreman model — 8-section brief template, 5 sub-
 agent patterns, quality gates, conversion-factor estimation —
-lives in `SKILLS/agent-delegation/`. This principle is the
+lives in the agent-delegation skill set. This principle is the
 universal "this is the default operating mode" framing; the skill
 is the operational depth.
 
@@ -638,7 +638,7 @@ orchestrating a 500-file sweep burns context and misses coverage.
 - **Manual delegation (Agent tool).** 3+ independent files, 2+ hours of
   mechanical work, or parallelizable research. You hold the plan turn
   by turn; results land in your context; you brief in stakes mode and
-  verify before integrating. `SKILLS/agent-delegation/` is the depth.
+  verify before integrating. The agent-delegation skill set is the depth.
 - **Dynamic workflow (programmatic).** Dozens–hundreds of agents,
   orchestration worth codifying and rerunning, adversarial cross-
   checking, or a sweep too large for one context to hold. The plan
@@ -648,7 +648,7 @@ orchestrating a 500-file sweep burns context and misses coverage.
   keyword or `/effort ultracode`. This is the *programmatic embodiment*
   of P8 — every `agent()` prompt is a stakes-mode brief — and of P11 —
   you are still the foreman, the script is your dispatch loop. The
-  authoring depth lives in `SKILLS/agent-delegation/` (workflow track).
+  authoring depth lives in the `dynamic-workflows` skill.
 - **Fleet (`ACTIVATE`).** Long-lived, multi-session campaigns with
   human-async peers across tmux panes, managing each other's context
   and compaction. The heaviest machinery; `fleet-doctrine.md` governs
@@ -734,7 +734,7 @@ deliberately.
   on thorough work; verify-before-trust, P3, is the backstop). The foreman
   scopes each worker the way it scopes itself; if a chunk is genuinely large,
   give it the 1M worker deliberately rather than hope a vague brief copes.
-  Depth: `SKILLS/agent-delegation/` 04_foreman_estimation.md § Right-size the brief.
+  Depth: the `delegation-sizing` skill, on right-sizing the brief.
 - **Per-spawn cost is real.** Every sub-agent reloads the full system
   prompt + all active MCP tool schemas before doing any work. Delegate
   work that genuinely parallelizes or overflows one context; keep trivial
@@ -1073,7 +1073,7 @@ proved the sidecar pattern unnecessary), P11 foreman-as-default
 Principle 3 (trust + audit) extended with verify-sub-agent-
 output specifics — too many hallucinated sub-agent reports in
 the doc-audit pass to leave as implicit. Operational depth still
-in `SKILLS/agent-delegation/`.
+in the agent-delegation skill set.
 
 Last updated: 2026-05-21 (Phase 1 doctrine pass — a production project's
 breakthroughs integrated: P1 same-commit contract + capture-

@@ -1,91 +1,58 @@
 ---
 name: remote-session
-description: Start a new remote-controlled Claude Code session in tmux on this machine that the operator can drive from another device (e.g. the claude.ai mobile app). Use when they ask to "start/spin up/open a new remote session (called X)", "give me a session for X", "new remote control session", optionally naming a directory. Creates a tmux session, launches `claude --remote-control` in the chosen dir (default $HOME), names it with the Title-Case-Hyphen convention, and reports the session's working directory back so no manual sanity check is needed.
+description: "Use when the operator asks to start, list, attach, park, revive, or end a Claude Code session running in tmux on this machine that they remote-control from another device (e.g. the claude.ai app). Triggers: 'start/spin up a new session called X', 'give me a session for X', 'list my sessions', 'park/kill this session'. Creates a registry-backed, reboot-persistent tmux session and reports its name, dir, and profile. This skill manages the session CONTAINER; the durable work baton is session-handoff's job, and the two compose (this spins up the target, session-handoff writes what it reads). Claude Code only."
 ---
 
-# Start a remote-controlled Claude session
+# Manage remote Claude Code sessions
 
-This machine can run always-on Claude Code sessions in tmux that the operator
-remote-controls from another device (`claude --remote-control <Name>`, reachable
-via their claude.ai account). This skill spins up sessions on demand; each one
-persists across reboots via a registry + an `@reboot` cron
-(`~/OPS/.claude-config/remote-sessions/start-remote-claude.sh`). Optionally one or
-more **guaranteed** sessions are always kept running (see the feature README).
+This machine runs always-on Claude Code sessions in tmux that the operator remote-controls from another device (`claude --remote-control <Name>`, through their claude.ai account). A registry (`~/.claude-remote-sessions.tsv`) plus an `@reboot` cron make every session persist and resume across reboots. This skill runs the lifecycle: start, list, attach, park, revive, and end. The scripts live in `~/OPS/.claude-config/remote-sessions/`; that directory's `README.md` holds install and configuration.
 
-## What the operator gives you
+## Start a session
 
-- **A name** (required) — e.g. "Trading", "morning briefing", "MCP".
-- **A directory** (optional) — where Claude should open. Default to `$HOME` if they
-  don't say. They may name it loosely ("the website repo", "the mcp server");
-  resolve it to a real path first (consult `~/OPS/PROJECTS/projects-map.md` for the
-  project layout). If a path they name doesn't resolve, ask rather than guess.
+    ~/OPS/.claude-config/remote-sessions/new-remote-claude.sh "<name>" [workdir]
 
-## How to do it
+- `<name>` (required): pass it exactly as the operator said it. The script normalizes it to Title-Case-Hyphen for tmux and TSV safety (`morning briefing` -> `Morning-Briefing`). Do not pre-format it.
+- `[workdir]` (optional): where Claude opens, default `$HOME`. Resolve loose names ("the website repo") to a real path via `~/OPS/PROJECTS/projects-map.md`. If it does not resolve, ask rather than guess. Ignored for a name that is already registered (it keeps its registered dir so its conversation resumes).
 
-Run the companion script — it handles naming, the tmux session, the
-`claude --remote-control` launch, the first-run MCP prompt, and the cwd
-sanity-check in one shot:
+The script handles naming, the tmux session, the `claude --remote-control` launch, the first-run MCP prompt, and a cwd sanity-check in one shot.
 
-    ~/OPS/.claude-config/remote-sessions/new-remote-claude.sh "<name they gave>" [resolved-workdir]
+## Profiles: launching under a second profile
 
-- Pass the name **exactly as they said it**; the script applies the naming
-  convention (Title-Case each word, hyphen-join — `morning briefing` →
-  `Morning-Briefing`). Don't pre-format it yourself.
-- Omit the second arg to default to `$HOME`; pass a resolved absolute path when
-  they named a directory.
+The launcher captures the live `CLAUDE_CONFIG_DIR` at creation and records it in the registry's 4th column, so a session started under a second profile resumes under that profile after a reboot rather than silently starting fresh under the default `~/.claude`. There is no `--profile` flag: to launch a session on a second profile (e.g. a personal `~/.claude-personal`), invoke the launcher from a shell where `CLAUDE_CONFIG_DIR` already points at that profile. The default profile normalizes to a clean 3-column row.
 
-## Reading the result
+## Read the result
 
-The script prints one status line and uses exit codes:
+The script prints one status line and sets an exit code:
 
-- `OK name=<Name> cwd=<dir> ... profile=<default|name> remote_control=on` (exit 0) —
-  success. **Report back:** the final session name, the directory it opened in (the
-  sanity check — confirm it's the dir they wanted), and that it's live on their device
-  now. `profile=` is `default` unless the session runs under a secondary
-  `CLAUDE_CONFIG_DIR` profile, in which case it names that profile.
-- `ERR_EXISTS` (exit 3) — a session with that name is already running (script prints
-  its cwd). Tell them; offer a different name or the existing one.
-- `ERR_DIR` (exit 4) — the directory doesn't exist. Ask for the right path.
-- `ERR_USAGE` / `ERR_NAME` (exit 2) — no usable name; ask what to call it.
+- `OK name=<Name> cwd=<dir> ... profile=<default|name> remote_control=on` (exit 0). Report back the name, the dir (sanity-check it is what they wanted), the profile, and that it is live on their device now.
+- `ERR_EXISTS` (3) a session with that name is already running (the script prints its cwd). `ERR_DIR` (4) the dir is missing. `ERR_USAGE` / `ERR_NAME` (2) no usable name. The message names which. Fix and retry.
 
-## Persistence across reboot
+## List and inspect
 
-Every session created this way is written to the **registry**
-(`~/.claude-remote-sessions.tsv`, `NAME<TAB>WORKDIR<TAB>SESSION_ID[<TAB>CONFIG_DIR]`).
-On reboot the `@reboot` boot script (`start-remote-claude.sh`) recreates every
-registered session **and resumes its conversation** (each has a stable
-`--session-id`; the boot script uses `-r` when a transcript exists, `--session-id` on
-first create). So a session made today comes back — with its history — after a reboot.
+- Live tmux sessions: `tmux ls`.
+- Live registry health (what boot-resumes): `archive-remote-claude.sh sweep` prints per-session status, age, tmux presence, and a case-collision scan. Read-only.
+- Parked sessions: `archive-remote-claude.sh list`.
 
-- **Profile-aware resume.** The optional 4th column, `CONFIG_DIR`, holds a secondary
-  Claude Code profile (`CLAUDE_CONFIG_DIR`); empty means the default `~/.claude`. A
-  session started under a secondary profile keeps its transcript under
-  `<CONFIG_DIR>/projects`, so the boot script resumes it there and relaunches it under
-  that profile — otherwise it would silently start fresh. The script captures the
-  caller's live `CLAUDE_CONFIG_DIR` at creation, so this is automatic.
-- **Hand-launched sessions self-register.** A `SessionStart` hook
-  (`.claude-config/hooks/remote-session-register.sh`) registers any Claude session
-  started inside `tmux`, so sessions the operator created by hand — not via this skill
-  — also return on reboot. It is an idempotent upsert (the same tmux session
-  re-registers with its newest session id on each restart), respects archived names,
-  and is disabled with `RC_AUTOREGISTER=0`. See the feature README for install.
+## Attach
 
-- **Stop a session returning on reboot:** `source ~/OPS/.claude-config/remote-sessions/lib-remote-claude.sh && rc_deregister <Name>`
-  (then `tmux kill-session -t <Name>`). Or park it with history:
-  `~/OPS/.claude-config/remote-sessions/archive-remote-claude.sh archive <Name>`.
-- **Re-running the skill with an existing name** reuses that name's registered dir +
-  session-id, so it **resumes** rather than starting fresh (a new dir arg is ignored
-  for a known name — deregister first to move it).
+`tmux attach -t "=<Name>"`, detach with `Ctrl-b` then `d`. The session is already reachable from the operator's claude.ai account, so attaching is only for a local look.
 
-## Notes
+## Park, revive, and end
 
-- All scripts share `~/OPS/.claude-config/remote-sessions/lib-remote-claude.sh` (one
-  source of truth). See that directory's `README.md` for install + configuration.
-- The sanity check reports the tmux pane's working directory (where `claude`
-  launched) — non-invasive; it does **not** inject a prompt into the new session.
-  Don't send keys into the session to ask its cwd.
-- List current sessions: `tmux ls`. Tear one down: `tmux kill-session -t <Name>`.
-  List parked: `archive-remote-claude.sh list`.
-- The optional `ENVFILE` (`~/.claude-mcp.env`, override via `RC_ENVFILE`) is sourced
-  with `2>/dev/null` — harmless if absent. Create it only to inject local env for a
-  session's MCP servers.
+- Park with history: `archive-remote-claude.sh archive "<Name>"` removes it from the boot registry and kills its tmux (drops off the operator's device); the row and session-id move to the archive file.
+- Revive a parked session: `archive-remote-claude.sh revive "<Name>"` moves it back to the live registry and relaunches it with full history.
+- End for good, so it stops now and stops returning on reboot:
+
+      source ~/OPS/.claude-config/remote-sessions/lib-remote-claude.sh && \
+        rc_deregister "$(rc_normalize_name "<Name>")"
+      tmux kill-session -t "=<Name>"
+
+Re-running the launcher with an existing name resumes it and reuses its dir, id, and profile; a new dir arg is ignored, so deregister first to move it. A `RC_GUARANTEED_NAMES` entry in `lib-remote-claude.sh` is always kept running by the boot script; archiving one is refused (`ERR_GUARANTEED`) because it would orphan the session's history.
+
+## Mechanics: the tmux target trap
+
+Pane-level tmux commands (`send-keys`, `capture-pane`, `display-message`) do not resolve a bare `=<Name>` exact-session target on recent tmux; they need the window component `=<Name>:`. Session-level commands (`has-session`, `kill-session`) still take bare `=<Name>`. The launcher handles this internally; the trap only bites if you hand-roll `tmux new-session` plus `send-keys` yourself, so prefer the launcher. To read a pane: `tmux capture-pane -p -t "=<Name>:"`. To hand a running session new work, write the work order to a file and inject a single line pointing at it (`send-keys -t "=<Name>:" -l 'read <path> and execute it'` then a separate `send-keys -t "=<Name>:" Enter`); a multi-line paste can submit early. The durable cross-session baton itself is `session-handoff`'s job.
+
+## Self-registration
+
+A `SessionStart` hook (`.claude-config/hooks/remote-session-register.sh`) registers any Claude session started by hand inside tmux, so a session the operator created without this skill also returns on reboot. It is an idempotent upsert, respects archived names, and is disabled with `RC_AUTOREGISTER=0`.
