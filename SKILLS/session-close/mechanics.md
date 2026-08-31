@@ -68,7 +68,6 @@ After executing the authorized writes, record the outcome and clear the session 
 ```bash
 mkdir -p ~/.local/state/ops
 printf '%s\treconciled=%s\tdeclined=%s\n' "$(date -Is)" "<n items logged>" "<reason or ->" \
-  > ~/.local/state/ops/last-worktrack-check
 rm -f "$RUN/session-start-$KEY" "$RUN/work-log-$KEY"
 ```
 

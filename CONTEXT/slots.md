@@ -1,6 +1,6 @@
 # Context slots
 
-Slots are how one portable skill in a shared source serves every operator without a fork. A skill that hard-codes "log time on the Autotask ticket" or "match this brand voice" cannot ship to another user without editing. A slot keeps that local specific out of the skill: the skill references a well-known slot filename and degrades gracefully when the slot is absent, so the same file runs unmodified for a user who has the slot and a user who does not.
+Slots are how one portable skill in a shared source serves every operator without a fork. A skill that hard-codes "log time on the ticket in your PSA" or "match this brand voice" cannot ship to another user without editing. A slot keeps that local specific out of the skill: the skill references a well-known slot filename and degrades gracefully when the slot is absent, so the same file runs unmodified for a user who has the slot and a user who does not.
 
 Rules a skill follows when it reads a slot:
 
