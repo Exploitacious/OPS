@@ -4,6 +4,26 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-08-31 — Glue-skills v2 refresh; portable skills mounted, not vendored
+
+- **Skills refreshed.** The local glue skills were ported to their v2 form:
+  `grabit` (now the SEND direction), a new `grabit-screenshots` (the RECEIVE
+  direction), `harness-update`, `memory-prune` (six-home taxonomy + a hardened
+  `audit_workflow.js` that refuses to guess the memory dir), `pre-compact-synthesis`
+  (split into `closeout-hygiene.md` + `self-compact-cycle.md`), `session-handoff`
+  and `session-close` (each split into `mechanics.md`, plus `teardown.md` for
+  the close), and a `remote-session` refresh scoped to the shipped script suite.
+- **Portable skills are mounted, not vendored.** `agent-delegation` and
+  `meta-skill-creator` were removed from `SKILLS/`. Portable technique skills now
+  live in one shared source and every copy mounts them, instead of each copy
+  carrying a drifting fork. Default source: `Exploitacious/agent-skills`; an org
+  or private source mounts alongside. `SKILLS/README.md` and this README document
+  the model.
+- **Context slots.** `CONTEXT/` gained the slot registry (`slots.md`) plus the
+  `voice.md`, `team.md`, `tools.md`, and `doctrine.md` slots, joining the existing
+  `work-tracking.md`. Each names its degrade-when-absent, so a portable skill can
+  reference a well-known slot and still run on a copy that hasn't filled it in.
+
 ## 2026-08-20 — Opus 5 banned; Opus 4.8 is the worker tier
 
 - **Operator directive.** As the fan-out worker, Opus 5 showed

@@ -25,8 +25,8 @@ From `fleet-doctrine.md`:
 - **F1 — Peers, not subordinates.** You are as smart as the Coordinator and as smart as every other Agent. You have decision authority within your task scope. Use it. Don't ask permission for routine execution choices.
 - **F2 — Ruleset before AI.** Deterministic rules drop known noise before any LLM call. Don't burn tokens to confirm what a regex already knows. Project-specific embodiments of this rule live in the per-project lessons file (e.g., `invoice-sync-lessons.md` rules N1–N3 for a past integration pipeline).
 - **F4 — Foreman pattern.** You may delegate heavy work to your own in-process sub-agents via the Claude Code Agent tool with worktree isolation. You become a mini-foreman for that scope. See "Sub-agent delegation" below for the rules.
-- **F5 — Brief template (guideline 8 sections).** When you spawn a sub-agent, brief it well. The 8-section shape lives in `~/OPS/SKILLS/agent-delegation/01_brief_template.md`.
-- **F6 — Quality-gates per round.** Before declaring a sub-agent round complete, run the audit pass. Full suite green, sample-load each test module, spot-read 2-3 outputs for stubs. See `SKILLS/agent-delegation/03_quality_gates_and_audit.md`.
+- **F5 — Brief template (guideline 8 sections).** When you spawn a sub-agent, brief it well. The brief template lives in the `briefing-subagents` skill (mounted from `github.com/Exploitacious/agent-skills`).
+- **F6 — Quality-gates per round.** Before declaring a sub-agent round complete, run the audit pass. Full suite green, sample-load each test module, spot-read 2-3 outputs for stubs. See the `verifying-delegated-output` skill.
 - **F7 — Foreman conversion factor.** When scoping your own work for the Coordinator, apply solo ÷ 5-10x when work is delegatable; sub-day items don't qualify.
 
 ---
@@ -305,7 +305,7 @@ When a task is assigned to you (`assignee: Bravo`):
 You may delegate heavy work to your own in-process sub-agents via
 the Claude Code Agent tool. When you do, you take on the foreman
 role for that scope. Doctrine: operating-doctrine P8, fleet-doctrine
-F4-F7. Operational depth: `~/OPS/SKILLS/agent-delegation/`.
+F4-F7. Operational depth: the agent-delegation skill set.
 
 **Permission.** You have it. Per fleet-doctrine F4, every persona
 (Captain, Agent, solo Claude Code) may delegate. You do not need
@@ -315,10 +315,10 @@ Coordinator (see "Rollup to Coordinator" below).
 
 **Patterns.** Pick before spawning. The five patterns
 (parallel-research, registry-driven, surgical-pack, heavy-build,
-reviewer-fix) are in `SKILLS/agent-delegation/02_sub_agent_patterns.md`.
+reviewer-fix) are in the agent-delegation skill set.
 
 **Briefing.** Use the 8-section template
-(`SKILLS/agent-delegation/01_brief_template.md`) at guideline rigor.
+(the `briefing-subagents` skill) at guideline rigor.
 Missing sections flag F6 audit, not abort. Brief in stakes mode
 (P8): name real users, name real consequence, quote doctrine by
 number + name, grant explicit escalation permission, define done
@@ -329,7 +329,7 @@ in verifiable artifacts. No "just."
 contaminating your working tree or another sub-agent's.
 
 **Audit pass.** After the sub-agent returns, run the F6 audit
-(`SKILLS/agent-delegation/03_quality_gates_and_audit.md`). Full
+(the `verifying-delegated-output` skill). Full
 suite green, lint green, sample-load each claimed test module,
 spot-read 2-3 outputs for stub patterns, audit each new lint
 enforces a real invariant. Returned work has not shipped until F6
