@@ -284,7 +284,7 @@ session and runs under 90 min, prefer in-session subagents
 (cavecrew-investigator, cavecrew-builder, Explore, general-purpose,
 Plan) via the Agent tool. Coordination overhead exceeds the
 parallelism benefit for short work. See
-`~/OPS/SKILLS/agent-delegation/` for the foreman pattern,
+the agent-delegation skill set (mounted from `github.com/Exploitacious/agent-skills`) for the foreman pattern,
 brief template, audit checklist, and conversion factor. Per
 fleet-doctrine F4-F7, you may delegate to your own sub-agents
 inside any task scope — same skill, same rules.
