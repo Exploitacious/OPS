@@ -1,6 +1,6 @@
 # SKILLS — Source Library for Claude Skills & GUI Projects
 
-This folder is the **authoritative source** for every Claude capability the Operator maintains across machines. Each subfolder is one "library entry" that can deploy in two places:
+This folder is the **authoritative source** for the local, OPS-specific Claude capabilities the Operator maintains across machines. Portable technique skills are mounted from a shared skill source instead (see "Skill sources" below). Each subfolder is one "library entry" that can deploy in two places:
 
 1. **Claude Code (CLI)** — as a Skill, lazy-loaded by trigger description. Deployed via `~/.claude/skills/` symlinked directly to this folder. One hop. Cross-platform via `.claude-config/deploy.ps1` (Windows) or `.claude-config/deploy.sh` (Linux/macOS).
 2. **Claude.ai GUI (web/desktop/mobile)** — as a Project. Files uploaded manually into a project's instructions field + knowledge file slots.
@@ -31,9 +31,13 @@ The `SKILL.md` and the `0X_*.md` knowledge files share content but serve differe
 - `00_System_Prompt.md` follows Claude Project spec — concise identity + behavior + file routing. Pasted as project instructions.
 - `0X_*.md` files = knowledge files uploaded to the GUI Project. Same files can be referenced from `SKILL.md` for Claude Code consumption.
 
+## Skill sources
+
+OPS mounts skill sources rather than vendoring the portable ones. A portable technique skill — delegation, skill authoring — is the same for every operator, so it lives in one shared source and every OPS copy mounts it, instead of each copy carrying its own drifting fork. The default source is [`github.com/Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills) (the delegation set plus `meta-skill-creator`); an org or private source mounts alongside it. What lives in *this* `SKILLS/` folder is the local, distribution-specific set — glue that binds to OPS's own hooks, scripts, and layout. So `meta-skill-creator` and the `agent-delegation` set are available as mounted skills (invoke them by name), just not copied in here.
+
 ## How to add a new entry
 
-Use the `meta-skill-creator` skill/project. It's the single source of doctrine for:
+Use the `meta-skill-creator` skill (mounted from the skill source). It's the single source of doctrine for:
 
 - When to make both (default) vs skill-only vs project-only
 - How to structure each
@@ -42,7 +46,6 @@ Use the `meta-skill-creator` skill/project. It's the single source of doctrine f
 - How to migrate an existing cloud-only Project here
 
 Trigger Claude Code: ask to "create a new skill" or "build a Claude project" — `meta-skill-creator` activates and walks the build.
-For manual reference: `SKILLS/meta-skill-creator/`.
 
 ## Deployment
 
@@ -66,11 +69,12 @@ The script is idempotent — safe to re-run anytime.
 
 ## Index
 
+This table lists the local, OPS-specific entries. Portable technique skills (`meta-skill-creator`, the `agent-delegation` set) are mounted from the skill source above, not listed here.
+
 | Entry | Deployed as Skill? | GUI Project? | Notes |
 |-------|--------------------|--------------|-------|
-| `meta-skill-creator` | yes | yes | Authoritative doctrine for this folder. Reference for all other entries. |
-| `agent-delegation` | yes | yes | Foreman delegation pattern — brief template, sub-agent patterns, quality gates, estimation, dynamic workflows. Depth layer behind `operating-doctrine.md` P8 and `fleet-doctrine.md` F4-F7. See [[agent-delegation/README.md]]. |
-| `grabit` | yes | no | Claude Code only — Tailscale file courier off a headless box via a local shell binary; a GUI Project can't execute it. See [[grabit/README.md]]. |
+| `grabit` | yes | no | Claude Code only — SEND direction of the Tailscale file courier off a headless box; a GUI Project can't execute the local binary. See [[grabit/README.md]]. |
+| `grabit-screenshots` | yes | no | Claude Code only — RECEIVE direction: pull files (screenshots included) the operator pushed to the box and read them. Shares the `grabit` binary. See [[grabit/README.md]]. |
 | `memory-prune` | yes | no | Claude Code only — fans out a memory audit via the Workflow tool; no GUI Project half exists. |
 | `pre-compact-synthesis` | yes | no | Claude Code only — pre-compaction durable-state synthesis; no GUI Project half exists. |
 | `session-handoff` | yes | no | Claude Code only — write/read baton pair for handing off sessions across profiles/machines; pairs with `pre-compact-synthesis`. No GUI Project half exists. |
