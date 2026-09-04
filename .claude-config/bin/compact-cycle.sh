@@ -43,6 +43,11 @@ mkdir -p "$RUNDIR"
 TARGET="" BATON="" RESUME_TEXT="" NO_RESUME=0 WORKER=0
 GRACE=20 IDLE_TIMEOUT=300 TIMEOUT=900
 
+# PRESERVE: typed as the argument to /compact so the compactor keeps the
+# load-bearing detail instead of a lossy default summary. Defined once here,
+# used at the /compact fire below.
+PRESERVE="Be sure to preserve: (1) any difficulties or problems that came up, and how they were handled or resolved; (2) any possibilities, options, or approaches that were raised, tried, or set aside, and why; (3) anything that was asked for, decided, agreed, ruled out, or established as a preference, constraint, or boundary, stated exactly; (4) exactly where things stand now; (5) anything still open, unresolved, promised, or expected to happen next; (6) specific details that would be hard to reconstruct: names, numbers, dates, exact wording, links or references, kept exactly. Weight the two voices differently: keep what the user said, asked for, shared, or established carefully and close to their own words; your own explanations and reasoning can be condensed much further."
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --target)       TARGET="$2"; shift 2 ;;
@@ -144,7 +149,7 @@ done
 [ "$IDLE" -ge 3 ] && say "target idle — firing /compact" \
                   || say "WARN: target still busy after ${IDLE_TIMEOUT}s — firing anyway (/compact will queue)"
 
-tmux send-keys -t "$T" "/compact"
+tmux send-keys -t "$T" "/compact $PRESERVE"
 sleep 0.6                       # let the slash-command menu settle before submit
 tmux send-keys -t "$T" Enter
 log "/compact sent"

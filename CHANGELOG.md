@@ -4,6 +4,51 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-09-04 — Boot surface rides the system prompt; rest-stop compaction
+
+- **Charter + identity digest ride the cached system prompt.** The `claude()`
+  launch shim (`deploy.sh`) now appends `CONTEXT/foreman-charter.md` +
+  `CONTEXT/boot-digest.md` via `--append-system-prompt`, pinned with
+  `--system-prompt-snapshot on`, so the standing orders LAND whole every launch
+  and survive resume/compact verbatim. A SessionStart hook could only print a
+  ~2KB preview, silently losing a long charter. `foreman-charter.sh` is retired
+  for Claude Code (kept as an adapter seam); remove it from the Stage-1
+  SessionStart matcher and split SessionStart into `startup|clear` /
+  `resume|compact` groups (see DEPLOYMENT.md "Boot surface").
+- **New `CONTEXT/boot-digest.md`** — a slot template (Example Corp flavor, zero
+  real facts) for the operator's identity surface: who you work for, the three
+  voice registers, people/clients/vendors, stack, doctrine P-pointers, and the
+  always-binding standing orders. BOOTSTRAP fills it. Hard-excluded from
+  `harness-update` so a template refresh never clobbers a filled copy.
+- **The charter got a delete-first pass** (every paragraph an order or its why;
+  depth is P-pointers), the Anthropic autonomy block at the head of "Finish the
+  job", a don't-draft-twice effort line, and the rest-stop "Milestone rhythm".
+  Planning questions move to prose; the AskUserQuestion block leaves CLAUDE.md.
+- **`CONTEXT/model-roles.md`** — the model-tier policy (foreman / worker /
+  banned, the [1m] ids, the Opus 5 + Haiku bans) as one source the charter and
+  CLAUDE.md point at instead of restating.
+- **Rest-stop compaction.** `context-watch.sh` gains a calm, boundary-aware
+  `readout` mode (UserPromptSubmit): a closed task, a landed push/merge, a
+  returned workflow, a >2h gap, or a branch switch pick one of three rest-stop
+  texts; the scarcity/pressure vocabulary is scrubbed from every ladder nag. The
+  compact cadence broadens to any clean task boundary (operating-doctrine P13 +
+  P2, working-preferences § Standing Orders). `compact-cycle.sh` types a
+  `PRESERVE` instruction as the `/compact` argument so the compactor keeps
+  load-bearing detail.
+- **Skill mount mechanism made concrete.** `.claude-config/bin/skills-vendor.sh`
+  + `SKILLS/VENDORED.tsv` are now the one mount mechanism the README described;
+  seven thin context skills (`operator-voice`, `project-kata`, `projects-map`,
+  `machines`, `harness-deploy`, `harness-readme`, `fleet-doctrine`) route to
+  `CONTEXT/`; a `design-method` skill ships the frontend-design method (Apache-2.0) with
+  a fill-in `brand.md` layer.
+- **`verify-ops.sh` gains eight checks** (16-23): boot shim carries both flags
+  (FAIL); charter hook unregistered (WARN); source-scoped SessionStart matchers
+  (WARN); SessionStart stdout byte budget (FAIL/WARN); anxiety-vocab gate on
+  context-watch (FAIL); the boot-digest canary, generalized (missing => FAIL,
+  unfilled-on-bootstrapped => FAIL, unfilled-on-fresh => OK); skills mirror in
+  sync (DRIFT FAIL / MISSING WARN); boot-digest excluded from harness-update
+  (FAIL). `context-watch-selftest.sh` gains full readout + boundary coverage.
+
 ## 2026-08-31 — Glue-skills v2 refresh; portable skills mounted, not vendored
 
 - **Skills refreshed.** The local glue skills were ported to their v2 form:
