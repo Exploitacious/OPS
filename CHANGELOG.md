@@ -27,6 +27,13 @@ prehistory is deliberately not part of it.
 - **`CONTEXT/model-roles.md`** — the model-tier policy (foreman / worker /
   banned, the [1m] ids, the Opus 5 + Haiku bans) as one source the charter and
   CLAUDE.md point at instead of restating.
+- **Doc single-home + prose-ask sweep.** `operating-doctrine.md` P12's
+  model-tiering bullet is cut to a pointer at `CONTEXT/model-roles.md`, so the
+  tier table has one home (a superseding history entry neutralizes the stale
+  "P12 tiering bullet" cross-references). Separately the `AskUserQuestion` tool
+  is retired across the docs: BOOTSTRAP, operating-doctrine, fleet-doctrine,
+  session-close, and the AGENT / COORDINATOR / cron templates now ask in prose,
+  with the single retirement note kept in `working-preferences.md`.
 - **Rest-stop compaction.** `context-watch.sh` gains a calm, boundary-aware
   `readout` mode (UserPromptSubmit): a closed task, a landed push/merge, a
   returned workflow, a >2h gap, or a branch switch pick one of three rest-stop

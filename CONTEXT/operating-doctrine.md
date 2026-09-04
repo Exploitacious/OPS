@@ -687,55 +687,16 @@ deliberately.
 - Delegate↔workflow boundary: orchestration worth codifying, needs
   more than ~10 agents, or wants adversarial verification baked in →
   workflow.
-- **Model tiering: Fable 5 foreman where the plan allows it, Opus 4.8
-  otherwise; Opus 4.8 the default build/review/audit worker; Sonnet 5 the
-  light lanes.** The main-session pin is decided per machine, not at runtime:
-  Stage 1 ships it and `.claude-config/bin/model-probe.sh` sets it to
-  **Fable 5** (`claude-fable-5[1m]`) where the probe succeeds and **Opus
-  4.8** (`claude-opus-4-8[1m]`) on anything else. Fable is best at context,
-  nuance, and instruction-following, which is why orchestration judgment
-  lives there wherever it is available — and on the plans that carry it, it
-  is usage-capped, so it is the one tier that gets rationed: the Fable
-  thread writes briefs, delegates, decides, and reviews worker output *in
-  the main thread*, and does not read/build/verify inline past a handful of
-  tool calls. **Never spawn Fable as a sub-agent** — no `model: 'fable'`
-  worker alias exists, and spending a capped tier on work Opus 4.8 handles
-  is the precise waste the cap punishes; worker-output review is the main
-  thread's job, not a Fable sub-agent's. **Opus 4.8** — what the `opus`
-  alias and the `/model` Opus entry now resolve to — is the primary foreman
-  on plans without Fable and the fallback on plans with it: same charter,
-  taken when Fable's usage is spent or the task is uncomplicated and already
-  decided. It is reliable at fan-out, follow-through, and review but weaker
-  on big-picture judgment and unprompted better-way suggestions, so
-  compensate with explicit written plans and review of every returned lane.
-  That same Opus 4.8 is **also the default build/review/audit worker**
-  (Operator directive 2026-08-20): the `ops-worker`, `ops-reviewer`, and
-  `ops-auditor` agent types hard-pin `claude-opus-4-8[1m]` in frontmatter,
-  and workflow lanes take `model: 'claude-opus-4-8[1m]'` — the `[1m]` suffix
-  is required, because 1M is not Opus 4.8's default context. Do not pass an
-  alias override on an `ops-*` spawn except a deliberate `model: 'sonnet'`
-  downshift. **Opus 5 (`claude-opus-5`) is BANNED** — it held the worker seat
-  until 2026-08-20, but as a fan-out worker it showed disproportionate
-  cache-write churn and message round-trips, self-checking redundantly
-  against the harness's own review/verify lanes, for no quality edge over
-  Opus 4.8; the drift gate greps for `claude-opus-5` in spawn pins and fails
-  on a reappearance, the same enforcement the Haiku tripwire gets. **Sonnet
-  5** (`model: 'sonnet'` → `claude-sonnet-5[1m]`) takes investigation,
-  mechanical edits, and routine lanes; foremen rotate Opus 4.8 ↔ Sonnet 5 by
-  job complexity on their own judgment. **Haiku is banned harness-wide** —
-  never reference the alias in a config, doc, script, or spawn.
-  `ANTHROPIC_DEFAULT_HAIKU_MODEL` stays pinned to `claude-sonnet-5` as a
-  TRIPWIRE so anything that still asks for haiku (a third-party plugin, a
-  stray `model: 'haiku'`) silently gets Sonnet 5; never remove that key,
-  because removing it resurrects real Haiku 4.5. Effort defaults to `xhigh`
-  everywhere; effort-decreases are the Operator's token-saving lever — honor
-  them without friction, never auto-restore mid-session, and never
-  autonomously downgrade a lane (least of all review/verify) to economize.
-  The worker tier holds quality unusually well at `low`/`medium`, which is
-  what makes an Operator-requested economy pass on a worker lane cheap. A 1M-subagent
-  usage-credit gate can, on some accounts, force sub-agents down to ≤200K
-  context — if that gate ever fires, re-point the worker aliases at
-  non-`[1m]` models until it lifts.
+- **Model tiering is a tier choice too, and it lives in one place.** Which
+  model runs the main session and which backs each delegated lane is fixed
+  policy, not per-task shopping. The full table (the foreman, worker, and
+  banned tiers, the usage-capped tier's thrift rule, effort defaults, and the
+  1M note) is single-homed in `CONTEXT/model-roles.md`; read it there and do
+  not restate it. For orchestration you need only the shape: the main-session
+  pin is settled per machine by `model-probe.sh`, a delegated lane takes the
+  worker tier through the `ops-*` agent types or a Workflow lane's `model:`
+  key, and an Operator effort decrease is honored without auto-restore. The
+  per-spawn-cost and brief-scoping rules below hold whatever the tiers are.
 - **Right-size every brief — the 1M window is headroom, not a license to
   dump.** Workers now run at up to 1M context, but bigger context is
   not better work: a tightly-scoped brief beats a bloated one, and Sonnet-1M's
@@ -817,8 +778,8 @@ has no structural reason to hoard, defer, or under-deliver.
   rather than scoping forever. If it genuinely is large, escalate the
   *tier* (delegate / workflow) — never shrink the *scope* to fit an
   imagined budget.
-- **Don't ask permission to work.** AskUserQuestion is for genuine forks —
-  which approach, which audience, an irreversible action — never "should I
+- **Don't ask permission to work.** A prose question block is for genuine forks:
+  which approach, which audience, an irreversible action, never "should I
   proceed / continue / do the rest?" If the Operator assigned it, the answer
   is yes; re-asking reads as the laziness P6 bans and the answered-question
   re-escalation P4/P7 flag as an alignment defect. Ask about *what* to
@@ -952,6 +913,14 @@ that's how systems fork.
   `working-preferences.md` — user-identity layer.
 
 ---
+
+Last updated: 2026-09-04 (Model-roles single-home. The tier table is now
+single-homed in `CONTEXT/model-roles.md`: P12's model-tiering bullet was cut to
+a pointer at that file, and the charter and README already point there. Where
+the history entries below name "the P12 tiering bullet" or "P12's tiering
+bullet" as the place the tier policy was written, that policy now lives in
+`CONTEXT/model-roles.md` and the pointer redirects there. This entry supersedes
+those stale tier-location references.)
 
 Last updated: 2026-08-20 (Opus 5 BAN — Operator directive. As the fan-out
 worker, Opus 5 showed disproportionate cache-write churn and message

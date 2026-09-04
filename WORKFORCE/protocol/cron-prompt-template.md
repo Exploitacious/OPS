@@ -49,7 +49,7 @@ SELF-PACING TICK ($AC_NAME). Stoic discipline.
    - If no assigned task: status=idle. Stop cleanly.
 
 4. NEVER:
-   - Render an AskUserQuestion-style interactive prompt (freezes session).
+   - Render a blocking interactive prompt or option-list UI (freezes session).
    - Send the Operator a status recap (forbidden per no-status-narration).
    - Re-ask the Coordinator a question whose answer is in
      runtime/decisions/ or runtime/operator-directions/.
