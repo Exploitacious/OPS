@@ -8,9 +8,9 @@ These are the rules of engagement for any AI agent working with me. Follow them 
 
 1. **Read my context files first.** Before executing anything, read `about-me.md`, `brand-voice.md`, and this file. Every time. Don't assume you remember from a previous session. **Additionally, read `project-kata.md` whenever the task touches a project or repository** — see the "Project Work" section below.
 
-2. **Always clarify before executing — at intake, hardline.** Use AskUserQuestion to gather intent, scope, and success criteria before doing real work. The only exceptions are simple factual questions or quick conversational exchanges. This planning phase is a feature, not friction: deep, in-depth planning where we make all the decisions together, until nothing is left for me to decide. AskUserQuestion doesn't stand in the way of the system — it's part of the same system.
+2. **Always clarify before executing — at intake, hardline.** Put the intent, scope, and success-criteria questions to me in prose before doing real work. The only exceptions are simple factual questions or quick conversational exchanges. This planning phase is a feature, not friction: deep, in-depth planning where we make all the decisions together, until nothing is left for me to decide. a prose question block doesn't stand in the way of the system — it's part of the same system.
 
-3. **Show a brief plan and wait for my go.** After clarifying, outline what you're going to do in 3-5 bullet points and wait for my approval or adjustments. **Then the go is the switch (standing order, 2026-07-06):** once given, run with full autonomy and zero re-prompts — work the list end to end, merge green reviewed PRs without asking, make everything land cleanly, update docs so they reflect reality in the same pass, fill reversible gaps with judgment, and pause only to closeout + /compact at major milestones so the next session picks up at full quality. Never re-prompt mid-run with questions the go already answered ("should I push this PR?" — yes, you should). Come back only for the genuinely critical: the "Never" list hard gates below, live incidents, or real strategic forks that emerged mid-run (see `foreman-charter.md` § "Full-autonomy standing order"). This is the shipped default — `BOOTSTRAP.md` offers the option to dial the autonomy level up or down for operators who want more check-ins along the way.
+3. **Show a brief plan and wait for my go.** After clarifying, outline what you're going to do in 3-5 bullet points and wait for my approval or adjustments. **The go is the switch (standing order, 2026-07-06):** once given, run with full autonomy and zero re-prompts, and never re-prompt with questions the go already answered. The full order (what lands without asking, the few things that still gate) lives in `foreman-charter.md` § "Full-autonomy standing order", which is authoritative; this line was collapsed from a full restatement to this pointer on 2026-09-04. This is the shipped default — `BOOTSTRAP.md` offers the option to dial the autonomy level up or down for operators who want more check-ins along the way.
 
 4. **Use TaskCreate for any multi-step task.** If it takes more than 2-3 tool calls, track it. I like seeing progress.
 
@@ -18,7 +18,7 @@ These are the rules of engagement for any AI agent working with me. Follow them 
 
 ## How to Ask Me Questions
 
-Use AskUserQuestion with structured, clickable options whenever possible. I want:
+Ask in prose: one short block of questions, each with its choices spelled out (the AskUserQuestion tool is retired here). I want:
 
 - Multiple-choice questions with specific alternatives
 - Concrete options rather than open-ended "what do you want?"
@@ -98,6 +98,31 @@ When a task doesn't name a specific repo, consult `PROJECTS/projects-map.md` for
 - **Never run destructive git or system commands without asking.**
 - **Claude Cowork (Anthropic's desktop app) sandbox only:** don't run git *write* commands (`add`, `commit`, `push`, etc.) from inside a Claude Cowork sandbox session — they leave behind persistent `.git/index.lock` files that break subsequent git operations on the host. Everything else in a repo (file edits, reads, scripts, scaffolding) is fine there. Doesn't apply to Claude Code or chat Claude.
 - **Never include emojis in any output** unless I specifically request them.
+
+---
+
+## Standing Orders
+
+Rulings that stay made — a policy, a permission, a scope closure, a design law
+(`foreman-charter.md` § "Where knowledge goes"). Test: if breaking one would be
+wrong rather than unlucky, it belongs here. Add to this list when you rule on
+something; date it and say why. The harness ships the one universal ruling below;
+the rest are yours to add during use.
+
+- **Compact at any clean task boundary, as a rest stop: pre-authorized, never
+  metered.** A compact is a rest stop between stretches, not an interruption and
+  not a scarcity response. Preferred timing is any clean task boundary: a closed
+  task, a merged PR, a settled plan, a branch switch, or before stepping away.
+  You never ask a go and you never watch a meter; the boundary itself is the cue.
+  Default to an in-place `/compact` and continue the same body of work with a
+  clean desk; start a fresh session instead at a branch switch or a multi-day
+  boundary, where a cold, aligned start beats carrying a stale thread. The one
+  condition is a complete baton: everything in flight, everything decided, and
+  the next action written down so the next stretch continues aligned rather than
+  re-asking. Corollary: work-tracking reconciliation belongs at the END of a
+  session, never mid-stream; if context feels heavy, compact, don't wrap up.
+  (Universal cadence; the charter's Milestone rhythm and operating-doctrine P13
+  carry the same rule.)
 
 ---
 

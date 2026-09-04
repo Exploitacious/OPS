@@ -167,7 +167,12 @@ next session as *continuing one body of work*, never as a session
 boundary. Do NOT write "stopping point," "wind-down," "ready for next
 session," or "pick up later" into any durable artifact: post-compact,
 the resumed session reads that vocabulary as a cue to pause and re-ask
-"stop or continue?" instead of just proceeding. `NEXT ACTION` is an
+"stop or continue?" instead of just proceeding. Naming what is finished is
+different and allowed: a clean baton may state that a task closed, a PR merged,
+or a plan settled. That is fact the resumed session needs, and it names the
+boundary a rest-stop compact rides (P13), not the pause-and-re-ask vocabulary
+banned above; the ban targets the "stop or continue?" cue, not a factual record
+of what is done. `NEXT ACTION` is an
 instruction to execute, not a choice to deliberate. Scoping guardrails
 (DECIDED/PROPOSED/OPEN, DO-NOT, DEAD-ENDS) bound the work, not the
 session — keep those; strip only the session-boundary language.
@@ -328,6 +333,18 @@ savings. Compliance-motivated restructuring (e.g. the
 worker-digest, which focuses attention rather than cutting mass)
 is fine. Distinct from the token-spend gate in P12, which governs
 workflow spend — a different decision.
+
+**Repetition that lands aids compliance; repetition that truncates or is
+skipped does not (reconcile note, 2026-09-04).** The rule above blesses
+duplication that reaches the agent, not mass that never arrives. A chain so long
+the mandated reads get silently skipped, or a hook payload past the preview
+truncation floor, teaches nothing, because the agent never sees it. The
+2026-09-04 boot-surface work acts on exactly that line: it trims the boot
+surface only where the old delivery did NOT land (reads the agent skipped, hook
+stdout that truncated) and moves that content onto a surface that does land, the
+charter and identity digest carried whole in the cached system prompt. It never
+cuts the always-loaded chain to save tokens where the chain already lands. So
+the delivery mechanism changed, not the doctrine's weight: focus, not cut.
 
 **Drop filler words:** just, really, basically, actually, simply,
 essentially, generally, certainly, definitely, obviously, clearly.
@@ -767,13 +784,20 @@ has no structural reason to hoard, defer, or under-deliver.
 
 **How to apply:**
 
-- **Context is abundant; if it feels tight, delegate — don't stop.** The
-  main thread's scarce resource is *judgment and alignment*, not tokens.
-  Spend tokens on briefs and verification; push the bulk reading/writing
-  to sub-agents. "I might run out of context" is almost always a
-  delegate-signal — never a stop-signal, and never a reason to truncate
-  scope. The tiers (P11/P12) exist precisely so context is never the
-  binding constraint.
+- **Context is abundant; never ration quality, and a compact is a pause you
+  resume from (P2), not a cost you pay.** If the main thread feels heavy,
+  delegate: the token-heavy reading and writing belong in sub-agent contexts
+  you throw away, so "I might run out of context" is a delegate-signal, never a
+  stop-signal and never a reason to truncate scope. What a compact resets is not
+  scarcity but clutter: a long thread carries every earlier turn forward, and a
+  clean desk runs sharper than a full one. So at a natural break (a task closed,
+  a branch switched, a plan settled with the build about to start), running
+  pre-compact-synthesis and letting the compactor reset is part of finishing
+  well, not a pause in it: the four-artifact rule means nothing is lost across
+  the reset, so a boundary reset hands the next stretch a fresh, aligned desk at
+  the same full quality. Deferring unfinished work with no blocker onto a
+  cold-start you is still the failure this principle names; resetting cleanly at
+  a boundary and continuing the same body of work is its opposite.
 - **Alignment is the trigger to delegate.** Once you and the Operator agree
   on the target and the task is clear, that alignment is itself the signal to fan
   out — preserve main context to check the work against the agreed target,

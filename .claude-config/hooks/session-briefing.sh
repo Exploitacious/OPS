@@ -28,12 +28,16 @@ SETTINGS="$CFG/settings.json"
 # SessionStart payload (basename of its parent dir). The `pwd | sed` form is
 # `-c-Users-...` on Windows Git Bash, never matching Claude's native
 # `C--Users-...`, which left SNAP_DIR + the memory-health path wrong there.
+# _src is the SessionStart `source` (startup|resume|compact|clear), read from the
+# stdin payload the same way post-compact-resume.sh does; drives the Boot line.
+_src=""
 ENCODED_CWD="$(pwd | sed 's|/|-|g')"
 if [[ ! -t 0 ]]; then
   _payload="$(cat 2>/dev/null || true)"
   if [[ -n "$_payload" ]]; then
     _tp="$(printf '%s' "$_payload" | hook_field transcript_path 2>/dev/null)" || _tp=""
     [[ -n "$_tp" ]] && ENCODED_CWD="$(basename "$(hook_pathnorm "$(dirname "$_tp")")")"
+    _src="$(printf '%s' "$_payload" | hook_field source 2>/dev/null)" || _src=""
   fi
 fi
 
@@ -57,6 +61,12 @@ printf '============================================================\n'
 printf ' Worker:  %s\n' "$gate"
 printf ' Config:  autocompact %s  ·  effort %s  ·  main=%s  ·  fallback(opus)=%s\n' "$acs" "$eff" "$main_model" "$fallback_model"
 printf ' Ultra:   ultracode is session-set via the alias (--settings); /effort to change\n'
+# Boot surface: the claude() launch shim appends the charter + boot-digest to the
+# cached system prompt and exports OPS_BOOT_SHA (first 8 hex of the sha1 of the
+# exact appended string), so a running session sees the exact version it booted
+# with. sha=unset means the shim did not run (bare `command claude`, or a host
+# that predates the shim upgrade).
+printf ' Boot:    charter+digest in system-prompt (sha %s) · source=%s\n' "${OPS_BOOT_SHA:-unset}" "${_src:-unknown}"
 
 # --- project lessons pointer (two-tier memory: project knowledge lives on-demand here) ---
 LESSONS_DIR="$OPS_DIR/CONTEXT/projects"

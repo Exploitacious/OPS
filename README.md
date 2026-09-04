@@ -112,9 +112,12 @@ OPS/
 ├── BOOTSTRAP.md           # first-launch interview + machine recon (populates CONTEXT/)
 ├── LICENSE                # MIT
 ├── CONTRIBUTING.md        # the porting discipline — how private-harness improvements land here
-├── CONTEXT/               # always-loaded doctrine + your identity (read every session)
+├── CONTEXT/               # doctrine + your identity (the boot digest rides the system prompt; the rest load on demand)
 │   ├── operating-doctrine.md   #   the universal principles (P1-P15) any session follows
-│   ├── foreman-charter.md      #   always-on foreman posture (auto-injected at SessionStart)
+│   ├── foreman-charter.md      #   always-on foreman posture (rides the cached system prompt via the launch shim)
+│   ├── boot-digest.md          #   identity slot template — rides the system prompt with the charter; BOOTSTRAP fills it
+│   ├── model-roles.md          #   the model-tier policy (foreman / worker / banned), one source
+│   ├── slots.md                #   context-slot registry (voice, team, tools, work-tracking, doctrine)
 │   ├── fleet-doctrine.md       #   multi-agent coordination rules (loaded on ACTIVATE)
 │   ├── worker-digest.md        #   ~2KB doctrine distillation for spawned sub-agents
 │   ├── project-kata.md         #   repo shape + documentation discipline
@@ -144,6 +147,45 @@ The memory pattern is the load-bearing idea: durable state (doctrine, identity,
 project lessons, auto-memory, handoff batons) lives in tracked files, so a fresh
 context — after a compaction, a new machine, or a profile switch — recovers by
 reading the repo, not by remembering.
+
+## Boot surface
+
+What rides your system prompt, and why. A SessionStart hook can only print a
+short preview to the model (hook stdout above ~8KB is truncated to a ~2KB
+preview), so the old "inject the charter through a hook" approach silently lost
+most of a long charter. OPS instead rides the boot surface through the cached
+system prompt: the `claude()` launch shim (written by `deploy.sh` into the
+untracked `~/.<shell>rc.local` seam) appends the whole `CONTEXT/foreman-charter.md`
+plus `CONTEXT/boot-digest.md` via `--append-system-prompt`, pinned with
+`--system-prompt-snapshot on` so it lands whole every launch and survives resume
+and compact verbatim. The session briefing prints a `Boot:` line with the
+content sha, so you can see the exact version that booted. `foreman-charter.sh`
+is retired for Claude Code because of this (it stays only as an adapter seam for
+a non-Claude-Code agent).
+
+For a forker, this means:
+
+- **Author your digest.** `CONTEXT/boot-digest.md` ships as a slot template
+  (the "Example Corp" flavor, like `about-me.md`). Replace every EXAMPLE line
+  with your own facts and remove the `BOOT-DIGEST-TEMPLATE: unfilled` canary
+  line at the top; BOOTSTRAP does this on first launch. It is hard-excluded from
+  `harness-update`, so a template refresh never clobbers your filled copy.
+- **Context loads on demand.** With the digest grounding every session, the full
+  `about-me.md` / `working-preferences.md` / `operating-doctrine.md` load only
+  when a task needs them, routed by the thin context skills (`operator-voice`,
+  `harness-readme`, `harness-deploy`, `project-kata`, `projects-map`, `machines`,
+  `fleet-doctrine`).
+- **Rest-stop cadence.** Compaction is a rest stop, not a scarcity response.
+  `context-watch.sh`'s readout is calm and boundary-aware (a closed task, a
+  landed push/merge, a branch switch, a >2h gap), and the compact cadence is a
+  shipped standing order (`working-preferences.md` § Standing Orders).
+- **Mount portable skills.** `.claude-config/bin/skills-vendor.sh` +
+  `SKILLS/VENDORED.tsv` mirror the shared skill source into `SKILLS/`; see
+  `SKILLS/README.md`.
+- **The drift gate checks it.** `verify-ops.sh` fails if the shim loses a boot
+  flag, if the digest is missing or still the unfilled template on a bootstrapped
+  copy, if `context-watch` grows scarcity vocabulary, or if the digest is not
+  excluded from `harness-update`.
 
 ## Posture
 

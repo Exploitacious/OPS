@@ -1,6 +1,6 @@
 ---
 name: pre-compact-synthesis
-description: Use when wrapping up a session before a /compact (the operator says "compact", "pre-compact", "wrap up", "do the thing", or "make sure everything reflects reality") to synthesize durable state to disk and run the closeout hygiene pass. Also fires on the self-compact routes ("self-compact", "run the full cycle", a [context-watch] Stop-hook nag), proactively past ~65% context in a wrap-up posture, and at milestone boundaries with no prompt. Autocompact is disabled here, so compaction is a deliberate pause, not a race. Auto-detects fleet vs solo and writes the right durable anchor. Not for finishing the day (that is session-close, which reconciles work-tracking). Implements operating-doctrine P2.
+description: Synthesize durable state before a /compact, then closeout. On compact, pre-compact, wrap up, do the thing, or any milestone or natural-break rest stop.
 ---
 
 # Pre compact synthesis
@@ -52,7 +52,7 @@ Post-compact sessions over-assume: the summary states positive next-steps but le
 
 Tag every carried item DECIDED (act on it), PROPOSED (do not execute, it was only weighed), or OPEN (ask). This keeps autonomy on verified ground; the bias still stays toward acting.
 
-Ban session-boundary vocabulary from every artifact: no "stopping point", "wind-down", "ready for next session", "pick up later", "compact-ready". Post-compact, that language reads as a cue to pause and re-ask "stop or keep going?". NEXT ACTION is an instruction to execute, never a choice to deliberate. Frame the next session as continuing one body of work across the compact.
+Ban session-boundary vocabulary from every artifact: no "stopping point", "wind-down", "ready for next session", "pick up later", "compact-ready". Post-compact, that language reads as a cue to pause and re-ask "stop or keep going?". Naming what is finished is not that vocabulary and is fine: a clean baton may say a task closed, a PR merged, or a plan settled (P2). The ban targets the stop-or-continue cue, not a factual record of what is done. NEXT ACTION is an instruction to execute, never a choice to deliberate. Frame the next session as continuing one body of work across the compact.
 
 If you hit a decision you cannot resolve from code plus context, do not bake a guess in. Surface it. When the operator answers, write the resolution to a `project` memory so the question dies permanently, not just into the anchor.
 
@@ -75,7 +75,7 @@ Before you flush, feed the work-log: one narrative line so a multi-compact sessi
 3. Walk the four artifacts in order, acting or surfacing per artifact.
 4. Append the work-log line, then run closeout hygiene.
 5. Print the readiness summary.
-6. Choose the exit. In tmux, a wrap-up trigger IS the go: run the whole self-compact cycle (`self-compact-cycle.md`), do not prepare and wait. Take the manual exit (print the summary, let the operator fire `/compact`) only when not in tmux, when the operator explicitly claimed the compact ("I'll compact myself", "hold off"), or when an ASK OPERATOR item is still open. Never compact over an unanswered question.
+6. Choose the exit. In tmux, a wrap-up trigger IS the go: run the whole self-compact cycle (`self-compact-cycle.md`), do not prepare and wait. Take the manual exit (print the summary, let the operator fire `/compact`) only when not in tmux, when the operator explicitly claimed the compact ("I'll compact myself", "hold off"), or when an ASK OPERATOR item is still open. Never compact over an unanswered question. On the manual exit, have the operator fire `/compact <instruction>` with the preservation instruction so a manual compact keeps the same detail the automated cycle does; the single source of that text is the `PRESERVE` variable in `~/OPS/.claude-config/bin/compact-cycle.sh`, so point at it rather than restating the points here.
 
 ## Readiness summary
 

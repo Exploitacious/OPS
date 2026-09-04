@@ -100,7 +100,7 @@ fi
 # header so the Operator sees where the boundary sits.
 is_excluded() {
   case "$1" in
-    CONTEXT/about-me.md|CONTEXT/brand-voice.md|CONTEXT/working-preferences.md|CONTEXT/.bootstrapped) return 0 ;;
+    CONTEXT/about-me.md|CONTEXT/brand-voice.md|CONTEXT/working-preferences.md|CONTEXT/.bootstrapped|CONTEXT/boot-digest.md) return 0 ;;
     CONTEXT/projects/*) return 0 ;;
     .claude-memory/*|.claude-handoffs/*|NOTES/*|DELIVERABLES/*|PROJECTS/*|ARCHIVE/*) return 0 ;;
   esac
@@ -178,7 +178,7 @@ else
   echo "# mode: first-sync (no baseline — differences classify as CONFLICT, not UPDATE)"
 fi
 echo "# hard-excluded (both directions, never listed): CONTEXT identity files"
-echo "#   (about-me, brand-voice, working-preferences, .bootstrapped, projects/),"
+echo "#   (about-me, brand-voice, working-preferences, .bootstrapped, boot-digest, projects/),"
 echo "#   .claude-memory/ .claude-handoffs/ NOTES/ DELIVERABLES/ PROJECTS/ ARCHIVE/"
 echo "# classes: NEW=safe copy · UPDATE=fast-forward copy · CONFLICT=port by hand ·"
 echo "#   IDENTICAL=in sync · REMOVED=upstream deleted (manual call). local-only files hidden."

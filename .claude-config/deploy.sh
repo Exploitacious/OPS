@@ -225,7 +225,7 @@ else
   msg_warn "claude-wrapper.sh not present at $WRAPPER_FILE — skipping."
 fi
 
-# --- Always-on ultracode shim (operator directive; WS-3) ---
+# --- Always-on ultracode + boot-surface shim (operator directive; WS-3) ---
 # ultracode every interactive Claude Code session, so it is never forgotten.
 # Written to the UNTRACKED ~/.<shell>rc.local files (sourced by the generic
 # .local seam at the end of the public rc files). Kept OUT of the tracked
@@ -233,34 +233,103 @@ fi
 # cost on every linuxploitacious cloner would be wrong. Kept OUT of the flock
 # wrapper on purpose: that wrapper's per-config-dir lock would block the
 # operator's concurrent same-profile sessions. ultracode is session-only (no
-# settings.json key; `--effort ultracode` is rejected) — `--settings` inline
+# settings.json key; `--effort ultracode` is rejected): `--settings` inline
 # JSON is the only launch lever, and it MERGES per-key (adds the key, does not
 # replace settings.json). Idempotent via the marker.
+#
+# The same shim also rides the boot surface (foreman charter + identity
+# boot-digest) in the CACHED system prompt via --append-system-prompt, pinned
+# for the conversation with --system-prompt-snapshot on so the standing orders
+# LAND every launch and survive resume/compact verbatim without a SessionStart
+# hook re-forcing the reads. This replaces the retired foreman-charter.sh
+# SessionStart injection (OPS ships no operating-model body, so the append is
+# two files, charter + digest). Older hosts carry an ultracode-only block under
+# the same marker; a re-deploy strips that and rewrites the upgraded shim
+# (self-heal), so the marker alone does not freeze a stale block.
 echo ""
-c_yel "Wiring always-on ultracode shim..."
+c_yel "Wiring always-on ultracode + boot-surface shim..."
 ULTRACODE_MARKER='# --- Always-on ultracode for interactive Claude Code (WS-3) ---'
 
 ensure_claude_localrc() {
   local target="$1"
-  if [[ -f "$target" ]] && grep -qF "$ULTRACODE_MARKER" "$target" 2>/dev/null; then
-    msg_ok "Ultracode shim already present in $target"
+  # Already upgraded (marker + the boot flag present) -> nothing to do.
+  if [[ -f "$target" ]] && grep -qF "$ULTRACODE_MARKER" "$target" 2>/dev/null \
+     && grep -qF -- '--append-system-prompt' "$target" 2>/dev/null; then
+    msg_ok "Ultracode + boot-surface shim already present in $target"
     return 0
   fi
-  cat >> "$target" <<EOF
-
-$ULTRACODE_MARKER
-# \`command claude\` avoids recursion when this function shadows the real
-# binary. Flock-free on purpose (a per-config-dir flock would block
-# concurrent same-profile sessions). Skipped if the caller already passed
-# --settings.
+  # Marker present but no boot flag -> a legacy ultracode-only block. Strip it
+  # (marker line through the function's closing `}` at column 0) before writing
+  # the upgraded shim, so we never leave two claude() definitions in one file.
+  if [[ -f "$target" ]] && grep -qF "$ULTRACODE_MARKER" "$target" 2>/dev/null; then
+    local tmp="${target}.tmp.$$"
+    if awk -v m="$ULTRACODE_MARKER" '
+        $0==m {inblk=1; next}
+        inblk && $0=="}" {inblk=0; next}
+        inblk {next}
+        {print}
+      ' "$target" > "$tmp" 2>/dev/null && mv "$tmp" "$target"; then
+      msg_action "Removed legacy ultracode-only block in $target (upgrading to boot-surface shim)"
+    else
+      rm -f "$tmp" 2>/dev/null
+      msg_warn "Could not strip legacy ultracode block in $target: leaving as-is, boot surface not upgraded"
+      return 0
+    fi
+  fi
+  {
+    echo ""
+    echo "$ULTRACODE_MARKER"
+    cat <<'SHIM'
+# `command claude` avoids recursion; clawd() calls `claude` so it inherits this.
+# Flock-free on purpose (a per-config-dir flock would block concurrent
+# same-profile sessions). Two launch-time jobs, both decided per invocation:
+#   1. ultracode: added via --settings unless the caller already passed
+#      --settings (ultracode is session-only, no settings.json key).
+#   2. Boot surface: ride the whole foreman charter + identity boot-digest in
+#      the CACHED system prompt via --append-system-prompt, and pin it for the
+#      conversation with --system-prompt-snapshot on so it survives
+#      resume/compact verbatim with no SessionStart hook re-forcing the reads.
+#      Skipped if the caller already passed --append-system-prompt or
+#      --system-prompt (no double inject). Fail open: a missing charter (box
+#      mid-provision, partial clone) adds neither boot flag and the launch is
+#      unaffected. OPS_BOOT_SHA is exported (first 8 hex of the sha1 of the
+#      exact appended string) so session-briefing can print the booted version,
+#      and only in the branches that actually append boot. Passing the same flag
+#      twice keeps only the last, so the two files are concatenated into ONE
+#      --append-system-prompt string.
 claude() {
-  case " \$* " in
-    *" --settings "*|*" --settings="*) command claude "\$@" ;;
-    *) command claude --settings '{"ultracode":true}' "\$@" ;;
+  local H boot sha have_sp have_settings
+  H="$HOME/OPS"
+
+  boot=""
+  if [ -r "$H/CONTEXT/foreman-charter.md" ]; then
+    boot="$(cat "$H/CONTEXT/foreman-charter.md"; printf '\n\n'; cat "$H/CONTEXT/boot-digest.md" 2>/dev/null)"
+    sha="$(printf '%s' "$boot" | { sha1sum 2>/dev/null || shasum 2>/dev/null; } | cut -c1-8)"
+  fi
+
+  have_sp=0; have_settings=0
+  case " $* " in
+    *" --append-system-prompt "*|*" --append-system-prompt="*|*" --system-prompt "*|*" --system-prompt="*) have_sp=1 ;;
   esac
+  case " $* " in
+    *" --settings "*|*" --settings="*) have_settings=1 ;;
+  esac
+
+  if [ "$have_settings" -eq 0 ] && [ "$have_sp" -eq 0 ] && [ -n "$boot" ]; then
+    [ -n "$sha" ] && export OPS_BOOT_SHA="$sha"
+    command claude --settings '{"ultracode":true}' --append-system-prompt "$boot" --system-prompt-snapshot on "$@"
+  elif [ "$have_settings" -eq 0 ]; then
+    command claude --settings '{"ultracode":true}' "$@"
+  elif [ "$have_sp" -eq 0 ] && [ -n "$boot" ]; then
+    [ -n "$sha" ] && export OPS_BOOT_SHA="$sha"
+    command claude --append-system-prompt "$boot" --system-prompt-snapshot on "$@"
+  else
+    command claude "$@"
+  fi
 }
-EOF
-  msg_ok "Wrote ultracode shim to $target"
+SHIM
+  } >> "$target"
+  msg_ok "Wrote ultracode + boot-surface shim to $target"
 }
 
 ensure_claude_localrc "$HOME/.zshrc.local"

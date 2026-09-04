@@ -1,0 +1,29 @@
+# VENDORED.tsv - manifest for skills-vendor.sh (the OPS skill-mount mechanism).
+#
+# OPS mounts portable technique skills rather than carrying a drifting fork of
+# each. The skill repos cloned under PROJECTS/ are the source of truth; this file
+# lists which skill dirs are mirrored into SKILLS/ and from where. Edit a vendored
+# skill at its source repo, then run `skills-vendor.sh sync` to refresh the mirror
+# here. Never hand-edit the mirrored SKILLS/<name>/ dirs; the sync overwrites them.
+#
+# Format: one row per skill, tab-separated:
+#   <name><TAB><source-dir relative to ~/OPS/PROJECTS>
+# The mirror lands at ~/OPS/SKILLS/<name>/. Lines starting with # and blank lines
+# are ignored. The drift gate is `skills-vendor.sh --check`, wired into
+# verify-ops.sh (DRIFT = FAIL, MISSING = WARN).
+#
+# To mount the default source, clone it under PROJECTS/ first:
+#   git clone https://github.com/Exploitacious/agent-skills.git \
+#     ~/OPS/PROJECTS/Exploitacious/agent-skills
+# then run: skills-vendor.sh sync
+#
+# This ships only the PUBLIC default source (Exploitacious/agent-skills, MIT).
+# Add rows for an org or private source of your own below, one per skill.
+
+# Source repo: Exploitacious/agent-skills (public, MIT) — the portable set.
+delegation-sizing	Exploitacious/agent-skills/skills/delegation-sizing
+briefing-subagents	Exploitacious/agent-skills/skills/briefing-subagents
+worktree-isolation	Exploitacious/agent-skills/skills/worktree-isolation
+verifying-delegated-output	Exploitacious/agent-skills/skills/verifying-delegated-output
+dynamic-workflows	Exploitacious/agent-skills/skills/dynamic-workflows
+meta-skill-creator	Exploitacious/agent-skills/skills/meta-skill-creator

@@ -232,6 +232,206 @@ check_opus5_ban() {
   fi
 }
 
+# 16. Boot shim (native-first boot). The claude() launch shim in deploy.sh must
+# ride the foreman charter + identity boot-digest in the CACHED system prompt via
+# --append-system-prompt, pinned with --system-prompt-snapshot on so the standing
+# orders LAND every launch and survive resume/compact verbatim without a
+# SessionStart hook re-forcing the reads. A missing source or flag silently
+# degrades the boot surface, so this FAILs. OPS ships no operating-model body, so
+# the append is two files, charter + digest.
+check_boot_shim() {
+  local dep="$OPS/.claude-config/deploy.sh" miss=""
+  [ -f "$dep" ] || { fail "deploy.sh missing — cannot verify boot shim"; return; }
+  grep -qF -- '--append-system-prompt'      "$dep" || miss="$miss --append-system-prompt"
+  grep -qF 'foreman-charter.md'             "$dep" || miss="$miss foreman-charter.md"
+  grep -qF 'boot-digest.md'                 "$dep" || miss="$miss boot-digest.md"
+  grep -qF -- '--system-prompt-snapshot on' "$dep" || miss="$miss --system-prompt-snapshot-on"
+  [ -z "$miss" ] \
+    && ok "deploy.sh claude() shim rides charter+digest in the cached system prompt" \
+    || fail "deploy.sh boot shim missing:$miss"
+}
+
+# 17. Charter hook retired (double-inject guard). The charter rides the launch
+# shim (check 16), so foreman-charter.sh must be unregistered from the live
+# settings.json SessionStart block; leaving it there re-emits the whole charter
+# through truncated hook stdout AND duplicates what the system prompt carries.
+# settings.json is Stage-1-owned, so this WARNs (remove it) until the forker
+# does, never FAILs.
+check_charter_hook_retired() {
+  local settings="$HOME/.claude/settings.json" hit=""
+  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
+  [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.hooks.SessionStart[].hooks[].command' "$settings" 2>/dev/null \
+      | grep -q 'foreman-charter\.sh' && hit=1
+  else
+    grep -q 'foreman-charter\.sh' "$settings" 2>/dev/null && hit=1
+  fi
+  [ -z "$hit" ] \
+    && ok "foreman-charter.sh unregistered from SessionStart (charter rides the launch shim)" \
+    || warn "remove foreman-charter.sh from the SessionStart matcher (charter rides the launch shim); see DEPLOYMENT.md"
+}
+
+# 18. Source-scoped SessionStart matchers. A resume/compact must stop re-paying
+# the full boot: the split adds a "resume|compact" matcher whose command list
+# excludes the heavy startup-only hooks (memory-index, session-work-init). Tests
+# the semantics — collects the command list of every group whose matcher fires on
+# source=compact and confirms none reference a heavy hook, and that a dedicated
+# resume/compact matcher exists. Config-dependent: WARNs until the split lands.
+check_sessionstart_matchers() {
+  local settings="$HOME/.claude/settings.json"
+  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
+  [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
+  command -v jq >/dev/null 2>&1 || { warn "jq unavailable — cannot check SessionStart matchers"; return; }
+  local heavy='memory-index\.sh|session-work-init\.sh'
+  local n i matcher cmds m dedicated=0 heavy_on_compact=0
+  n="$(jq '.hooks.SessionStart | length' "$settings" 2>/dev/null)" || n=""
+  [ -n "$n" ] || { warn "could not parse SessionStart from settings.json"; return; }
+  for ((i=0; i<n; i++)); do
+    matcher="$(jq -r ".hooks.SessionStart[$i].matcher // \"\"" "$settings" 2>/dev/null)"
+    cmds="$(jq -r ".hooks.SessionStart[$i].hooks[].command" "$settings" 2>/dev/null || true)"
+    m=0
+    case "$matcher" in
+      ""|"*"|".*") m=1 ;;                                       # match-all tokens fire on every source
+      *) printf 'compact' | grep -qE "^($matcher)$" 2>/dev/null && m=1 ;;
+    esac
+    [ "$m" = 1 ] || continue
+    case "$matcher" in *compact*|*resume*) dedicated=1 ;; esac
+    printf '%s\n' "$cmds" | grep -qE "$heavy" && heavy_on_compact=1
+  done
+  if [ "$dedicated" = 1 ] && [ "$heavy_on_compact" = 0 ]; then
+    ok "SessionStart resume|compact matcher excludes the heavy startup hooks"
+  else
+    warn "split SessionStart into source-scoped matchers (see DEPLOYMENT.md); heavy startup hooks still run on resume/compact"
+  fi
+}
+
+# 19. Byte budget on SessionStart hook stdout. Hook stdout above ~8192B is
+# truncated by the platform to a ~2KB preview, so a large file printed on
+# SessionStart silently loses most of its content — fail-loud-beats-silent-loss.
+# For every script the live settings.json registers on SessionStart, statically
+# resolve its cat/awk file targets under CONTEXT/ or SKILLS/ (direct literals plus
+# files behind a printed $VAR) and flag any over 8192B. foreman-charter.sh is
+# removed from SessionStart by the matcher split, so an oversized target reached
+# only through it WARNs (do the split) instead of FAILing.
+check_hook_byte_budget() {
+  local settings="$HOME/.claude/settings.json"
+  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
+  [ -f "$settings" ] || { warn "settings.json not found — cannot check hook byte budget"; return; }
+  command -v jq >/dev/null 2>&1 || { warn "jq unavailable — cannot check hook byte budget"; return; }
+  local patch_removes=" foreman-charter.sh "
+  local cmds scripts s base is_removed rel target sz fail_hits="" warn_hits=""
+  local catlines directlit vars v assignlit litset
+  cmds="$(jq -r '.hooks.SessionStart[].hooks[].command' "$settings" 2>/dev/null)" \
+    || { warn "could not parse SessionStart hooks from settings.json"; return; }
+  # Resolve each registered hook script path ($H -> $OPS; absolute paths kept).
+  scripts="$(printf '%s\n' "$cmds" \
+    | grep -oE '(\$H/[A-Za-z0-9_./-]+|/[A-Za-z0-9_./-]+\.sh)' \
+    | sed "s#^\\\$H#$OPS#" | sort -u)"
+  for s in $scripts; do
+    [ -f "$s" ] || continue
+    base="$(basename "$s")"
+    case "$patch_removes" in *" $base "*) is_removed=1 ;; *) is_removed=0 ;; esac
+    catlines="$(grep -nE '(^|[^A-Za-z])(cat|awk)([^A-Za-z]|$)' "$s" 2>/dev/null || true)"
+    [ -n "$catlines" ] || continue
+    directlit="$(printf '%s\n' "$catlines" | grep -oE '(CONTEXT|SKILLS)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+' || true)"
+    vars="$(printf '%s\n' "$catlines" | grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' | tr -d '${}' | sort -u || true)"
+    assignlit=""
+    for v in $vars; do
+      assignlit="$assignlit
+$(grep -E "^[[:space:]]*$v=" "$s" 2>/dev/null | grep -oE '(CONTEXT|SKILLS)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+' || true)"
+    done
+    litset="$(printf '%s\n%s\n' "$directlit" "$assignlit" | grep -vE '^[[:space:]]*$' | grep -v '\*' | sort -u || true)"
+    for rel in $litset; do
+      target="$OPS/$rel"
+      [ -f "$target" ] || continue
+      sz="$(wc -c < "$target" 2>/dev/null | tr -d ' ')"
+      [ "${sz:-0}" -gt 8192 ] || continue
+      if [ "$is_removed" = 1 ]; then
+        warn_hits="$warn_hits $rel(${sz}B via $base)"
+      else
+        fail_hits="$fail_hits $rel(${sz}B via $base)"
+      fi
+    done
+  done
+  if [ -n "$fail_hits" ]; then
+    fail "SessionStart hook stdout over 8192B budget (truncated to ~2KB preview):$fail_hits"
+  elif [ -n "$warn_hits" ]; then
+    warn "oversized SessionStart payload still on stdout (do the matcher split):$warn_hits"
+  else
+    ok "SessionStart hook payloads within the 8192B stdout budget"
+  fi
+}
+
+# 20. Anxiety-vocabulary gate. context-watch.sh is agent-facing: its readout and
+# mid-turn/stop nags speak to the model every turn. Context is abundant (P13), so
+# those strings must not carry scarcity/pressure vocabulary that reads as "hurry
+# up and wrap". The bare informational number stays (ground truth); the pressure
+# words go. Comment lines are skipped; the file's code uses none of these words as
+# identifiers, so a surviving non-comment hit is always inside an emitted string.
+check_anxiety_vocab() {
+  local f="$OPS/.claude-config/hooks/context-watch.sh" hits
+  [ -f "$f" ] || { warn "context-watch.sh missing — cannot check anxiety vocab"; return; }
+  hits="$(grep -nvE '^[[:space:]]*#' "$f" 2>/dev/null \
+    | grep -inE 'remain|stranded|impossible|mandatory|runway|hurry|budget|afford|spend|cost|deplet|running out|scarce' || true)"
+  [ -z "$hits" ] \
+    && ok "context-watch agent strings free of scarcity/pressure vocab" \
+    || fail "scarcity/pressure vocab in context-watch agent strings:"$'\n'"$hits"
+}
+
+# 21. Identity-digest canary, generalized. CONTEXT/boot-digest.md is the cold-
+# start alignment surface the boot shim appends. It ships as a slot TEMPLATE and
+# BOOTSTRAP fills it, so: missing => FAIL (the shim has nothing to append); still
+# the unfilled template on a bootstrapped copy => FAIL (identity never authored);
+# unfilled on a fresh (un-bootstrapped) copy => OK, that is the shipped state.
+# Generalized from the private harness's fixed-fact canary: a public template
+# ships zero real facts, so the canary is "is it still the template", not "does it
+# name person X".
+check_digest_canary() {
+  local dg="$OPS/CONTEXT/boot-digest.md"
+  [ -f "$dg" ] || { fail "CONTEXT/boot-digest.md missing (the identity surface the boot shim appends)"; return; }
+  if grep -q 'BOOT-DIGEST-TEMPLATE: unfilled' "$dg" 2>/dev/null; then
+    if [ -f "$OPS/CONTEXT/.bootstrapped" ]; then
+      fail "boot-digest.md is still the unfilled template on a bootstrapped copy (author it from the slot guidance, then remove the canary line)"
+    else
+      ok "boot-digest.md is the shipped template (fresh copy, not yet bootstrapped)"
+    fi
+  else
+    ok "boot-digest.md is filled (template canary removed)"
+  fi
+}
+
+# 22. Skills mirror in sync. SKILLS/<name> for a vendored row is a mirror of a
+# source skill repo under PROJECTS/; skills-vendor.sh --check is the drift gate
+# (rc 0 clean, 1 DRIFT = source edit not vendored, 2 MISSING = source repo not
+# cloned). DRIFT FAILs; MISSING WARNs (a public template ships zero project repos,
+# so the source not being cloned is the normal fresh-fork state).
+check_skills_vendored() {
+  local sv="$OPS/.claude-config/bin/skills-vendor.sh" out rc
+  [ -x "$sv" ] || { warn "skills-vendor.sh missing/not executable"; return; }
+  out="$("$sv" --check 2>&1)"; rc=$?
+  case "$rc" in
+    0) ok "skills mirror in sync with source repos" ;;
+    1) fail "skills mirror DRIFT (source edit not vendored — run skills-vendor.sh sync):"$'\n'"$(printf '%s' "$out" | grep '^DRIFT' | head -10)" ;;
+    2) warn "skills mirror source repo(s) not cloned (run skills-vendor.sh sync after cloning them):"$'\n'"$(printf '%s' "$out" | grep '^MISSING' | head -10)" ;;
+    *) warn "skills-vendor.sh --check errored (rc=$rc):"$'\n'"$(printf '%s' "$out" | head -5)" ;;
+  esac
+}
+
+# 23. Digest identity-exclusion. boot-digest.md is the Operator's identity
+# surface; a template refresh via harness-update must NEVER clobber a filled copy,
+# so harness-update-scan.sh's is_excluded() must name CONTEXT/boot-digest.md
+# (matched by a trailing | or ) so this greps the case pattern, not a comment or
+# the summary echo). Missing => the filled digest could be overwritten on a sync,
+# so FAIL.
+check_digest_exclusion() {
+  local scan="$OPS/.claude-config/bin/harness-update-scan.sh"
+  [ -f "$scan" ] || { fail "harness-update-scan.sh missing"; return; }
+  grep -qE 'CONTEXT/boot-digest\.md[|)]' "$scan" \
+    && ok "harness-update-scan is_excluded() lists CONTEXT/boot-digest.md (identity guard)" \
+    || fail "harness-update-scan.sh is_excluded() does not list CONTEXT/boot-digest.md (a template sync could clobber the filled digest)"
+}
+
 main() {
   check_root
   check_readme_tree
@@ -248,6 +448,14 @@ main() {
   check_ship_gate
   check_model_policy
   check_opus5_ban
+  check_boot_shim
+  check_charter_hook_retired
+  check_sessionstart_matchers
+  check_hook_byte_budget
+  check_anxiety_vocab
+  check_digest_canary
+  check_skills_vendored
+  check_digest_exclusion
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
 }
