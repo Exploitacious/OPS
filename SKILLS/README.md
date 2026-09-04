@@ -33,7 +33,9 @@ The `SKILL.md` and the `0X_*.md` knowledge files share content but serve differe
 
 ## Skill sources
 
-OPS mounts skill sources rather than vendoring the portable ones. A portable technique skill — delegation, skill authoring — is the same for every operator, so it lives in one shared source and every OPS copy mounts it, instead of each copy carrying its own drifting fork. The default source is [`github.com/Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills) (the delegation set plus `meta-skill-creator`); an org or private source mounts alongside it. What lives in *this* `SKILLS/` folder is the local, distribution-specific set — glue that binds to OPS's own hooks, scripts, and layout. So `meta-skill-creator` and the `agent-delegation` set are available as mounted skills (invoke them by name), just not copied in here.
+OPS mounts the portable technique skills rather than carrying its own drifting fork of each. A portable skill — delegation, skill authoring — is the same for every operator, so it lives in one shared source and every OPS copy mounts it. What lives in *this* `SKILLS/` folder directly is the local, distribution-specific set: glue that binds to OPS's own hooks, scripts, and layout, plus the thin context skills that route to `CONTEXT/`.
+
+**The mount mechanism is `.claude-config/bin/skills-vendor.sh` + `VENDORED.tsv`** (one mechanism, not two). `VENDORED.tsv` lists each portable skill and its source dir under `PROJECTS/`; `skills-vendor.sh sync` mirrors those source dirs into `SKILLS/<name>/`, and `skills-vendor.sh --check` is the drift gate `verify-ops.sh` runs (DRIFT = a source edit not mirrored = FAIL; MISSING = source repo not cloned = WARN). The default source is [`github.com/Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills) (the delegation set plus `meta-skill-creator`); add rows in `VENDORED.tsv` for an org or private source of your own. To mount: clone the source under `PROJECTS/` (the header of `VENDORED.tsv` shows the exact clone), then run `skills-vendor.sh sync`. Never hand-edit a mirrored `SKILLS/<name>/` dir; the sync overwrites it. On a fresh fork the source repos are not cloned, so the mounted skills appear only after you sync.
 
 ## How to add a new entry
 
@@ -81,6 +83,14 @@ This table lists the local, OPS-specific entries. Portable technique skills (`me
 | `remote-session` | yes | no | Claude Code only — spins up always-on `claude --remote-control` sessions in tmux on request; sessions persist + resume across reboots via `.claude-config/remote-sessions/`. |
 | `session-close` | yes | no | Claude Code only — permanent end-to-end session close: full closeout synthesis, then archive/deregister from the boot registry and tear down its own tmux. The terminal counterpart to `pre-compact-synthesis` (pause) and `session-handoff` (move). |
 | `harness-update` | yes | no | Claude Code only — safe template-sync of a private OPS copy from the public upstream (no shared git history); the scan classifies files NEW/UPDATE/CONFLICT/IDENTICAL, hard-excludes identity/memory/handoff surfaces, and never auto-applies a CONFLICT. See [[harness-update/SKILL.md]]. |
+| `operator-voice` | yes | no | Thin context skill — routes to the `CONTEXT/voice.md` slot (brand-voice + about-me) when writing in the operator's voice; degrades to plain professional prose when unset. |
+| `project-kata` | yes | no | Thin context skill — routes to `CONTEXT/project-kata.md` when scaffolding or restructuring a repo. |
+| `projects-map` | yes | no | Thin context skill — routes to `PROJECTS/projects-map.md` for repo routing and portfolio layout. |
+| `machines` | yes | no | Thin context skill — routes to the `CONTEXT/machines.md` slot for host topology; degrades (OPS ships no machines.md) to asking or inferring. |
+| `harness-deploy` | yes | no | Thin context skill — routes to `DEPLOYMENT.md` when changing Stage 1 / Stage 2 install. |
+| `harness-readme` | yes | no | Thin context skill — routes to `README.md` for "what exists / where does X live". |
+| `fleet-doctrine` | yes | no | Thin context skill — routes to `CONTEXT/fleet-doctrine.md` on ACTIVATE only. |
+| `design-method` | yes | no | Design method (UI, web, landing pages, email templates) with an optional brand layer read from `design/brand.md`; free-design until the brand file is filled. |
 
 Domain-partner skills (a vendor-docs assistant, a trading co-strategist, anything
 tied to your own stack or business) aren't shipped here — they're yours to

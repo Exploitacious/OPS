@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# foreman-charter.sh — SessionStart hook.
-# Injects the Foreman Charter into every Claude Code session so the
-# foreman operating posture is read in automatically — no "promotion"
-# needed. Single source of truth is CONTEXT/foreman-charter.md; this
-# hook just surfaces it. Registered first in settings.json SessionStart
-# so it lands before the fleet re-orient.
+# foreman-charter.sh — RETIRED for Claude Code.
 #
-# Why a hook and not just CLAUDE.md prose: SessionStart hook stdout is
-# injected as context every launch, including resumes and post-compact,
-# where the model may not re-read CONTEXT/ on its own. Loud > buried.
+# The charter now rides the claude() launch shim's --append-system-prompt
+# (.claude-config/deploy.sh): it lands in the CACHED system prompt whole and
+# survives resume/compact verbatim, which a SessionStart hook's truncated stdout
+# could not guarantee. So this hook is no longer registered on the Claude Code
+# SessionStart matcher (remove the entry from your Stage-1 settings.json; see
+# DEPLOYMENT.md "Hooks and the drift gate"). Leaving it registered would
+# re-emit the whole charter through hook stdout AND duplicate what the system
+# prompt already carries.
+#
+# Left in place as an adapter seam: a fork that drives a NON-Claude-Code agent
+# (e.g. a Codex adapter) from the same charter can still register it on that
+# agent's session start. A Claude-Code-only fork can delete it. If run, it
+# still surfaces the single source of truth, CONTEXT/foreman-charter.md.
 
 set -euo pipefail
 

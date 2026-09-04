@@ -36,6 +36,67 @@ run() { # $1=mode $2=tokens $3=sid [$4=stop_hook_active]
     "$3" "$tp" "${4:-false}" | env -u TMUX bash "$DIR/context-watch.sh" "$1"
 }
 
+# Build a transcript that carries one boundary signal (task|push|merge|workflow|
+# gap|branch) or none, plus a final usage entry of $2 tokens. Mirrors the real
+# entry shapes: tool_use blocks in assistant messages, tool_result blocks in user
+# messages, timestamp + branch on entries.
+mk_boundary() { # $1=path $2=tokens $3=signal
+  python3 - "$1" "$2" "$3" <<'PYEOF'
+import json, sys
+path, tokens, signal = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+def usage(n): return {"input_tokens": n, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+rows = []
+if signal == "task":
+    # Trailing new prompt = the UserPromptSubmit moment; the closed task is the
+    # turn BEFORE it, so this also exercises the last-turn lookback.
+    rows.append({"type": "user", "message": {"role": "user", "content": "go"}})
+    rows.append({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "tool_use", "name": "TaskUpdate", "id": "t1",
+                     "input": {"tasks": [{"id": "1", "status": "completed"}]}}],
+        "usage": usage(tokens)}})
+    rows.append({"type": "user", "message": {"role": "user", "content": "next"}})
+elif signal in ("push", "merge"):
+    cmd = "git push origin master" if signal == "push" else "gh pr merge 5 --squash --delete-branch"
+    rows.append({"type": "user", "message": {"role": "user", "content": "go"}})
+    rows.append({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "tool_use", "name": "Bash", "id": "b1", "input": {"command": cmd}}]}})
+    rows.append({"type": "user", "message": {"role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "b1", "is_error": False, "content": "ok"}]}})
+    rows.append({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "text", "text": "done"}], "usage": usage(tokens)}})
+elif signal == "workflow":
+    rows.append({"type": "user", "message": {"role": "user", "content": "go"}})
+    rows.append({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "tool_use", "name": "Workflow", "id": "w1", "input": {}}],
+        "usage": usage(tokens)}})
+    rows.append({"type": "user", "message": {"role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "w1", "is_error": False, "content": "result"}]}})
+elif signal == "gap":
+    rows.append({"type": "assistant", "timestamp": "2026-09-04T10:00:00.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "work"}], "usage": usage(tokens)}})
+    rows.append({"type": "user", "timestamp": "2026-09-04T13:30:00.000Z",
+        "message": {"role": "user", "content": "back"}})
+elif signal == "branch":
+    rows.append({"type": "assistant", "gitBranch": "master",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "work"}]}})
+    rows.append({"type": "assistant", "gitBranch": "feature/x",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "more"}], "usage": usage(tokens)}})
+else:  # none
+    rows.append({"message": {"usage": usage(tokens)}})
+with open(path, "w") as f:
+    f.write("junk not json\n")
+    for r in rows:
+        f.write(json.dumps(r) + "\n")
+PYEOF
+}
+
+run_b() { # $1=tokens $2=sid $3=signal  (always readout mode; no tmux)
+  local tp="$WORK/b-$3-$2.jsonl"
+  mk_boundary "$tp" "$1" "$3"
+  printf '{"session_id":"%s","transcript_path":"%s"}' "$2" "$tp" \
+    | env -u TMUX bash "$DIR/context-watch.sh" readout
+}
+
 chk_state() { # $1=label $2=sid $3=expected-literal-state-contents
   local got; got="$(cat "$CC_CYCLE_RUNDIR/nag-$2" 2>/dev/null || echo '<missing>')"
   if [ "$got" = "$3" ]; then printf '  PASS  %s\n' "$1"
@@ -103,6 +164,72 @@ chk "old state still re-fires on growth"   '] NOTICE'  "$(run stop 730000 g)"
 # — without the reset, NOTICE..URGENT stay suppressed for the whole session.
 echo "900000 3 900000" > "$CC_CYCLE_RUNDIR/nag-r1"
 chk "context drop resets nag epoch"        '] NOTICE'  "$(run stop 700000 r1)"
+
+# --- readout-mode helpers ---------------------------------------------------
+# chk() asserts the output IS valid JSON (every nag payload is). A readout is the
+# opposite: plain text that must NEVER be a block payload.
+chk_plain() { # $1=label $2=expected-substr $3=actual-output
+  case "$3" in
+    *"$2"*)
+      case "$3" in
+        *'"decision"'*|*'"block"'*)
+          printf '  FAIL  %s (readout emitted a BLOCK payload)\n' "$1"; fails=$((fails + 1)) ;;
+        *) printf '  PASS  %s\n' "$1" ;;
+      esac ;;
+    *) printf '  FAIL  %s (wanted "%s", got: %.120s)\n' "$1" "$2" "${3:-<silence>}"; fails=$((fails + 1)) ;;
+  esac
+}
+
+chk_no_nag_state() { # $1=label $2=sid — readout must never touch ladder state
+  if [ -e "$CC_CYCLE_RUNDIR/nag-$2" ]; then
+    printf '  FAIL  %s (readout wrote nag-%s, corrupting the Stop ladder throttle)\n' "$1" "$2"
+    fails=$((fails + 1))
+  else printf '  PASS  %s\n' "$1"; fi
+}
+
+chk_no_block() { # $1=label $2=actual-output: a readout is never a block payload
+  case "$2" in
+    *'"decision"'*|*'"block"'*) printf '  FAIL  %s (readout emitted a block payload)\n' "$1"; fails=$((fails + 1)) ;;
+    *) printf '  PASS  %s\n' "$1" ;;
+  esac
+}
+
+# --- readout mode ----------------------------------------------------------
+# The readout branch lives before the ladder logic and must never block or write
+# nag state. Below the window ladder it is boundary-aware, so these assert the
+# three rest-stop texts (informational / natural break / long-session backstop).
+chk_plain "readout fires below the ladder"   'Ample headroom'  "$(run readout 200000 ro1)"
+chk       "readout growth-throttled (<100K)" EMPTY             "$(run readout 250000 ro1)"
+chk_plain "readout re-fires after +100K"     '[context]'       "$(run readout 360000 ro1)"
+chk_no_nag_state "readout never writes nag state" ro1
+
+# Above the window ladder, no boundary: the long-session backstop, never a block.
+chk_plain "readout at 70% -> long session, no block"  'has run long'  "$(run readout 700000 ro2)"
+chk_no_nag_state "readout at 70% leaves ladder state alone" ro2
+chk_plain "readout at 95% -> long session, no block"  'has run long'  "$(run readout 950000 ro3)"
+chk_no_nag_state "readout at 95% leaves ladder state alone" ro3
+# Above the ladder it must not claim headroom that is gone.
+case "$(run readout 960000 ro4)" in
+  *'Ample headroom'*) printf '  FAIL  readout above ladder must not claim headroom\n'; fails=$((fails + 1)) ;;
+  *) printf '  PASS  readout above ladder does not claim headroom\n' ;;
+esac
+
+# Boundary detection: each of the five signals (plus the gh-pr-merge form of
+# signal b) must, with a heavy-enough turn (>=250K), read out as a break point.
+chk_plain "boundary a: task completed -> break point"   'Natural break point' "$(run_b 300000 bt task)"
+chk_plain "boundary b: git push landed -> break point"  'Natural break point' "$(run_b 300000 bp push)"
+chk_plain "boundary b: gh pr merge landed -> break point" 'Natural break point' "$(run_b 300000 bm merge)"
+chk_plain "boundary c: workflow returned -> break point" 'Natural break point' "$(run_b 300000 bw workflow)"
+chk_plain "boundary d: >2h idle gap -> break point"     'Natural break point' "$(run_b 300000 bg gap)"
+chk_plain "boundary e: branch switched -> break point"  'Natural break point' "$(run_b 300000 bb branch)"
+
+# Per-turn token tiers with NO boundary present.
+chk_plain "180K no boundary -> informational"           'Ample headroom'     "$(run_b 180000 tk1 none)"
+chk_plain "300K no boundary -> informational"           'Ample headroom'     "$(run_b 300000 tk2 none)"
+chk_plain "450K no boundary -> long session backstop"   'has run long'       "$(run_b 450000 tk3 none)"
+
+# A boundary readout, even above the ladder, is annotation and NEVER a block.
+chk_no_block "readout at a boundary emits no block payload" "$(run_b 900000 nb task)"
 
 if [ "$fails" -eq 0 ]; then
   echo "context-watch-selftest: LADDER BEHAVES"

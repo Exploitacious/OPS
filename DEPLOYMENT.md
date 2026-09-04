@@ -111,11 +111,21 @@ In order:
    shared state, so the wrapper holds a `flock` on `~/.claude/.instance.lock`.
    Root's rcs are wired only if passwordless sudo is available.
 
-4. **Wire the always-on ultracode shim** (untracked `~/.<shell>rc.local` seam).
-   A `claude()` shell function that launches interactive Claude Code with
-   `--settings '{"ultracode":true}'` unless the caller already passed
-   `--settings`. Kept out of the tracked repo and out of the flock wrapper on
-   purpose — see the comment in `deploy.sh` for why. Idempotent via a marker.
+4. **Wire the always-on ultracode + boot-surface shim** (untracked
+   `~/.<shell>rc.local` seam). A `claude()` shell function that (a) launches
+   interactive Claude Code with `--settings '{"ultracode":true}'` unless the
+   caller already passed `--settings`, and (b) rides the boot surface — the whole
+   `CONTEXT/foreman-charter.md` plus `CONTEXT/boot-digest.md` — in the cached
+   system prompt via `--append-system-prompt`, pinned with
+   `--system-prompt-snapshot on` so the standing orders land every launch and
+   survive resume/compact verbatim without a SessionStart hook. It exports
+   `OPS_BOOT_SHA` (first 8 hex of the appended string's sha1) so the session
+   briefing's `Boot:` line shows the booted version. Fail-open: a missing charter
+   adds no boot flag and the launch still works. Kept out of the tracked repo and
+   out of the flock wrapper on purpose — see the comment in `deploy.sh` for why.
+   Idempotent via a marker; a re-deploy self-heals a legacy ultracode-only block
+   into the upgraded shim. This replaces the retired `foreman-charter.sh`
+   SessionStart injection (see "Boot surface" below).
 
 5. **Initialize Claude Code auto-memory git-sync.** Invokes
    `WORKFORCE/bin/ac-memory-init --auto-commit`, which walks Claude's encoded
@@ -185,15 +195,19 @@ Two pieces of OPS machinery ship in the repo but are **not** wired by the Stage
 2 deploy scripts — they activate through Claude Code's config and systemd
 directly.
 
-- **Hooks** — the scripts in `.claude-config/hooks/` (SessionStart briefing +
-  foreman-charter injection, pre-compact snapshot, post-compact resume,
-  handoff-check, memory-index, the context-watch escalation ladder
-  (Stop + PostToolUse), and the secrets/git guards) are registered in
+- **Hooks** — the scripts in `.claude-config/hooks/` (SessionStart briefing,
+  pre-compact snapshot, post-compact resume, handoff-check, memory-index, the
+  context-watch escalation ladder (Stop + PostToolUse) plus its calm boundary-
+  aware readout (UserPromptSubmit), and the secrets/git guards) are registered in
   `settings.json`, which is a **Level 1 file owned by Stage 1**
   (linuxploitacious). Its hook entries point at these scripts by path, so the
   hooks come alive as soon as Stage 1 has deployed `settings.json` and this repo
   is at `~/OPS`. Editing the hook scripts here takes effect immediately; adding
   a *new* hook means registering it in the Stage 1 `settings.json`.
+  `foreman-charter.sh` is NOT in this set any more: the charter rides the launch
+  shim's `--append-system-prompt` (see "Boot surface" below), so it must be
+  removed from the SessionStart matcher — leaving it registered re-emits the
+  whole charter through truncated hook stdout and duplicates the system prompt.
 
 - **systemd `ops-*` timers** — `.claude-config/systemd/` ships two user units:
   `ops-verify.timer` (nightly drift gate that runs `.claude-config/bin/verify-ops.sh`)
@@ -207,6 +221,46 @@ directly.
   systemctl --user daemon-reload
   systemctl --user enable --now ops-verify.timer ops-memory-gc.timer
   ```
+
+## Boot surface (charter + digest ride the system prompt)
+
+The foreman charter and the identity boot-digest ride the **cached system
+prompt**, not a SessionStart hook. Stage 2's launch shim (step 4 above) does the
+appending automatically, so on a linuxploitacious deploy you get it for free. Two
+`settings.json` changes complete the picture — and because `settings.json` is a
+**Level 1 file owned by Stage 1**, OPS ships no template to patch; make these in
+your own Stage-1 `settings.json` (`~/linuxploitacious/claude/.claude/settings.json`,
+symlinked into every profile). `verify-ops.sh` WARNs until they land.
+
+1. **Remove `foreman-charter.sh` from SessionStart.** The charter now rides the
+   launch shim, so drop its command entry from the SessionStart hook list. Left
+   in, it re-emits the whole charter through truncated hook stdout and duplicates
+   what the system prompt already carries. (`foreman-charter.sh` itself stays in
+   the repo as an adapter seam for a non-Claude-Code agent; a Claude-Code-only
+   fork can delete it.)
+
+2. **Split SessionStart into source-scoped matchers** so a resume/compact stops
+   re-paying the full boot. Replace the single `".*"` SessionStart group with
+   two: a `"startup|clear"` group that runs the full remaining set, and a
+   `"resume|compact"` group that runs only the light continuity/orientation hooks
+   (post-compact-resume, handoff-check, session-briefing, remote-session-register,
+   plus `WORKFORCE/bin/ac-reorient` if you run the fleet). Claude Code matches the
+   SessionStart matcher against the `source` field. If a build is ever found NOT
+   to filter by source, add an in-hook `source` early-exit to the heavy
+   startup-only hooks (`memory-index.sh`, `session-work-init.sh`) — the pattern
+   `post-compact-resume.sh` already uses.
+
+3. **Register the context-watch readout on UserPromptSubmit.** Add a
+   UserPromptSubmit hook (matcher `.*`) that runs
+   `.claude-config/hooks/context-watch.sh readout`. This is the calm,
+   boundary-aware one-line context annotation (never a block); the Stop +
+   PostToolUse registrations for the same script are unchanged.
+
+`verify-ops.sh` checks all of this: the shim carries both boot flags
+(`check_boot_shim`, FAIL), `foreman-charter.sh` is unregistered
+(`check_charter_hook_retired`, WARN), the resume/compact matcher excludes the
+heavy hooks (`check_sessionstart_matchers`, WARN), and no SessionStart payload
+exceeds the ~8KB stdout budget (`check_hook_byte_budget`).
 
 ## Deploying without linuxploitacious
 
