@@ -37,7 +37,7 @@ A. Assemble the work picture; do not ask the operator to remember it. The sessio
 
 B. Resolve each touched work area to a candidate item. Consult the repo-to-item map named in `work-tracking.md` for a hint, then confirm it is the right OPEN item. A repo is not 1:1 with an item; phase-scoped work spawns new ones. Confirm, never auto-pick. Check what is already logged today so a day captured elsewhere is not double-logged.
 
-C. Present the table and offer, one AskUserQuestion, multiSelect. Show a compact reconciliation table, then let the operator pick what to apply:
+C. Present the table and offer in one prose block; the operator can pick any combination. Show a compact reconciliation table, then let the operator pick what to apply:
 
 ```
 This session: Xh wall / Yh git-active (t0 to now)
@@ -60,7 +60,7 @@ Non-billable is still loggable: internal or overhead items take entries for trac
 
 ### 3. One decision from the Operator
 
-Ask (AskUserQuestion, two options):
+Ask in prose (two options):
 - Archive (default): the registry row moves to the archive file. It stops returning on reboot but keeps its session-id, workdir, and profile; `archive-remote-claude.sh revive <Name>` brings it back with full history.
 - Forget: deregister entirely, no archive row. The transcript still exists on disk (`claude --resume` finds it by id), but the harness stops tracking it.
 

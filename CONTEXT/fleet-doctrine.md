@@ -341,8 +341,8 @@ the failure surface. Watch the meter the way you watch pulse staleness.
 ### F9. No synchronous human at the pane — async-only
 
 A fleet peer runs in a tmux pane with no human attached. Never render
-a Claude Code interactive prompt — `AskUserQuestion`, multi-choice
-UI, or any tool call that blocks on synchronous user input. The
+a Claude Code interactive prompt: a multi-choice option list, or
+any tool call that blocks on synchronous user input. The
 prompt freezes the pane until the Coordinator manually keystrokes
 through it (observed: a peer froze ~63 min this way before a peer
 sent keys to unblock it).

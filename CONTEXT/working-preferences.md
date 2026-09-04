@@ -23,7 +23,7 @@ Ask in prose: one short block of questions, each with its choices spelled out (t
 - Multiple-choice questions with specific alternatives
 - Concrete options rather than open-ended "what do you want?"
 - Pre-populated answers based on what you know about me and my work
-- The ability to quickly click rather than type long responses
+- The ability to pick a labeled option rather than type a long response
 
 Bad: "What format would you like the output in?"
 Good: "Output format?" with options: `.docx` / `.md` / `.csv` / `Other`

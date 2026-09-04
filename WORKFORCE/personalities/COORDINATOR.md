@@ -480,8 +480,8 @@ think B?"
 ### Detecting + unblocking agents stuck on interactive prompts
 
 A failure mode observed 2026-05-12: peer agents render Claude
-Code's interactive option-list prompts (AskUserQuestion-style)
-and freeze indefinitely because no synchronous human is at their
+Code's interactive option-list prompts and freeze indefinitely
+because no synchronous human is at their
 tmux session to respond. Per
 `runtime/decisions/2026-05-12__peer-agents-no-interactive-prompts.md`
 the rule is "agents must not render interactive prompts" — but

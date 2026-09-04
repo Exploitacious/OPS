@@ -18,10 +18,10 @@ Operator-specific knobs inside `working-preferences.md` and `project-kata.md`.
 Bootstrap fills the *who* without disturbing the *how*.
 
 Run it in the harness's own idiom, because you are configuring that harness:
-- **AskUserQuestion, multiple-choice-first.** Every question is a clickable
-  form with concrete options and a pre-filled recommended default, per
-  `CONTEXT/working-preferences.md` § "How to Ask Me Questions". Typing is the
-  fallback, not the ask.
+- **Prose questions, options spelled out.** Put each question in one short
+  prose block with concrete options and a pre-filled recommended default, per
+  `CONTEXT/working-preferences.md` § "How to Ask Me Questions". Open-ended
+  typing is the fallback, not the default ask.
 - **Never ask what you can detect.** Stage 0 recon answers the stack and
   environment questions for free. Asking a user to type what `git config`
   already knows is exactly the friction this harness exists to kill.
@@ -81,7 +81,7 @@ confirm* in Stage 1, never a fact you write unverified.
 
 ## Stage 1 — Core (~15 min; makes the harness usable)
 
-Run as a small number of AskUserQuestion rounds. Lead every option list with
+Run as a small number of prose question rounds. Lead every option list with
 the recon-derived recommendation. Keep it to the decisions that actually
 change behavior — resist turning this into a form-filling marathon.
 
@@ -99,8 +99,8 @@ change behavior — resist turning this into a form-filling marathon.
 `Building / automation / integration` · `Writing & documents` ·
 `Research & analysis` · `Client or stakeholder deliverables` ·
 `Ops / infrastructure` · `Data / trading / quant` · `Other`. Their picks set
-the emphasis of `about-me.md` and which AskUserQuestion patterns in `CLAUDE.md`
-matter most.
+the emphasis of `about-me.md` and which question-asking patterns in
+`working-preferences.md` matter most.
 
 **Round C — Autonomy posture.** Explain the trade honestly, then let them
 choose:
@@ -244,8 +244,8 @@ Ground every claim in the text (P3) — quote real lines; never fabricate a
 "sample." An honest profile built from ten real emails beats an invented one.
 
 **Fallback — no corpus available.** Run a calibration exercise instead: take
-one neutral paragraph and, using AskUserQuestion, present three rewrites of it
-(terse/direct, warm/casual, formal/structured) as preview options. Have them
+one neutral paragraph and present three rewrites of it
+(terse/direct, warm/casual, formal/structured) as options in a prose block. Have them
 pick and react; iterate two or three rounds until the samples read like them.
 Record the converged samples and the stated preferences as the starter voice,
 and note in the changelog that it's preference-based pending a real corpus.
@@ -263,7 +263,7 @@ Review what the sessions revealed — the corrections they made, the defaults
 they kept overriding, the preferences that showed up in auto-memory — and
 propose a concrete set of edits to `working-preferences.md` (and
 `brand-voice.md` where voice drifted from the captured profile). Present the
-proposal as a diff-style summary via AskUserQuestion (accept / adjust / skip
+proposal as a diff-style summary in prose (accept / adjust / skip
 each item); apply what they approve. Bump the marker to `stage=3`.
 
 Stage 3 is a proposal, not an ambush — surface it when the current task allows,

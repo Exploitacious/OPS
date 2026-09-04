@@ -472,7 +472,7 @@ idled after task ship. Captain intervention triggered when a
 ### HARD RULE — no interactive prompts in your session
 
 **You MUST NOT render Claude Code's interactive prompts**
-(AskUserQuestion-style option lists, multiple-choice UI blocks,
+(interactive option lists, multiple-choice UI blocks,
 "press 1/2/3 to continue" prompts). There is no synchronous human
 at your tmux session. Rendering an interactive prompt freezes
 your session indefinitely — observed and documented in
