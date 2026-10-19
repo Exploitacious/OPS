@@ -1,6 +1,6 @@
 // Memory-prune audit workflow (Claude Code dynamic workflow / P12 Tier 3).
 // READ-ONLY: inventories + classifies every auto-memory entry, returns a
-// keep/promote/move/discard action table. Executes NOTHING — the parent
+// keep/promote/move/discard action table. Executes NOTHING: the parent
 // session presents the table for Operator sign-off, then acts (see
 // SKILL.md guardrails). Invoke via the Workflow tool.
 //
@@ -8,12 +8,12 @@
 // Defaults to the OPS workspace memory dir, derived from the environment.
 // Claude Code names each workspace's memory dir after the cwd slug (path
 // separators -> dashes), so a clone at ~/OPS produces
-// "workspace-<home-slug>-OPS" — override via args.dir if the clone lives
+// "workspace-<home-slug>-OPS", so override via args.dir if the clone lives
 // elsewhere.
 //
 // If the sandbox exposes no home variable this THROWS rather than guessing.
 // A literal home path baked in would, on any other machine or user, silently
-// point the audit at a nonexistent directory — and a read-only audit that
+// point the audit at a nonexistent directory, and a read-only audit that
 // finds nothing looks exactly like a clean pool, so the wrong answer is
 // indistinguishable from the right one. A loud failure naming args.dir is
 // strictly better than a silent empty result.
@@ -37,16 +37,19 @@ const ENV = (typeof process !== 'undefined' && process.env) || {}
 // USERPROFILE second: Windows does not set HOME, so HOME-only derivation is a
 // silent Linux-ism. Neither present -> no guess.
 const HOME = ENV.HOME || ENV.USERPROFILE || null
+// Slug rule Claude Code applies to the cwd: strip a leading separator and a
+// Windows drive colon, then turn every separator into a dash. C:\Users\me ->
+// C--Users-me ; /home/x -> home-x
 if (!HOME && !ARGS.dir) {
   throw new Error(
     'memory-prune-audit: no HOME/USERPROFILE in this sandbox and no args.dir given. ' +
-    'Pass args.dir with the absolute path to the workspace memory dir — refusing to ' +
+    'Pass args.dir with the absolute path to the workspace memory dir. Refusing to ' +
     'guess, because an audit pointed at the wrong directory returns "clean".'
   )
 }
 const OPS_ROOT = ARGS.ops || `${HOME}/OPS`
 // The pool dir name is "<machine-key>-<home-slug>-OPS", and the machine key is
-// NOT derivable here: it comes from `hostname` (see WORKFORCE/bin/ac-memory-init),
+// NOT derivable here: it comes from `hostname` (see the memory-init tool),
 // which this sandbox cannot run. Hardcoding "workspace-" silently audits nothing
 // on every other machine, while globbing "*-<home-slug>-OPS" is worse, because
 // .claude-memory/ is a CROSS-MACHINE mirror and the glob matches several
@@ -61,7 +64,7 @@ const DIR_INSTRUCTION = DIR
     `It is the real path behind "$CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/memory" ` +
     `(encoded-cwd = the session cwd with every path separator replaced by "-"), which ` +
     `is a symlink into ${OPS_ROOT}/.claude-memory/. Resolve it with readlink -f. Do NOT ` +
-    `guess a machine-key prefix and do NOT glob — .claude-memory/ mirrors SEVERAL ` +
+    `guess a machine-key prefix and do NOT glob: .claude-memory/ mirrors SEVERAL ` +
     `machines' pools and a glob would match more than one. If you cannot resolve it, ` +
     `say so in 'dir_used' rather than picking one.`
 
@@ -74,8 +77,8 @@ const CTX = {
   type: 'object',
   properties: {
     files: { type: 'array', items: { type: 'string' } },
-    dir_used: { type: 'string', description: 'absolute path of the memory pool actually inventoried — logged so the audited directory is never assumed' },
-    canonical_index: { type: 'string', description: 'compact digest: each operating-doctrine principle (Pn + name + one-line gist), fleet-doctrine F-rules, and delegation-skill coverage — so classifiers can flag entries already captured' },
+    dir_used: { type: 'string', description: 'absolute path of the memory pool actually inventoried, logged so the audited directory is never assumed' },
+    canonical_index: { type: 'string', description: 'compact digest: each how-i-work.md principle (Pn + name + one-line gist) and delegation-skill coverage, so classifiers can flag entries already captured' },
   },
   required: ['files', 'dir_used', 'canonical_index'],
   additionalProperties: false,
@@ -84,12 +87,15 @@ const ctx = await agent(
   `Two jobs, return both.
 1. ${DIR_INSTRUCTION} List every Markdown memory ENTRY file in it (ls -1 <dir>/*.md). Return bare filenames in 'files', EXCLUDING MEMORY.md (that is the index).
 2. Read these OPS docs and produce a COMPACT 'canonical_index' digest of what is ALREADY captured in doctrine/skill, so classifiers can mark redundant memories as discard ("already in Pn"):
-   - ${OPS_ROOT}/CONTEXT/operating-doctrine.md  (every principle: Pn + name + one-line gist)
-   - ${OPS_ROOT}/CONTEXT/foreman-charter.md     (posture + "Where knowledge goes" routing)
-   - ${OPS_ROOT}/CONTEXT/fleet-doctrine.md      (named F-rules, one line each)
+   - ${OPS_ROOT}/CONTEXT/how-i-work.md  (every principle under "## Principles": Pn + name copied verbatim + one-line gist)
+   - ${OPS_ROOT}/CONTEXT/core.md        (posture + the memory-routing section)
    - list ${OPS_ROOT}/SKILLS/ entries by name (one line each)
-Keep the digest tight — principle/rule names + gists, not full text.`,
-  { label: 'context', phase: 'Context', model: 'sonnet', schema: CTX }
+Keep the digest tight: principle names + gists, not full text.`,
+  // Haiku 5.5: listing and verbatim extraction is the cheap, bounded reading that
+  // tier is for (CONTEXT/model-roles.md). The digest feeds discard calls, so the
+  // Pn and names are copied verbatim, not paraphrased. The full id is the only
+  // allowed Haiku pin; never the bare haiku alias.
+  { label: 'context', phase: 'Context', model: 'claude-haiku-5-5', schema: CTX }
 )
 const files = (ctx.files || []).filter(f => f && f !== 'MEMORY.md')
 const canonical = ctx.canonical_index || ''
@@ -107,9 +113,10 @@ Classify each entry into exactly ONE recommendation (the four homes from the pla
            (belong to no single repo).
  promote = a UNIVERSAL pattern (any project/agent) → OPS doctrine or a skill. target = the doctrine file/principle
            or skill. If ALREADY in the canonical_index below, this is 'discard' with reason "already in <Pn/rule>", NOT promote.
- move    = a reusable lesson tied to ONE project's code/vendor/infra → that project's OPS CONTEXT/projects/<project>-lessons.md
-           (synced, loaded on-demand, launch-dir-independent — the DEFAULT home for project knowledge). target = the <project>-lessons.md file.
-           (Exception: a repo with an active human team reading its own docs/ may target that repo instead — note it in target.)
+ move    = a reusable lesson tied to ONE project's code/vendor/infra. Its home is that project's own docs tree when the repo
+           has one the team reads (a docs/ directory, a GOTCHAS.md beside the code), landed by PR with a one-line pointer in
+           CONTEXT/projects/<project>-lessons.md; otherwise the lessons file itself (synced, loaded on-demand,
+           launch-dir-independent). target = the repo doc when the repo has one, else the <project>-lessons.md file.
  discard = stale / superseded / RESOLVED-and-closed / one-conversation-only / already-in-canonical / duplicate.
            reason MUST justify it.
 
