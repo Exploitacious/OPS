@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# harness-update-scan.sh — the mechanical half of the harness-update skill.
+# harness-update-scan.sh: the mechanical half of the harness-update skill.
 #
 # Classifies how the local (private, personalized) OPS copy differs from the
 # PUBLIC upstream template, so the judgment half (SKILLS/harness-update/SKILL.md)
 # can decide what to pull. The risk direction is one-way and that shapes every
 # rule here: this pulls PUBLIC template code INTO a PRIVATE repo, so a wrong copy
-# breaks the Operator's personalization — worse than a missed update. Therefore
+# breaks the Operator's personalization, which is worse than a missed update. Therefore
 # identity/memory/handoff surfaces are hard-excluded in BOTH directions, and the
 # CONFLICT class is never auto-applied.
 #
 # Usage:
-#   harness-update-scan.sh                 report only (default) — classify, print, touch nothing
+#   harness-update-scan.sh                 report only (default): classify, print, touch nothing
 #   harness-update-scan.sh --apply-safe     copy NEW + UPDATE classes only; never CONFLICT, never delete
 #   harness-update-scan.sh --verbose        also list IDENTICAL files (default: counted, not listed)
 #   (flags combine, any order)
@@ -21,7 +21,7 @@
 # No marker → first-sync mode: full tree compare, no baseline, so any difference
 # is a CONFLICT (UPDATE is not computable without a known last-synced version).
 #
-# Never git-commits. Never writes the marker — the skill updates last_synced to
+# Never git-commits. Never writes the marker: the skill updates last_synced to
 # the fetched sha at commit time, so a report-only run leaves zero state behind.
 #
 # Env overrides: OPS_UPSTREAM (owner/repo), OPS_UPSTREAM_BRANCH (default main),
@@ -42,11 +42,11 @@ for arg in "$@"; do
     --apply-safe) APPLY=1 ;;
     --verbose|-v)  VERBOSE=1 ;;
     "") ;;
-    *) echo "ERR_USAGE: unknown arg '$arg' — harness-update-scan.sh [--apply-safe] [--verbose]" >&2; exit 2 ;;
+    *) echo "ERR_USAGE: unknown arg '$arg'; usage: harness-update-scan.sh [--apply-safe] [--verbose]" >&2; exit 2 ;;
   esac
 done
 
-# The scan must run inside the OPS working tree — it compares the tree, not HEAD,
+# The scan must run inside the OPS working tree: it compares the tree, not HEAD,
 # so the Operator's uncommitted personalization is part of the input.
 OPS_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "ERR_NOREPO: not inside a git repository (run from the OPS working tree)" >&2; exit 3; }
@@ -90,7 +90,7 @@ if [ -n "$LAST_SYNCED" ]; then
   if git cat-file -e "${LAST_SYNCED}^{commit}" 2>/dev/null; then
     MODE="delta"
   else
-    echo "WARN: last_synced '$LAST_SYNCED' is not a known commit — falling back to first-sync compare" >&2
+    echo "WARN: last_synced '$LAST_SYNCED' is not a known commit; falling back to first-sync compare" >&2
   fi
 fi
 
@@ -98,9 +98,19 @@ fi
 # sync in EITHER direction and are never even named in the report (naming a
 # private file is itself a boundary crossing). The category list is printed in the
 # header so the Operator sees where the boundary sits.
+#
+# Current names first: the identity templates BOOTSTRAP fills (USER.md, voice.md,
+# standing-orders.md), the context slots it fills with the Operator's own systems
+# and people (work-tracking.md, team.md, tools.md), and the marker. Then the
+# retired names, kept on purpose: the template deletes them, so without this line
+# a delta scan would list a filled, not-yet-migrated identity file as REMOVED and
+# invite its deletion before its content has moved (DEPLOYMENT.md, "Migrating to
+# the core boot"). verify-ops.sh check 23 fails if any of these names drop out.
 is_excluded() {
   case "$1" in
-    CONTEXT/about-me.md|CONTEXT/brand-voice.md|CONTEXT/working-preferences.md|CONTEXT/.bootstrapped|CONTEXT/boot-digest.md) return 0 ;;
+    CONTEXT/USER.md|CONTEXT/voice.md|CONTEXT/standing-orders.md|CONTEXT/.bootstrapped) return 0 ;;
+    CONTEXT/work-tracking.md|CONTEXT/team.md|CONTEXT/tools.md) return 0 ;;
+    CONTEXT/about-me.md|CONTEXT/brand-voice.md|CONTEXT/working-preferences.md|CONTEXT/boot-digest.md) return 0 ;;
     CONTEXT/projects/*) return 0 ;;
     .claude-memory/*|.claude-handoffs/*|NOTES/*|DELIVERABLES/*|PROJECTS/*|ARCHIVE/*) return 0 ;;
   esac
@@ -170,15 +180,16 @@ apply_safe() {
 }
 
 # --- report ---
-echo "# harness-update scan — $(date -Is)"
+echo "# harness-update scan: $(date -Is)"
 echo "# upstream: $UPSTREAM ($UP_REF @ ${UP_SHA:0:12})"
 if [ "$MODE" = delta ]; then
   echo "# mode: delta since last_synced ${LAST_SYNCED:0:12}"
 else
-  echo "# mode: first-sync (no baseline — differences classify as CONFLICT, not UPDATE)"
+  echo "# mode: first-sync (no baseline: differences classify as CONFLICT, not UPDATE)"
 fi
 echo "# hard-excluded (both directions, never listed): CONTEXT identity files"
-echo "#   (about-me, brand-voice, working-preferences, .bootstrapped, boot-digest, projects/),"
+echo "#   (USER, voice, standing-orders, work-tracking, team, tools, .bootstrapped, projects/,"
+echo "#   and the retired about-me, brand-voice, working-preferences, boot-digest),"
 echo "#   .claude-memory/ .claude-handoffs/ NOTES/ DELIVERABLES/ PROJECTS/ ARCHIVE/"
 echo "# classes: NEW=safe copy · UPDATE=fast-forward copy · CONFLICT=port by hand ·"
 echo "#   IDENTICAL=in sync · REMOVED=upstream deleted (manual call). local-only files hidden."
@@ -196,8 +207,8 @@ if [ "$APPLY" = 1 ]; then
   if [ "${#APPLY_LIST[@]}" -eq 0 ]; then
     echo "OK --apply-safe: nothing to copy (no NEW/UPDATE)"
   else
-    echo "# applying ${#APPLY_LIST[@]} safe file(s) — NEW + UPDATE only, never CONFLICT ..."
+    echo "# applying ${#APPLY_LIST[@]} safe file(s): NEW + UPDATE only, never CONFLICT ..."
     apply_safe || exit 6
   fi
-  echo "# marker NOT written, nothing committed — the skill sets last_synced=$UP_SHA at commit time"
+  echo "# marker NOT written, nothing committed; the skill sets last_synced=$UP_SHA at commit time"
 fi

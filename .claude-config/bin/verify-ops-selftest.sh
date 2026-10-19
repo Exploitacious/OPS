@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # verify-ops-selftest.sh: prove the model-policy checks of verify-ops.sh
-# (14 session pin, 15 Opus 5 ban, 15b retired ids and Haiku) and the
-# SessionStart matcher check (18) pass the shipped tree against current
-# Stage-1-shaped settings, and fail on each pin class they exist to catch.
+# (14 session pin, 15 Opus 5 ban, 15b retired ids and Haiku), the
+# SessionStart matcher check (18), and the identity-exclusion check (23) pass
+# the shipped tree against current Stage-1-shaped settings, and fail on each
+# class they exist to catch.
 #
 # Sources verify-ops.sh (its main runs only when executed) and drives single
 # checks against fixture trees under a throwaway HOME made by mktemp. It never
@@ -224,6 +225,22 @@ mkdir -p "$HOME/other-profile"
 printf '%s\n' '{}' > "$HOME/other-profile/settings.json"
 CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_retired_model_pins
 chk "active profile missing its Haiku pin -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+
+# 8. Identity exclusion (23): the shipped scan names every identity file, and
+# dropping any one of them, current or retired, FAILs.
+new_case exclusion-shipped
+mkdir -p "$OPS/.claude-config/bin"
+cp "$SRC_OPS/.claude-config/bin/harness-update-scan.sh" "$OPS/.claude-config/bin/"
+run check_identity_exclusion
+chk "shipped scan lists every identity file" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+for name in USER.md standing-orders.md .bootstrapped about-me.md; do
+  new_case exclusion-missing
+  mkdir -p "$OPS/.claude-config/bin"
+  sed "s#CONTEXT/$name|##; s#|CONTEXT/$name)#)#" "$SRC_OPS/.claude-config/bin/harness-update-scan.sh" \
+    > "$OPS/.claude-config/bin/harness-update-scan.sh"
+  run check_identity_exclusion
+  chk "scan without CONTEXT/$name -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -qF "CONTEXT/$name"; echo $?)"
+done
 
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"

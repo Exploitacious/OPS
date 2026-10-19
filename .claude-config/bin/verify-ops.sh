@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-ops.sh — the OPS drift gate. Machine-checks the conventions that used
+# verify-ops.sh: the OPS drift gate. Machine-checks the conventions that used
 # to live only in prose (conventions are lint-enforced, not documented-and-hoped:
 # a rule a machine cannot check is a rule that silently rots).
 #
@@ -27,7 +27,7 @@ warn() { WARNS=$((WARNS+1)); echo "WARN: $*"; }
 fail() { FAILS=$((FAILS+1)); echo "FAIL: $*"; }
 
 # 1. Root canonical files only (project-kata rule 1). LICENSE + BOOTSTRAP.md are
-# canonical for this public template — the repo must carry a license, and
+# canonical for this public template: the repo must carry a license, and
 # BOOTSTRAP.md is the first-launch entry point CLAUDE.md's startup gate reads.
 # GENERALIZATION-RULES.md is deliberately absent from this list: it is a build
 # marker and must fail here until it is removed (see check_ship_gate).
@@ -97,7 +97,7 @@ check_memory_indexes() {
     local sz; sz="$(wc -c < "$idx")"
     [ "$sz" -gt 24576 ] && over="$over $(basename "$(dirname "$idx")")(${sz}B)"
   done < <(find "$OPS/.claude-memory" -maxdepth 2 -name MEMORY.md 2>/dev/null)
-  [ -z "$over" ] && ok "all memory indexes under 24KB" || warn "memory index over 24KB limit (entries truncate — run /memory-prune):$over"
+  [ -z "$over" ] && ok "all memory indexes under 24KB" || warn "memory index over 24KB limit (entries truncate; run /memory-prune):$over"
 }
 
 # 7. NOTES/ root holds only the MASTER/ vault.
@@ -129,7 +129,7 @@ check_skills_index() {
 }
 
 # 10. projects-map covers every repo dir under every org cluster.
-# Iterate whatever org clusters exist rather than hardcoding names — a public
+# Iterate whatever org clusters exist rather than hardcoding names: a public
 # template ships zero repos, and each Operator invents their own cluster dirs.
 check_projects_map() {
   local missing=""
@@ -169,7 +169,7 @@ check_autonomy_settings() {
 
 # 13. Ship gate for the public template: README must exist, and the build-time
 # scrub contract must be gone. GENERALIZATION-RULES.md is the private-content
-# denylist used to extract this template from the Operator's private harness —
+# denylist used to extract this template from the Operator's private harness:
 # it names identities that must never ship, so its presence at ship time is a
 # hard FAIL.
 check_ship_gate() {
@@ -427,7 +427,7 @@ _check_haiku_pin() {
 # the append is two files, charter + digest.
 check_boot_shim() {
   local dep="$OPS/.claude-config/deploy.sh" miss=""
-  [ -f "$dep" ] || { fail "deploy.sh missing — cannot verify boot shim"; return; }
+  [ -f "$dep" ] || { fail "deploy.sh missing: cannot verify boot shim"; return; }
   grep -qF -- '--append-system-prompt'      "$dep" || miss="$miss --append-system-prompt"
   grep -qF 'foreman-charter.md'             "$dep" || miss="$miss foreman-charter.md"
   grep -qF 'boot-digest.md'                 "$dep" || miss="$miss boot-digest.md"
@@ -472,7 +472,7 @@ check_sessionstart_matchers() {
   local settings="$HOME/.claude/settings.json"
   [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
   [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
-  command -v jq >/dev/null 2>&1 || { warn "jq unavailable — cannot check SessionStart matchers"; return; }
+  command -v jq >/dev/null 2>&1 || { warn "jq unavailable: cannot check SessionStart matchers"; return; }
   local heavy='memory-index\.sh|vault-inbox-check\.sh'
   local n i matcher cmds m dedicated=0 heavy_on_compact=0
   n="$(jq '.hooks.SessionStart | length' "$settings" 2>/dev/null)" || n=""
@@ -498,7 +498,7 @@ check_sessionstart_matchers() {
 
 # 19. Byte budget on SessionStart hook stdout. Hook stdout above ~8192B is
 # truncated by the platform to a ~2KB preview, so a large file printed on
-# SessionStart silently loses most of its content — fail-loud-beats-silent-loss.
+# SessionStart silently loses most of its content (fail loud beats silent loss).
 # For every script the live settings.json registers on SessionStart, statically
 # resolve its cat/awk file targets under CONTEXT/ or SKILLS/ (direct literals plus
 # files behind a printed $VAR) and flag any over 8192B. foreman-charter.sh is
@@ -507,8 +507,8 @@ check_sessionstart_matchers() {
 check_hook_byte_budget() {
   local settings="$HOME/.claude/settings.json"
   [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
-  [ -f "$settings" ] || { warn "settings.json not found — cannot check hook byte budget"; return; }
-  command -v jq >/dev/null 2>&1 || { warn "jq unavailable — cannot check hook byte budget"; return; }
+  [ -f "$settings" ] || { warn "settings.json not found: cannot check hook byte budget"; return; }
+  command -v jq >/dev/null 2>&1 || { warn "jq unavailable: cannot check hook byte budget"; return; }
   local patch_removes=" foreman-charter.sh "
   local cmds scripts s base is_removed rel target sz fail_hits="" warn_hits=""
   local catlines directlit vars v assignlit litset
@@ -561,7 +561,7 @@ $(grep -E "^[[:space:]]*$v=" "$s" 2>/dev/null | grep -oE '(CONTEXT|SKILLS)/[A-Za
 # identifiers, so a surviving non-comment hit is always inside an emitted string.
 check_anxiety_vocab() {
   local f="$OPS/.claude-config/hooks/context-watch.sh" hits
-  [ -f "$f" ] || { warn "context-watch.sh missing — cannot check anxiety vocab"; return; }
+  [ -f "$f" ] || { warn "context-watch.sh missing: cannot check anxiety vocab"; return; }
   hits="$(grep -nvE '^[[:space:]]*#' "$f" 2>/dev/null \
     | grep -inE 'remain|stranded|impossible|mandatory|runway|hurry|budget|afford|spend|cost|deplet|running out|scarce' || true)"
   [ -z "$hits" ] \
@@ -602,24 +602,29 @@ check_skills_vendored() {
   out="$("$sv" --check 2>&1)"; rc=$?
   case "$rc" in
     0) ok "skills mirror in sync with source repos" ;;
-    1) fail "skills mirror DRIFT (source edit not vendored — run skills-vendor.sh sync):"$'\n'"$(printf '%s' "$out" | grep '^DRIFT' | head -10)" ;;
+    1) fail "skills mirror DRIFT (source edit not vendored; run skills-vendor.sh sync):"$'\n'"$(printf '%s' "$out" | grep '^DRIFT' | head -10)" ;;
     2) warn "skills mirror source repo(s) not cloned (run skills-vendor.sh sync after cloning them):"$'\n'"$(printf '%s' "$out" | grep '^MISSING' | head -10)" ;;
     *) warn "skills-vendor.sh --check errored (rc=$rc):"$'\n'"$(printf '%s' "$out" | head -5)" ;;
   esac
 }
 
-# 23. Digest identity-exclusion. boot-digest.md is the Operator's identity
-# surface; a template refresh via harness-update must NEVER clobber a filled copy,
-# so harness-update-scan.sh's is_excluded() must name CONTEXT/boot-digest.md
-# (matched by a trailing | or ) so this greps the case pattern, not a comment or
-# the summary echo). Missing => the filled digest could be overwritten on a sync,
-# so FAIL.
-check_digest_exclusion() {
-  local scan="$OPS/.claude-config/bin/harness-update-scan.sh"
+# 23. Identity exclusion. The files BOOTSTRAP fills with the Operator's identity,
+# rulings, people, and systems must never be overwritten by a template refresh,
+# and the retired names must never be listed as REMOVED before their content has
+# moved, so harness-update-scan.sh's is_excluded() must name every one of them
+# (each matched with a trailing | or ) so this greps the case pattern, not a
+# comment or the summary echo). A missing name means a sync could clobber a filled
+# file or invite deleting one that was never migrated, so FAIL.
+OPS_IDENTITY_FILES="USER.md voice.md standing-orders.md .bootstrapped work-tracking.md team.md tools.md about-me.md brand-voice.md working-preferences.md boot-digest.md"
+check_identity_exclusion() {
+  local scan="$OPS/.claude-config/bin/harness-update-scan.sh" f miss=""
   [ -f "$scan" ] || { fail "harness-update-scan.sh missing"; return; }
-  grep -qE 'CONTEXT/boot-digest\.md[|)]' "$scan" \
-    && ok "harness-update-scan is_excluded() lists CONTEXT/boot-digest.md (identity guard)" \
-    || fail "harness-update-scan.sh is_excluded() does not list CONTEXT/boot-digest.md (a template sync could clobber the filled digest)"
+  for f in $OPS_IDENTITY_FILES; do
+    grep -qE "CONTEXT/${f//./\\.}[|)]" "$scan" || miss="$miss CONTEXT/$f"
+  done
+  [ -z "$miss" ] \
+    && ok "harness-update-scan is_excluded() lists every identity file, current and retired names" \
+    || fail "harness-update-scan.sh is_excluded() does not list:$miss (a template sync could clobber a filled file, or list it as REMOVED before its content moved)"
 }
 
 main() {
@@ -646,7 +651,7 @@ main() {
   check_anxiety_vocab
   check_digest_canary
   check_skills_vendored
-  check_digest_exclusion
+  check_identity_exclusion
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
 }
