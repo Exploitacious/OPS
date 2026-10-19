@@ -73,7 +73,20 @@ deny() {
 # quoted spans first (real git flags are never quoted; commit messages and
 # echo strings are): the rm check below keeps the RAW string because rm
 # targets legitimately appear quoted.
-GITPOS='(^|[|;&][|&]?)[[:space:]]*([A-Z_]+=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?git[[:space:]]'
+#
+# rtk-awareness: rtk (a token-compressing CLI proxy some hosts register as a
+# PreToolUse rewriter) turns `git push --force` into `rtk git push --force`,
+# and an agent may type the rtk form itself. Every guard below must reach the
+# same verdict either way, so RTKPRE lets an rtk invocation stand at any
+# command position the guard already accepts: bare or absolute-path rtk, its
+# own options, and the argv form of its command-running subcommands (run, err,
+# summary, test, bypass, proxy). Without it `rtk git push --force` and
+# `rtk git branch -D x` passed every check here. The push gate further down
+# parses rtk itself, including the -c/--shell string forms. (The rtk string
+# forms carry their command in quotes, which the git checks strip like any
+# quoted span, the same known limit as `bash -c '<git command>'`.)
+RTKPRE='(([^[:space:]|;&]*/)?rtk[[:space:]]+(-[^[:space:]]*[[:space:]]+)*((run|err|summary|test|bypass|proxy)[[:space:]]+(-[^[:space:]]*[[:space:]]+)*)?)?'
+GITPOS='(^|[|;&][|&]?)[[:space:]]*([A-Z_]+=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?'"$RTKPRE"'git[[:space:]]'
 CMD_RAW="$CMD"
 CMD="$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g')"
 
@@ -97,7 +110,7 @@ fi
 # Protected-root rm: the home prefix may be $HOME, ~, a Linux /home/<user>, or
 # a Git Bash /<drive>/Users/<user> form: Windows sessions must not slip past
 # a pattern that only knows /home.
-if printf '%s' "$CMD_RAW" | grep -qE '(^|[|;&][[:space:]]*)rm[[:space:]]+(-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+)+("?\$HOME"?|~|/home/[a-z]+|/[a-zA-Z]/[Uu]sers/[^/]+)/?(OPS|linuxploitacious|\.claude)?("|/)?([[:space:]]|$)'; then
+if printf '%s' "$CMD_RAW" | grep -qE '(^|[|;&][[:space:]]*)'"$RTKPRE"'rm[[:space:]]+(-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]+)+("?\$HOME"?|~|/home/[a-z]+|/[a-zA-Z]/[Uu]sers/[^/]+)/?(OPS|linuxploitacious|\.claude)?("|/)?([[:space:]]|$)'; then
   deny "recursive/forced rm aimed at a protected root tree (OPS / linuxploitacious / .claude): operator-gated."
 fi
 
@@ -108,11 +121,11 @@ fi
 # `tmux -L <name> kill-server`); an env var set in an earlier Bash call does
 # NOT persist and silently retargets the default socket. Explicit -S/-L forms
 # pass; the bare form and tmux-wide pkill/killall are blocked.
-if printf '%s' "$CMD" | grep -qE '(^|[|;&][[:space:]]*)tmux[[:space:]]+((-f|-c)[[:space:]]+[^[:space:]]+[[:space:]]+)*kill-server' \
-   && ! printf '%s' "$CMD" | grep -qE '(^|[|;&][[:space:]]*)tmux[[:space:]]+[^|;&]*-(S|L)[[:space:]]*[^[:space:]]+[^|;&]*kill-server'; then
+if printf '%s' "$CMD" | grep -qE '(^|[|;&][[:space:]]*)'"$RTKPRE"'tmux[[:space:]]+((-f|-c)[[:space:]]+[^[:space:]]+[[:space:]]+)*kill-server' \
+   && ! printf '%s' "$CMD" | grep -qE '(^|[|;&][[:space:]]*)'"$RTKPRE"'tmux[[:space:]]+[^|;&]*-(S|L)[[:space:]]*[^[:space:]]+[^|;&]*kill-server'; then
   deny "bare 'tmux kill-server' kills EVERY session on the box. Target your sandbox explicitly: tmux -S <socket> kill-server."
 fi
-if printf '%s' "$CMD_RAW" | grep -qE '(^|[|;&][[:space:]]*)(pkill|killall)[[:space:]][^|;&]*tmux'; then
+if printf '%s' "$CMD_RAW" | grep -qE '(^|[|;&][[:space:]]*)'"$RTKPRE"'(pkill|killall)[[:space:]][^|;&]*tmux'; then
   deny "pkill/killall tmux kills every session on the box: kill your own server via tmux -S <socket> kill-server."
 fi
 
