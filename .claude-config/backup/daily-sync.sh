@@ -14,7 +14,8 @@
 #     (never touches uncommitted work). Pull-only: it never pushes projects.
 #   - Push gate: the backup sends the whole copy (memory, CONTEXT, notes) to
 #     origin, so it pushes only when bin/origin-private-check verifies origin
-#     private (exit 0). A public origin (a tryout clone of the public template,
+#     private: exit 0 and its own "private" verdict line (gate_proved). A public
+#     origin (a tryout clone of the public template,
 #     a copy made public by mistake, a public fork) or one it cannot verify
 #     keeps the day's commit local and logs the reason and the fix. The next
 #     run that passes the gate pushes every held commit, even on a clean day.
@@ -36,6 +37,19 @@ mkdir -p "$LOG_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# gate_proved <stderr>: exit 0 from the gate is not proof by itself: an empty
+# file, or one cut off after its function definitions (an interrupted update,
+# a full disk), also exits 0, and the backup then pushed to a public origin.
+# Only the gate's private branches print these lines, last. memory-init and
+# hooks/git-guard.sh carry the same test; keep the three in step.
+gate_proved() {
+    case "${1##*$'\n'}" in
+        "origin-private-check: private: "?*) return 0 ;;
+        "origin-private-check: private by opt-in (ops.pushVerified=true): "?*) return 0 ;;
+    esac
+    return 1
+}
+
 # push_ops <branch>: push to origin only through the push gate (see Design).
 # A skip returns 1 like a failed push: the backup did not leave the machine.
 push_ops() {
@@ -47,6 +61,10 @@ push_ops() {
     reason="$(bash "$PUSH_GATE" "$OPS_DIR" 2>&1 >/dev/null)" || rc=$?
     if [ "$rc" -ne 0 ]; then
         log "OPS: WARN push skipped, commit kept locally: $reason"
+        return 1
+    fi
+    if ! gate_proved "$reason"; then
+        log "OPS: WARN push skipped, commit kept locally: $PUSH_GATE exited 0 without its private verdict (${reason:-no output}), so it is empty or truncated; restore it from the template"
         return 1
     fi
     if git push origin "$branch" >/dev/null 2>&1; then

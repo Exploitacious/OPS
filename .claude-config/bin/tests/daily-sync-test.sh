@@ -12,6 +12,7 @@
 #   - private origin, clean tree: the held commit goes out
 #   - private origin, new changes: committed and pushed
 #   - unverifiable origin: skipped with the opt-in fix in the log
+#   - an empty or truncated gate (both exit 0) is not a verdict: nothing pushed
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/daily-sync-test.sh
 set -uo pipefail
@@ -126,5 +127,30 @@ grep -q 'no git identity: run git config --global user.name' "$LOG" || fail "the
 if grep -q -e 'backup pushed successfully' -e 'commit kept locally' "$LOG"; then fail "a backup without an identity was reported as done"; fi
 [ "$(local_head)" = "$head_before" ] && [ "$(remote_head)" = "$before" ] || fail "a commit or push happened without an identity"
 pass "no git identity: the backup fails loudly, names the fix, and pushes nothing"
+
+# --- An empty or truncated gate is not a verdict --------------------------------
+# (2026-10-19: `bash <gate>` exiting 0 counted as verified, and an empty file or
+# one cut off after its function definitions exits 0, so the backup pushed to a
+# public origin.) The truncation point is the line before the gate's main body.
+GATE_COPY="$OPS/.claude-config/bin/origin-private-check"
+body_line="$(grep -n '^if ! command -v git' "$CHECK" | head -1 | cut -d: -f1)"
+[ -n "$body_line" ] || fail "fixture: the gate's main body was not found"
+head -n "$((body_line - 1))" "$CHECK" > "$WORK/truncated-gate"
+bash -n "$WORK/truncated-gate" && bash "$WORK/truncated-gate" "$OPS" 2>/dev/null \
+  || fail "fixture: the truncated gate does not parse and exit 0, so the case is not exercised"
+push_count() { cat "$PUSH_LOG" 2>/dev/null | wc -l | tr -d ' '; }
+for kind in empty truncated; do
+    before="$(remote_head)"; pushes_before="$(push_count)"
+    if [ "$kind" = empty ]; then : > "$GATE_COPY"; else cp "$WORK/truncated-gate" "$GATE_COPY"; fi
+    printf '%s gate note\n' "$kind" > "$OPS/$kind-gate.md"
+    GH_ANSWER=false run_sync
+    grep -q 'OPS: WARN push skipped, commit kept locally: .*exited 0 without its private verdict' "$LOG" \
+      || fail "$kind gate: the skip is not logged"
+    if grep -q 'backup pushed successfully' "$LOG"; then fail "$kind gate: reported a push"; fi
+    [ "$(remote_head)" = "$before" ] && [ "$(push_count)" = "$pushes_before" ] || fail "$kind gate: pushed to a public origin"
+    git -C "$OPS" cat-file -e "HEAD:$kind-gate.md" || fail "$kind gate: the day's commit was not kept locally"
+done
+cp "$CHECK" "$GATE_COPY"
+pass "an empty or truncated gate exits 0 but is not a verdict: commit kept locally, nothing pushed"
 
 echo "ALL PASS"

@@ -163,6 +163,43 @@ printf '%s\n' "$GH_STUB"
     }
     Write-Host 'PASS: Test-OriginPrivate matches the bash gate: private 0, public and template 1, unverifiable 2, repo-local opt-in'
 
+    # Normalized forms reach the template verdict even with the opt-in set, and
+    # a push URL list with no usable entry is 2 either way (the bash gate's
+    # cases). An ssh stub resolves the alias dot-gh to a trailing-dot HostName.
+    if ($onWindows) {
+        [IO.File]::WriteAllText((Join-Path $stubDir 'ssh.cmd'), "@echo off`r`nif `"%3`"==`"dot-gh`" (echo hostname github.com.) else (echo hostname %3)`r`n")
+    }
+    else {
+        $sshStub = @'
+#!/usr/bin/env bash
+[ "$1" = -G ] || exit 255
+host="${*: -1}"
+case "$host" in dot-gh) echo 'hostname github.com.' ;; *) echo "hostname $host" ;; esac
+'@
+        [IO.File]::WriteAllText((Join-Path $stubDir 'ssh'), ($sshStub -replace "`r", ''))
+        & chmod +x (Join-Path $stubDir 'ssh')
+    }
+    & git -C $gateRepo config ops.pushVerified true
+    $env:GH_STUB = 'true'
+    $normalized = @('https://github.com/Exploitacious/%4FPS', 'https://github.com/%45xploitacious/OPS%2Egit',
+        'https://github%2Ecom/Exploitacious/OPS', 'git@github.com:Exploitacious/OPS.git ', "git@github.com:Exploitacious/OPS.git`t",
+        ' https://github.com/Exploitacious/OPS', 'https://github.com///Exploitacious//OPS//',
+        'https://github.com/acme/../Exploitacious/./OPS', 'https://github.com./Exploitacious/OPS', 'git@dot-gh:Exploitacious/OPS.git')
+    # Embedded quotes survive native argument passing only off Windows (5.1 and
+    # early 7.x on Windows re-quote them), so the quoted forms run there.
+    if (-not $onWindows) { $normalized += @("'https://github.com/Exploitacious/OPS.git'", '"git@github.com:Exploitacious/OPS"') }
+    foreach ($url in $normalized) {
+        Set-Origin $url
+        Remove-Item $env:GH_LOG -ErrorAction SilentlyContinue
+        Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 1 "normalized template [$url]" 'public OPS template'
+        if (Get-GhCalls) { throw "normalized template [$url]: gh was called" }
+    }
+    Set-Origin "`r"
+    Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 2 'lone CR push URL with the opt-in' 'no usable push URL'
+    & git -C $gateRepo config --unset ops.pushVerified
+    Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 2 'lone CR push URL' 'no usable push URL'
+    Write-Host 'PASS: Test-OriginPrivate normalizes template forms like the bash gate and refuses a blank push URL list'
+
     # --- Push gate in -AutoCommit: commit always, push only when private -----
     # origin is a GitHub URL; a fake ssh serves it from a local bare repo, so
     # pulls work offline and a push that does happen lands there.

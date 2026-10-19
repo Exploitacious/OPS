@@ -78,6 +78,31 @@ git -C "$OPS_DIR" show --name-only --format= HEAD | grep -q 'three.md' || { echo
 git -C "$OPS_DIR" diff --cached --name-only | grep -qx unrelated.txt || { echo 'FAIL: unrelated staged work was lost' >&2; exit 1; }
 echo 'PASS: auto-commit commits only the memory pool'
 
+# An empty or truncated gate exits 0 but is not a verdict (2026-10-19: exit 0
+# alone counted as verified, so auto-commit pushed to a public origin). A copy
+# of memory-init runs beside the broken gate; gh still says public.
+BROKEN="$WORK/broken-bin"; mkdir -p "$BROKEN"
+cp "$INIT" "$BROKEN/memory-init"
+GATE_SRC="$(dirname "$INIT")/origin-private-check"
+body_line="$(grep -n '^if ! command -v git' "$GATE_SRC" | head -1 | cut -d: -f1)"
+head -n "$((body_line - 1))" "$GATE_SRC" > "$WORK/truncated-gate"
+{ bash -n "$WORK/truncated-gate" && bash "$WORK/truncated-gate" "$OPS_DIR" 2>/dev/null; } \
+  || { echo 'FAIL: fixture: the truncated gate does not parse and exit 0' >&2; exit 1; }
+GH_ANSWER=false
+for kind in empty truncated; do
+  if [[ "$kind" == empty ]]; then : > "$BROKEN/origin-private-check"; else cp "$WORK/truncated-gate" "$BROKEN/origin-private-check"; fi
+  printf '%s note\n' "$kind" > "$POOL/$kind-gate.md"
+  before="$(git -C "$FAKE_REMOTE" rev-parse main)"
+  bash "$BROKEN/memory-init" --hostname fixture --only-home --auto-commit > "$GATE/log" 2>&1 \
+    || { cat "$GATE/log" >&2; echo "FAIL: memory-init failed with a $kind gate" >&2; exit 1; }
+  grep -q 'push skipped, commit kept locally: .*exited 0 without its private verdict' "$GATE/log" \
+    || { cat "$GATE/log" >&2; echo "FAIL: $kind gate: the skip is not logged" >&2; exit 1; }
+  if grep -q 'auto-commit: pushed' "$GATE/log"; then echo "FAIL: $kind gate: pushed" >&2; exit 1; fi
+  [[ "$(git -C "$FAKE_REMOTE" rev-parse main)" == "$before" ]] || { echo "FAIL: $kind gate: memory pushed to a public origin" >&2; exit 1; }
+  git -C "$OPS_DIR" show --name-only --format= HEAD | grep -q "$kind-gate.md" || { echo "FAIL: $kind gate: the commit was not kept locally" >&2; exit 1; }
+done
+echo 'PASS: an empty or truncated gate exits 0 but is not a verdict; the commit stays local'
+
 # An empty pool stays in git through the daily backup's stash, and a pool an
 # earlier backup removed is recreated (2026-10-19: git stash -u dropped the
 # empty pool directory and left the memory link dangling).

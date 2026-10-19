@@ -8,7 +8,10 @@
 # and -> 0 with the repo-local opt-in; the opt-in never overrides a public
 # answer and is ignored when set globally; push URLs decide; an ssh alias for
 # github.com is resolved; every reason is one line and never carries a URL's
-# credentials.
+# credentials. Normalized forms (percent-encoded, quoted or padded, repeated
+# slashes, dot segments, a trailing-dot host or ssh HostName) still reach the
+# template verdict with the opt-in set, and a push URL list with no usable
+# entry (a lone CR) exits 2 with or without the opt-in.
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/origin-private-check-test.sh
 set -uo pipefail
@@ -31,7 +34,7 @@ cat > "$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 case "${GH_STUB:-}" in
-  true|false) printf '%s\n' "$GH_STUB" ;;
+  true|false|False) printf '%s\n' "$GH_STUB" ;;
   error) echo 'HTTP 404: Not Found (https://api.github.com/repos/x/y)' >&2; exit 1 ;;
   odd) echo 'null' ;;
   *) exit 4 ;;
@@ -44,7 +47,7 @@ cat > "$WORK/bin/ssh" <<'STUB'
 printf '%s\n' "$*" >> "$SSH_LOG"
 [ "$1" = -G ] || exit 255
 host="${*: -1}"
-case "$host" in work-gh) echo 'hostname github.com' ;; *) echo "hostname $host" ;; esac
+case "$host" in work-gh) echo 'hostname github.com' ;; dot-gh) echo 'hostname github.com.' ;; *) echo "hostname $host" ;; esac
 STUB
 chmod +x "$WORK/bin/gh" "$WORK/bin/ssh"
 # A PATH with everything the gate runs except gh.
@@ -194,6 +197,39 @@ REPO="$WORK/not-a-repo"; mkdir -p "$REPO"
 run_check; expect 2 "not a repo" "not a git repository"
 REPO="$WORK/repo"
 pass "ssh aliases resolve; malformed URLs, no origin, and no repo exit 2"
+
+# --- Normalized forms of the template, and no usable push URL --------------------
+# Each of these read as "cannot read owner/repo" or "not github.com" (exit 2),
+# which the opt-in turned into 0, while git and GitHub still reached the
+# template. The opt-in stays set for the whole block.
+GH_STUB=true; optin true
+for url in \
+  'https://github.com/Exploitacious/%4FPS' \
+  'https://github.com/%45xploitacious/OPS%2Egit' \
+  'https://github%2Ecom/Exploitacious/OPS' \
+  'git@github.com:Exploitacious/OPS.git ' \
+  "$(printf 'git@github.com:Exploitacious/OPS.git\t')" \
+  ' https://github.com/Exploitacious/OPS' \
+  "'https://github.com/Exploitacious/OPS.git'" \
+  '"git@github.com:Exploitacious/OPS"' \
+  'https://github.com///Exploitacious//OPS//' \
+  'https://github.com/acme/../Exploitacious/./OPS' \
+  'https://github.com./Exploitacious/OPS' \
+  'git@dot-gh:Exploitacious/OPS.git'; do
+  origin "$url"
+  run_check; expect 1 "normalized template [$url]" "public OPS template"
+  gh_not_called "normalized template [$url]"
+done
+GH_STUB=false; origin 'git@dot-gh:acme/ops-copy.git'
+run_check; expect 1 "ssh alias with a trailing-dot HostName, public" "is public"
+GH_STUB=False; origin https://github.com/acme/ops-copy.git
+run_check; expect 1 "gh answer False reads as public, as in the PowerShell twin" "is public"
+GH_STUB=true; origin "$(printf '\r')"
+run_check; expect 2 "lone CR push URL with the opt-in" "no usable push URL"
+no_optin
+run_check; expect 2 "lone CR push URL" "no usable push URL"
+gh_not_called "lone CR push URL"
+pass "normalized template forms are refused even with the opt-in; a blank push URL list exits 2"
 
 # --- Credentials never reach the reason -----------------------------------------
 for stub in true false error; do

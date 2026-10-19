@@ -131,7 +131,11 @@ verify (no origin, `gh` missing or signed out, an API or network failure, a
 host other than github.com). It asks `gh api --hostname github.com
 repos/<owner>/<repo> --jq .private`, resolves an ssh host alias with `ssh -G`,
 and prints one line on stderr either way, naming only host and owner/repo,
-never a URL's credentials. Callers commit regardless and push only on 0. For a
+never a URL's credentials. Callers commit regardless and push only on 0 with
+the gate's `private` verdict as its last line, because an empty or truncated
+copy of the gate also exits 0. A URL is normalized first (whitespace, quotes,
+percent-escapes, repeated slashes, dot segments, a trailing host dot), so an
+odd form of the template still reads as the template. For a
 remote it cannot verify, `git -C <copy> config ops.pushVerified true` (read
 from the repo's own config only) turns 2 into 0; it never changes 1. Tests:
 `tests/origin-private-check-test.sh`, and the caller cases in

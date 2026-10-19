@@ -140,6 +140,22 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   newline is read again; before, its `last_synced` was dropped and the scan
   fell back to a first-sync compare without a warning. New cases in
   `harness-update-scan-test.sh`.
+- **The push gate needs its own verdict, not just exit 0.** `daily-sync.sh`
+  and `memory-init` counted exit 0 from `bash origin-private-check` as
+  verified, and an empty file or one cut off after its function definitions
+  also exits 0, so an interrupted update or a full disk turned the gate into a
+  pass. Both now also require the gate's last line to be its `private`
+  verdict, and `memory-init.ps1` checks its twin's reason the same way. The
+  gate normalizes a URL before the template check (surrounding whitespace and
+  quotes trimmed, host and path percent-decoded, repeated slashes and dot
+  segments collapsed, a trailing dot dropped from the host or the ssh
+  HostName): those forms read as unparseable, which the `ops.pushVerified`
+  opt-in turned into a pass while git still reached the template. A push URL
+  list with no usable entry (a lone CR) exits 2 even with the opt-in; it
+  printed an empty `private:` and exited 0. A `gh` answer is compared without
+  case, as the PowerShell twin does. New cases in
+  `origin-private-check-test.sh`, `daily-sync-test.sh`, `memory-init-test.sh`
+  and `memory-init-windows-test.ps1`.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

@@ -19,12 +19,16 @@
 # Exit codes, each with a one-line reason on stderr. A URL's credentials are
 # never printed: reasons name only the host and owner/repo.
 #   0  verified private: GitHub reports every push URL private, or the opt-in
-#      below covers what could not be verified
+#      below covers what could not be verified. The reason line then starts
+#      "origin-private-check: private: " or "origin-private-check: private by
+#      opt-in (ops.pushVerified=true): ", and callers require that line as
+#      well as exit 0: an empty or truncated copy of this file also exits 0,
+#      so exit 0 alone proves nothing.
 #   1  public: a push URL is the public template (github.com/Exploitacious/OPS
 #      in any URL form or case), or GitHub reports the repo public
-#   2  unverified: not a git repo, no origin, gh missing or not signed in, a
-#      network or API failure, an unparseable URL, or a host other than
-#      github.com
+#   2  unverified: not a git repo, no origin, no usable push URL, gh missing or
+#      not signed in, a network or API failure, an unparseable URL, or a host
+#      other than github.com
 #
 # Opt-in for a remote this cannot verify (self-hosted git, GitHub Enterprise, a
 # host gh cannot reach): after confirming the repo is private, run
@@ -37,6 +41,14 @@
 # --jq .private`. An ssh host alias (`git@work-gh:owner/repo.git` with a
 # ~/.ssh/config HostName of github.com) is resolved with `ssh -G`, so the
 # template and public checks also see aliased URLs.
+#
+# URLs are normalized before any check, because a form the parser could not
+# read used to fall to exit 2, which the opt-in turns into 0, while git and
+# GitHub still reached the template: surrounding whitespace and quotes are
+# trimmed, host and path are percent-decoded, repeated slashes and dot
+# segments in the path collapse, and a trailing dot on the host (from the URL
+# or from `ssh -G`) is dropped. Each step only makes more URLs match
+# github.com and the template, never fewer.
 
 set -uo pipefail
 
@@ -46,6 +58,54 @@ DIR="${1:-.}"
 
 say() { printf '%s: %s\n' "$NAME" "$*" >&2; }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# trim_outer <s>: sets TRIMMED to <s> without surrounding whitespace and quote
+# characters, repeated until stable ("'OPS.git '" and " OPS.git" both trim).
+trim_outer() {
+  local s="$1" prev=""
+  while [[ "$s" != "$prev" ]]; do
+    prev="$s"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    s="${s#[\"\']}"; s="${s%[\"\']}"
+  done
+  TRIMMED="$s"
+}
+
+# pct_decode <s>: sets DECODED to <s> with every %XX escape decoded once, the
+# way the server decodes a request path (%4FPS reaches OPS). A % without two
+# hex digits stays as it is.
+pct_decode() {
+  local s="$1" out="" c i=0 n=${#1}
+  while (( i < n )); do
+    c="${s:i:1}"
+    if [[ "$c" == % && "${s:i+1:2}" =~ ^[0-9A-Fa-f]{2}$ ]]; then
+      printf -v c '%b' "\\x${s:i+1:2}"; i=$((i + 3))
+    else
+      i=$((i + 1))
+    fi
+    out+="$c"
+  done
+  DECODED="$out"
+}
+
+# clean_path <path>: sets CLEAN to the path with repeated slashes collapsed and
+# "." and ".." segments resolved, as curl does before a request
+# (github.com/x/../Exploitacious/./OPS reaches the template).
+clean_path() {
+  local seg parts=() out=() IFS=/
+  read -r -a parts <<< "$1"   # read, not an unquoted $1: no globbing of a "*" segment
+  for seg in "${parts[@]}"; do
+    case "$seg" in
+      ""|.) ;;
+      ..) (( ${#out[@]} )) && unset 'out[${#out[@]}-1]' ;;
+      *) out+=("$seg") ;;
+    esac
+  done
+  CLEAN="${out[*]}"
+}
+
+strip_host_dots() { local h="$1"; while [[ "$h" == *. ]]; do h="${h%.}"; done; printf '%s' "$h"; }
 
 # A hung network call must not stall the unattended daily backup. Where
 # coreutils `timeout` is missing (stock macOS), run without it.
@@ -92,12 +152,12 @@ parse_url() {
       fi
       ;;
   esac
-  P_HOST="$(lower "$P_HOST")"
-  P_HOST="${P_HOST%.}"
-  while [[ "$P_PATH" == /* ]]; do P_PATH="${P_PATH#/}"; done
-  while [[ "$P_PATH" == */ ]]; do P_PATH="${P_PATH%/}"; done
+  pct_decode "$P_HOST"; trim_outer "$DECODED"
+  P_HOST="$(strip_host_dots "$(lower "$TRIMMED")")"
+  pct_decode "$P_PATH"; trim_outer "$DECODED"
+  clean_path "$TRIMMED"; P_PATH="$CLEAN"
   case "$(lower "$P_PATH")" in *.git) P_PATH="${P_PATH%????}" ;; esac
-  while [[ "$P_PATH" == */ ]]; do P_PATH="${P_PATH%/}"; done
+  clean_path "$P_PATH"; P_PATH="$CLEAN"
 }
 
 # check_url <url>: sets U_RC (0 private, 1 public, 2 unverified) and U_WHY.
@@ -114,6 +174,7 @@ check_url() {
   if (( P_SSH )) && ! is_github_host "$P_HOST" && command -v ssh >/dev/null 2>&1; then
     resolved="$(with_timeout 10 ssh -G -- "$P_HOST" 2>/dev/null \
       | awk 'tolower($1) == "hostname" { print tolower($2); exit }')"
+    resolved="$(strip_host_dots "$resolved")"
     if is_github_host "$resolved"; then
       label="$P_HOST (ssh alias for $resolved)"
       P_HOST="$resolved"
@@ -143,7 +204,9 @@ check_url() {
   rc=0
   out="$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 with_timeout 30 \
     gh api --hostname github.com "repos/$P_PATH" --jq .private 2>/dev/null)" || rc=$?
-  out="${out%$'\r'}"
+  # Trimmed and lowercased like the PowerShell twin, so "False" or "true "
+  # get the same verdict on both shells; real gh prints true or false.
+  trim_outer "$out"; out="$(lower "$TRIMMED")"
   if (( rc != 0 )); then
     U_RC=2; GH_BLOCKED=1; U_WHY="gh could not read github.com/$P_PATH (exit $rc: not signed in, no access, or offline)"; return
   fi
@@ -171,7 +234,7 @@ optin=0
 oks=() unverified=()
 GH_BLOCKED=0
 while IFS= read -r url; do
-  url="${url%$'\r'}"
+  trim_outer "$url"; url="$TRIMMED"   # also drops a Windows CR
   [[ -n "$url" ]] || continue
   check_url "$url"
   case "$U_RC" in
@@ -182,6 +245,13 @@ while IFS= read -r url; do
 done <<< "$urls"
 
 joined() { local out="" s; for s in "$@"; do out="${out:+$out; }$s"; done; printf '%s' "$out"; }
+
+# Every listed push URL was blank (a lone CR, say): nothing was verified, and
+# without this the gate printed an empty "private: " and exited 0. The opt-in
+# does not cover it: there is no remote it could vouch for.
+if (( ${#oks[@]} == 0 && ${#unverified[@]} == 0 )); then
+  say "unverified: origin has no usable push URL"; exit 2
+fi
 
 if (( ${#unverified[@]} )); then
   if (( optin )); then

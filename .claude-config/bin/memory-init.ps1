@@ -78,6 +78,12 @@ function New-DirLink {
 # Opt-in for a remote this cannot verify: `git -C <copy> config ops.pushVerified
 # true`, read from the repo's own config only. It turns 2 into 0, never 1.
 # Reasons name only host and owner/repo, never a URL's credentials.
+# URLs are normalized first, as in the bash gate (a form the parser could not
+# read fell to 2, which the opt-in turned into 0, while git still reached the
+# template): surrounding whitespace and quotes trimmed, host and path
+# percent-decoded, repeated slashes and dot segments collapsed, a trailing dot
+# on the host or the ssh HostName dropped. A list whose push URLs are all blank
+# is 2 even with the opt-in.
 function Test-OriginPrivate {
     param([string]$Dir)
     # Windows PowerShell 5.1 turns a native command's stderr into an error
@@ -86,14 +92,28 @@ function Test-OriginPrivate {
     $template = 'exploitacious/ops'
     $githubHosts = @('github.com', 'www.github.com', 'ssh.github.com')
     $result = { param($Code, $Reason) [pscustomobject]@{ Code = $Code; Reason = $Reason } }
+    $trimOuter = { param($s) $prev = $null; while ($s -ne $prev) { $prev = $s; $s = $s.Trim().Trim('"', "'") }; $s }
+    $cleanPath = {
+        param($p)
+        $out = New-Object System.Collections.Generic.List[string]
+        foreach ($seg in ($p -split '/')) {
+            if ($seg -eq '' -or $seg -eq '.') { continue }
+            if ($seg -eq '..') { if ($out.Count) { $out.RemoveAt($out.Count - 1) }; continue }
+            $out.Add($seg)
+        }
+        $out -join '/'
+    }
 
     if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
         return (& $result 2 'unverified: git is not installed')
     }
     $null = & git -C $Dir rev-parse --git-dir 2>$null
     if ($LASTEXITCODE -ne 0) { return (& $result 2 "unverified: $Dir is not a git repository") }
-    $urls = @(& git -C $Dir remote get-url --push --all origin 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if (-not $urls.Count) { return (& $result 2 "unverified: $Dir has no origin remote") }
+    $rawUrls = @(& git -C $Dir remote get-url --push --all origin 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $rawUrls.Count) { return (& $result 2 "unverified: $Dir has no origin remote") }
+    $urls = @($rawUrls | ForEach-Object { & $trimOuter "$_" } | Where-Object { $_ })
+    # Nothing to verify (a lone CR, say); the opt-in has no remote to vouch for.
+    if (-not $urls.Count) { return (& $result 2 'unverified: origin has no usable push URL') }
     $optIn = ("$(& git -C $Dir config --local --bool --get ops.pushVerified 2>$null)".Trim() -eq 'true')
 
     $oks = New-Object System.Collections.Generic.List[string]
@@ -113,16 +133,16 @@ function Test-OriginPrivate {
             # one-letter "host" is a Windows drive, so the pattern needs two.
             $h = ($Matches[1] -split '@')[-1]; $path = $Matches[2]; $ssh = $true
         }
-        $h = $h.ToLower().TrimEnd('.')
-        $path = $path.Trim('/')
-        if ($path.ToLower().EndsWith('.git')) { $path = $path.Substring(0, $path.Length - 4).TrimEnd('/') }
+        $h = (& $trimOuter ([Uri]::UnescapeDataString($h))).ToLower().TrimEnd('.')
+        $path = & $cleanPath (& $trimOuter ([Uri]::UnescapeDataString($path)))
+        if ($path.ToLower().EndsWith('.git')) { $path = & $cleanPath $path.Substring(0, $path.Length - 4) }
 
         if (-not $h) { $unverified.Add('origin is a local path, not a GitHub repo'); continue }
         if ($h.StartsWith('-')) { $unverified.Add('origin has an unsafe host name'); continue }
         $label = $h
         $sshCmd = Get-Command ssh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($ssh -and $h -notin $githubHosts -and $sshCmd) {
-            $resolved = & $sshCmd.Source -G -- $h 2>$null | ForEach-Object { if ($_ -match '^hostname\s+(\S+)') { $Matches[1].ToLower() } } | Select-Object -First 1
+            $resolved = & $sshCmd.Source -G -- $h 2>$null | ForEach-Object { if ($_ -match '^hostname\s+(\S+)') { $Matches[1].ToLower().TrimEnd('.') } } | Select-Object -First 1
             if ($resolved -in $githubHosts) { $label = "$h (ssh alias for $resolved)"; $h = $resolved }
         }
         if ($h -notin $githubHosts) { $unverified.Add("origin host $label is not github.com, so its visibility cannot be checked"); continue }
@@ -358,7 +378,9 @@ function Init-OneEncoded {
                 Log "[$Encoded] auto-commit: committed"
                 # One gate answer per run: it may call the GitHub API.
                 if ($null -eq $script:PushGate) { $script:PushGate = Test-OriginPrivate -Dir $Ops }
-                if ($script:PushGate.Code -ne 0) {
+                # Code 0 alone is not proof: require the verdict line only the
+                # gate's private branches build, as the bash callers do.
+                if (-not ($script:PushGate.Code -eq 0 -and "$($script:PushGate.Reason)" -match '^private(: | by opt-in \(ops\.pushVerified=true\): )\S')) {
                     Log "[$Encoded] auto-commit: push skipped, commit kept locally: $($script:PushGate.Reason)"
                     return
                 }

@@ -77,14 +77,28 @@ dry() { log "[dry-run] $*"; }
 # A public origin, such as a tryout clone of the public template, or one it
 # cannot verify keeps the commit local and logs the reason and the fix. The
 # answer is computed once per run because it may call the GitHub API.
+# Exit 0 is not proof by itself: an empty or truncated gate file also exits 0,
+# so gate_proved also requires the verdict line only the gate's private
+# branches print (same test in backup/daily-sync.sh and hooks/git-guard.sh).
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUSH_GATE_RC=""
 PUSH_GATE_REASON=""
+gate_proved() {
+  case "${1##*$'\n'}" in
+    "origin-private-check: private: "?*) return 0 ;;
+    "origin-private-check: private by opt-in (ops.pushVerified=true): "?*) return 0 ;;
+  esac
+  return 1
+}
 push_gate() {
   if [[ -z "$PUSH_GATE_RC" ]]; then
     local check="$SELF_DIR/origin-private-check" rc=0
     if [[ -f "$check" ]]; then
       PUSH_GATE_REASON=$(bash "$check" "$OPS_ROOT" 2>&1 >/dev/null) || rc=$?
+      if (( rc == 0 )) && ! gate_proved "$PUSH_GATE_REASON"; then
+        rc=2
+        PUSH_GATE_REASON="$check exited 0 without its private verdict (${PUSH_GATE_REASON:-no output}), so it is empty or truncated; restore it from the template"
+      fi
     else
       rc=2
       PUSH_GATE_REASON="$check is missing, so origin cannot be verified private"
