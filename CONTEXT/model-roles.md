@@ -1,6 +1,6 @@
 # Model roles
 
-Single source for the harness model tiers. This file is canonical. `CLAUDE.md`, `foreman-charter.md`, and the delegation skill set point here instead of restating the table, so the tiers live in one place and cannot drift between copies. Applies to both profiles. History lives in `CHANGELOG.md`, not here.
+Single source for the harness model tiers. This file is canonical. `core.md` and the delegation skill set point here instead of restating the table, so the tiers live in one place and cannot drift between copies. Applies to both profiles. History lives in `CHANGELOG.md`, not here.
 
 This is policy, not a per-operator config. The model *ids* below are the ones the Stage-1 `settings.json` (linuxploitacious) pins today. If your plan carries different tiers, see "Settings, pins, and the shared Stage-1 file" below before you change anything: that file is shared, and editing it in place has side effects.
 
