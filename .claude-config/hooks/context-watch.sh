@@ -119,7 +119,7 @@ PAYLOAD=""
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HOOK_DIR/hooklib.sh"
 
-# Simple field reads use hook_field (jq-first, python3/python/py fallback) : 
+# Simple field reads use hook_field (jq-first, python3/python/py fallback):
 # only the transcript tail-scan further down is python3-only.
 if [ "$MODE" = "stop" ]; then
   STOP_ACTIVE="$(printf '%s' "$PAYLOAD" | hook_field stop_hook_active)" || exit 0
