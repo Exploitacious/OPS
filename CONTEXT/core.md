@@ -111,8 +111,9 @@ Git. Sync first (`git fetch && git pull --ff-only` on OPS and on each project
 repo at first entry); a failed pull is named and waits, never stashed or
 resolved on your own. Shared checkouts move under you: check the branch
 before committing, branch work in a worktree, confirm a push against
-`origin/<branch>`. Feature branch and PR everywhere except your private OPS
-copy, which takes direct commits to its trunk. Conventional Commits
+`origin/<branch>`. Feature branch and PR everywhere except your OPS copy:
+direct commits to its trunk, pushed only to an origin `origin-private-check`
+proves private (a hook enforces it). Conventional Commits
 (`<type>(<scope>): <imperative summary>`, subject 72 characters at most, no
 AI attribution). Never bypass hooks (`--no-verify`, `--no-gpg-sign`). Detail:
 `CONTEXT/how-i-work.md` Git operations.

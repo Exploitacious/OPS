@@ -156,6 +156,19 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   case, as the PowerShell twin does. New cases in
   `origin-private-check-test.sh`, `daily-sync-test.sh`, `memory-init-test.sh`
   and `memory-init-windows-test.ps1`.
+- **Agent pushes of the OPS copy go through the push gate.** The skills and
+  `AGENTS.md` told agents to commit and push batons, the memory mirror and
+  trunk work, and only prose asked them to run `origin-private-check` first,
+  so a copy with a public origin could be published by any session that
+  skipped a step. `hooks/git-guard.sh` now resolves the repo each `git push`
+  acts on (the cwd, `cd`, `git -C`, `--git-dir`, `env`/`rtk`/`sudo` prefixes,
+  `bash -c`, `eval`, git aliases) and, for a repo whose root holds
+  `.claude-config/bin/origin-private-check`, blocks the push unless that gate
+  proves origin private and the push goes to origin. Pushes in other repos,
+  such as the project clones, are untouched; `GIT_GUARD=off` still lifts it.
+  Without Python 3 it checks every directory the command names instead. The
+  session-handoff, session-close and self-compact docs, the handoff README,
+  `AGENTS.md` and `core.md` now say so. New `guard-selftest.sh` cases.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

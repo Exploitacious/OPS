@@ -8,7 +8,7 @@ OPS ships no compactor that verifies completion. A script that types `/compact` 
 
 The automation removes the operator's keystrokes; it must NEVER remove the synthesis. A compact that loses knowledge is a failed compact no matter how cleanly the cycle ran. Before arming a compactor, ALL of the following must be true, in order:
 
-1. The four artifacts are green: git committed and pushed or explicitly deferred by the operator; memory written AND flushed per hygiene step 2; task list true; durable anchor updated with a RESUME PROTOCOL block.
+1. The four artifacts are green: git committed and pushed (the OPS copy only through `origin-private-check`, which the git-guard hook enforces) or explicitly deferred by the operator; memory written AND flushed per hygiene step 2; task list true; durable anchor updated with a RESUME PROTOCOL block.
 2. Closeout hygiene passed, including docs-reflect-reality: every repo touched this session has its CHANGELOG line and no doc claim made false. "I'll fix the docs post-compact" is the exact failure this gate kills; post-compact-you will not know what is missing.
 3. Knowledge-capture completeness check. Ask: did this session produce knowledge faster than it was filed? Long autonomous runs, multi-hour builds, and incident investigations usually do. If yes, run `transcript-mine` with `{since: <last-closeout stamp>}` (stamp: `~/.local/state/ops/last-closeout`) and file what it stages BEFORE arming. Short conversational sessions skip this; call it consciously and say which way in the readiness summary.
 4. The readiness summary is printed. Anything unresolved (uncommitted work you lack authorization to push, an ASK OPERATOR item, a failing gate) means DO NOT ARM; surface it and wait.

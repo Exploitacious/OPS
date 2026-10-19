@@ -27,7 +27,7 @@ The reconciliation gate in step 2 is the point of this skill. It is the operator
 
 Run the full hygiene checklist from `pre-compact-synthesis`, everything except its final `/compact` (you are closing, so its "pause or close?" question is already answered).
 
-- Git: every touched repo committed and pushed; working trees clean, or deliberately dirty with the operator's knowledge. Name what you leave.
+- Git: every touched repo committed and pushed (the OPS copy only when `origin-private-check` verifies its origin private; the git-guard hook blocks it otherwise); working trees clean, or deliberately dirty with the operator's knowledge. Name what you leave.
 - Docs match reality: README, CHANGELOG, and lessons files updated for what this session shipped, in the same pass, not "later".
 - Memory: durable lessons, decisions, and feedback written to the memory pool, one fact per file, indexed. Then evict what this close terminates: per `pre-compact-synthesis` closeout hygiene, "Flush the memory cache", fold a closing project's entries to that project's home (its own docs tree by PR when the repo has one the team reads, else `CONTEXT/projects/<project>-lessons.md`) and delete them, index lines too, no stubs.
 - Tasks: the session's task list is resolved, completed or re-homed with the operator's sign-off. Nothing silently abandoned.
