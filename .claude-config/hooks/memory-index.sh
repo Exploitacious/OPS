@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# memory-index.sh — SessionStart hook for Claude Code.
+# memory-index.sh: SessionStart hook for Claude Code.
 #
 # Regenerates the active memory directory's MEMORY.md from the per-file
 # frontmatter, so the index is always a DERIVED artifact equal to the set
-# of memory files present — never a hand-maintained list that cross-machine
+# of memory files present, never a hand-maintained list that cross-machine
 # sync (additive cp + git) silently clobbers.
 #
-# Resolves the open MEMORY.md-format question in 2026-05-13__memory-sync-doctrine.md. Full rationale:
-# WORKFORCE/protocol/lessons/2026-06-25__memory-index-generated.md and the
-# [[feedback-no-rsync-delete-memory-mirror]] memory.
+# Resolves the open MEMORY.md-format question of the 2026-05-13 memory-sync
+# decision. Full rationale: the 2026-06-25 memory-index-generated lesson (both
+# retired with the fleet protocol; read them in git history).
 #
 # Profile-agnostic. Claude Code stores per-cwd memory under
 #   $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/memory/
@@ -23,8 +23,8 @@
 # SessionStart hooks (test -x ... || true at the registration site).
 #
 # Diagnostic env vars:
-#   MEMORY_INDEX_DEBUG=1   — verbose logging to stderr
-#   MEMORY_INDEX_DIR=<dir> — override the target dir (testing)
+#   MEMORY_INDEX_DEBUG=1    verbose logging to stderr
+#   MEMORY_INDEX_DIR=<dir>  override the target dir (testing)
 
 set -uo pipefail
 # No `set -e`: partial-success behavior. A failed subcommand logs + continues.
@@ -37,9 +37,10 @@ dbg() {
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HOOK_DIR/hooklib.sh"
 
-INDEXER="$HOME/OPS/WORKFORCE/bin/ac-memory-index"
+# Resolved beside this hook, so a checkout outside ~/OPS (OPS_DIR) indexes too.
+INDEXER="$HOOK_DIR/../bin/memory-index"
 if [[ ! -f "$INDEXER" ]]; then
-  dbg "indexer not found at $INDEXER — nothing to do"
+  dbg "indexer not found at $INDEXER: nothing to do"
   exit 0
 fi
 
@@ -49,7 +50,7 @@ PAYLOAD=""
 
 # Resolve the active memory dir.
 #   1. explicit override wins (testing)
-#   2. else derive it from transcript_path in the payload — Claude's OWN encoded
+#   2. else derive it from transcript_path in the payload: Claude's OWN encoded
 #      path (<cfg>/projects/<encoded>/<id>.jsonl), so memory is the sibling
 #      <...>/memory. The old `pwd | sed` produced `-c-Users-...` on Windows
 #      Git Bash, never matching Claude's native `C--Users-...`, so MEMORY.md
@@ -72,9 +73,9 @@ dbg "mem_dir=$MEM_DIR"
 
 # The memory dir may be a real dir OR a symlink into the OPS store; both
 # resolve fine here. If it doesn't exist yet (no memory written for this cwd
-# on this machine), there's nothing to index — exit quietly.
+# on this machine), there's nothing to index, so exit quietly.
 if [[ ! -d "$MEM_DIR" ]]; then
-  dbg "memory dir absent ($MEM_DIR) — nothing to index"
+  dbg "memory dir absent ($MEM_DIR): nothing to index"
   exit 0
 fi
 
@@ -82,9 +83,9 @@ fi
 # MEMORY.md (never touches the memory files). Exit code 2 means some file
 # needed a kebab-fallback title (informational, not an error); we still
 # succeed so the session start is never blocked.
-# Invoke via a resolved interpreter — ac-memory-index's `#!/usr/bin/env python3`
+# Invoke via a resolved interpreter: memory-index's `#!/usr/bin/env python3`
 # shebang is dead on Windows (no python3 shim), so run it explicitly.
-PY="$(hook_python)" || { dbg "no python interpreter available — cannot run indexer"; exit 0; }
+PY="$(hook_python)" || { dbg "no python interpreter available: cannot run indexer"; exit 0; }
 if [[ "${MEMORY_INDEX_DEBUG:-0}" == "1" ]]; then
   "$PY" "$INDEXER" "$MEM_DIR" || true
 else
