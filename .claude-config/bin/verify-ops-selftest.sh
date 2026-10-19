@@ -10,6 +10,9 @@
 # OPS point into the scratch dir for every case, and CLAUDE_CONFIG_DIR is unset.
 #
 # Exit 0 = every case behaves; 1 = defect.
+# Assertions capture the immediately preceding condition's status as chk's
+# argument; no command intervenes to overwrite it.
+# shellcheck disable=SC2319
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_OPS="$(cd "$DIR/../.." && pwd)"
@@ -162,7 +165,7 @@ chk "Haiku pin missing -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 new_case haiku-suffix
 set_settings '.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-5-5[1m]"'
 run check_retired_model_pins
-chk "Haiku pin with [1m] -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+chk "Haiku pin with [1m] -> FAIL (banned token + pin)" "$([ "$FAILS" = 2 ]; echo $?)"
 new_case haiku-banned
 set_settings '.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"'
 run check_retired_model_pins
@@ -187,6 +190,40 @@ new_case heavy-on-resume
 set_settings '.hooks.SessionStart[1].hooks += [{"type":"command","command":"\"$H/.claude-config/hooks/memory-index.sh\""}]'
 run check_sessionstart_matchers
 chk "memory-index on resume|compact -> WARN" "$([ "$WARNS" = 1 ]; echo $?)"
+
+# Equivalent YAML/JS pin spellings and JSON escapes must not evade the gate.
+for spelling in '"model": "claude-sonnet-5"' 'model : claude-sonnet-5' 'model: `claude-sonnet-5`'; do
+  new_case alternate-retired
+  printf '%s\n' "$spelling" > "$OPS/.claude-config/workflows/x.js"
+  run check_retired_model_pins
+  chk "retired pin $spelling -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+done
+new_case escaped-retired
+printf '%s\n' '{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-haiku-5-5"},"model":"claude-sonnet-\u0035"}' > "$HOME/.claude/settings.json"
+run check_retired_model_pins
+chk "JSON-escaped retired id -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+new_case escaped-opus
+printf '%s\n' '{"model":"claude-opus-\u0035"}' > "$HOME/.claude/settings.json"
+run check_opus5_ban
+chk "JSON-escaped Opus 5 id -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+for surface in '.claude-config/commands/x.md' 'SKILLS/x.js' '.claude/agents/x.md'; do
+  new_case opus-surfaces
+  mkdir -p "$(dirname "$OPS/$surface")"
+  printf '%s\n' '{"model": "claude-opus-5"}' > "$OPS/$surface"
+  run check_opus5_ban
+  chk "Opus 5 in $surface -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+done
+for id in 'claude-haiku-5-5[1m]' 'anthropic.claude-haiku-5-5' 'claude-haiku-5-5-20261001' 'CLAUDE-HAIKU-5-5'; do
+  new_case haiku-lookalike
+  printf "const lane = {model: '%s'};\n" "$id" > "$OPS/.claude-config/workflows/x.js"
+  run check_retired_model_pins
+  chk "Haiku look-alike $id -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+done
+new_case profile-missing-pin
+mkdir -p "$HOME/other-profile"
+printf '%s\n' '{}' > "$HOME/other-profile/settings.json"
+CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_retired_model_pins
+chk "active profile missing its Haiku pin -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"

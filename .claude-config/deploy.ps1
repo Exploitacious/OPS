@@ -383,7 +383,9 @@ Write-Status "Retiring caveman + ponytail Claude Code plugins..." "Yellow"
 # Resolve the claude CLI. A bare deploy.ps1 re-run may reach here before a PATH
 # refresh, so probe known install locations too (mirrors deploy.sh find_claude).
 function Resolve-ClaudeCli {
-    $c = Get-Command claude -ErrorAction SilentlyContinue
+    # A loaded claude() launch shim is a function with an empty Source. Resolve
+    # the application beneath it, as the shim itself does, on repeat deploys.
+    $c = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($c) { return $c.Source }
     foreach ($p in @(
         (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\claude.exe'),
@@ -398,27 +400,71 @@ function Resolve-ClaudeCli {
 # This block used to INSTALL caveman, unpinned, from its third-party
 # marketplace head, right after Stage 1 had uninstalled it; Stage 1 retires
 # both plugins because their modes are now part of the harness's own operating
-# rules. It now UNINSTALLS any left on an already-provisioned host and is a
-# no-op once they are gone (idempotent). Removal goes through the CLI only,
-# never a delete of a plugins dir (the CLI owns profile selection and cleanup).
+# rules. The CLI edits settings.json when removing a declared plugin or
+# marketplace. Leave those declarations to Stage 1: CLI writes also follow
+# its symlink into another checkout. Never delete plugin dirs by hand.
 # The calls run with ErrorActionPreference Continue: the CLI writes to stderr
 # when a plugin is already absent, and Windows PowerShell 5.1 turns redirected
 # native stderr into a terminating error under "Stop".
 $claudeExe = Resolve-ClaudeCli
-if ($claudeExe) {
+function Invoke-PluginRetirement {
+    param([string]$Cli)
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
+        $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
+        $settingsPath = Join-Path $configDir 'settings.json'
+        $settings = $null
+        if (Test-Path $settingsPath) {
+            try {
+                $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $settings -or $settings -isnot [pscustomobject]) { throw 'Expected a settings object' }
+                foreach ($key in @('enabledPlugins', 'extraKnownMarketplaces')) {
+                    if ($null -ne $settings.$key -and $settings.$key -isnot [pscustomobject]) { throw 'Expected plugin declarations' }
+                }
+            }
+            catch { Write-Warn "Cannot read plugin declarations in $settingsPath; retirement skipped."; return }
+        }
+        $pluginsOut = & $Cli plugin list --json 2>$null
+        $pluginsRc = $LASTEXITCODE
+        $marketsOut = & $Cli plugin marketplace list --json 2>$null
+        $marketsRc = $LASTEXITCODE
+        try {
+            if ($pluginsRc -ne 0 -or $marketsRc -ne 0) { throw 'Inventory failed' }
+            if (($pluginsOut -join "`n").TrimStart() -notmatch '^\[' -or ($marketsOut -join "`n").TrimStart() -notmatch '^\[') { throw 'Expected inventory arrays' }
+            $plugins = @($pluginsOut -join "`n" | ConvertFrom-Json -ErrorAction Stop)
+            $markets = @($marketsOut -join "`n" | ConvertFrom-Json -ErrorAction Stop)
+        }
+        catch { Write-Warn 'Cannot list plugin inventories; retirement skipped. Run: claude plugin list --json'; return }
         foreach ($plg in @('caveman', 'ponytail')) {
-            & $claudeExe plugin uninstall "${plg}@${plg}" 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) { Write-Good "Removed retired plugin: $plg" }
-            & $claudeExe plugin marketplace remove $plg 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) { Write-Good "Removed retired plugin marketplace: $plg" }
+            $id = "${plg}@${plg}"
+            if (($null -ne $settings.enabledPlugins -and $settings.enabledPlugins.PSObject.Properties[$id]) -or
+                ($null -ne $settings.extraKnownMarketplaces -and $settings.extraKnownMarketplaces.PSObject.Properties[$plg])) {
+                Write-Warn "Retired plugin $plg is declared in $settingsPath; removal would edit Stage-1 settings. Update Stage 1, then re-run deploy."
+                continue
+            }
+            if (@($plugins | Where-Object { $_.id -eq $id -and $_.scope -ne 'user' }).Count -gt 0) {
+                Write-Warn "Retired plugin $plg remains in a project or local scope; left unchanged to protect project settings."
+            }
+            if (@($plugins | Where-Object { $_.id -eq $id -and $_.scope -eq 'user' }).Count -gt 0) {
+                & $Cli plugin uninstall $id --scope user 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { Write-Warn "Retired plugin $plg could not be removed (rc=$LASTEXITCODE); inspect: claude plugin list --json"; continue }
+                Write-Good "Removed retired plugin: $plg"
+            }
+            # Unscoped removal can edit settings in the caller's project.
+            if (@($markets | Where-Object { $_.name -eq $plg }).Count -gt 0) {
+                & $Cli plugin marketplace remove $plg --scope user 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-Good "Removed retired plugin marketplace: $plg" }
+                else { Write-Warn "Retired marketplace $plg remains (rc=$LASTEXITCODE); inspect its declaration before removing it: claude plugin marketplace list --json" }
+            }
         }
     }
     finally {
         $ErrorActionPreference = $prevEap
     }
+}
+if ($claudeExe) {
+    Invoke-PluginRetirement -Cli $claudeExe
 }
 else {
     Write-Warn "Claude CLI not found in PATH or standard install locations. Skipping plugin retirement."

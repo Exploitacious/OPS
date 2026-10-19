@@ -7,6 +7,9 @@
 # mktemp: no real API usage, no touch of the real ~/.claude.
 #
 # Exit 0 = every case behaves; 1 = defect.
+# Assertions capture the immediately preceding condition's status as chk's
+# argument; no command intervenes to overwrite it.
+# shellcheck disable=SC2319
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$DIR/model-probe.sh"
@@ -22,7 +25,21 @@ MOCK="$WORK/mock-claude"
 cat > "$MOCK" <<'MOCKEOF'
 #!/usr/bin/env bash
 model=""
-while [ $# -gt 0 ]; do [ "$1" = "--model" ] && { model="$2"; shift; }; shift; done
+safe=0; persistence=0; no_tools=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) model="$2"; shift ;;
+    --safe-mode) safe=1 ;;
+    --no-session-persistence) persistence=1 ;;
+    --tools) [ "$2" = "" ] && no_tools=1; shift ;;
+  esac
+  shift
+done
+# Model the side effects a normal CLI launch permits: startup hooks,
+# persisted transcripts, and model tool calls must all stay disabled.
+[ "$safe" = 1 ] || touch "$HOME/startup-hook-ran"
+[ "$persistence" = 1 ] || touch "$HOME/transcript-written"
+[ "$no_tools" = 1 ] || touch "$HOME/tool-write"
 printf '%s\n' "$model" >> "${MOCK_RECORD:?}"
 [ -n "${MOCK_SLEEP:-}" ] && sleep "$MOCK_SLEEP"
 case " ${MOCK_REJECT:-} " in *" $model "*) echo "API Error: model not found: $model"; exit 1;; esac
@@ -50,6 +67,7 @@ reset() {
 }
 JSON
   unset MOCK_REJECT MOCK_QUOTA MOCK_SLEEP OPS_MODEL_PROBE_TIMEOUT 2>/dev/null || true
+  unset CLAUDE_CONFIG_DIR OPS_MODEL_PROBE_SETTINGS
 }
 
 snapshot() { (cd "$TH" && find . -print0 | sort -z | xargs -0 sha256sum 2>/dev/null; find . | sort); }
@@ -122,6 +140,15 @@ chk "missing settings -> exit 2"         "$([ "$RC" = 2 ]; echo $?)"
 reset
 probe --force opus48
 chk "--force is rejected (exit 2)"       "$([ "$RC" = 2 ]; echo $?)"
+
+# 8. Probe the selected profile, not another account's default settings.
+reset
+mkdir -p "$TH/other-profile"
+printf '%s\n' '{"model":"claude-sonnet-5-5[1m]"}' > "$TH/other-profile/settings.json"
+CLAUDE_CONFIG_DIR="$TH/other-profile" probe --list
+chk "--list reads the active profile" "$(printf '%s' "$OUT" | grep -qF 'claude-sonnet-5-5[1m]' && ! printf '%s' "$OUT" | grep -qF 'claude-opus-5-5'; echo $?)"
+CLAUDE_CONFIG_DIR="$TH/missing-profile" probe --list
+chk "missing active profile -> exit 2 (no fallback)" "$([ "$RC" = 2 ]; echo $?)"
 
 if [ "$fails" -eq 0 ]; then
   echo "model-probe-selftest: all cases pass"

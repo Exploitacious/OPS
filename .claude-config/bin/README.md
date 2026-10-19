@@ -59,9 +59,13 @@ crontab; add the lines by hand per box.
 Report only. It reads the model ids your settings pin (the top-level `model`
 key and the `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` and
 `CLAUDE_CODE_SUBAGENT_MODEL` env keys), sends one short headless request per
-distinct id, and prints `ok`, `FAIL` (rejected), or `UNSURE` (timeout or a
+distinct id, and prints `ok`, `FAIL` (request failed), or `UNSURE` (timeout or a
 usage-limit refusal, which says nothing about entitlement) for each. It never
-writes a settings file or any state. Which tier to run is policy
+writes a settings file. Probes disable tools, transcript persistence, and user
+customizations (hooks and plugin sync) with Claude Code's `--safe-mode`.
+Subscription authentication still works; `--bare` would skip it. The CLI can
+update its own cache/auth state, and policy-managed hooks still apply.
+Which tier to run is policy
 (`CONTEXT/model-roles.md`); this only tells you whether an id works on your
 plan.
 
@@ -80,7 +84,14 @@ that checkout's next `git pull --ff-only`. Neither `deploy.sh` nor
 `deploy.ps1` runs it; `BOOTSTRAP.md` Stage 0 recon runs it once. Test hooks:
 `OPS_MODEL_PROBE_{SETTINGS,BIN,TIMEOUT}`. `model-probe-selftest.sh` proves it
 against a mock binary under a throwaway `HOME` (no API usage), including that
-the settings file and the rest of `HOME` are byte-identical afterwards.
+the settings file and the rest of `HOME` stay unchanged by the mock, and that
+probes request the isolation flags. The settings source honors
+`CLAUDE_CONFIG_DIR` when a profile is selected.
+
+`python3 plugin-retire-selftest.py` exercises only the plugin-retirement blocks
+of both deployers under temporary homes: declarations stay unchanged, absent
+plugins are quiet, and failed removals warn. It uses a local real Claude CLI
+when available as well as a mock; neither path downloads plugins or calls an API.
 
 ## `verify-ops.sh`: the drift gate
 

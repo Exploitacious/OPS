@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # model-probe.sh: report whether the models your Claude Code settings pin
-# actually answer on this account. Report only: it never writes a settings
-# file, a state file, or anything else.
+# actually answer on this account. Report only: it never edits settings or
+# chooses a model for you. Claude Code can update its own cache/auth state;
+# policy-managed hooks still apply.
 #
 # Why report-only. The settings file it reads is, on a linuxploitacious host,
 # a symlink into the tracked Stage-1 checkout shared by every profile. An
@@ -43,11 +44,14 @@ case "${1:-}" in
   *)        log "unknown argument: $1"; usage >&2; exit 2 ;;
 esac
 
-# Settings source: what Claude Code reads on this host, else the Stage-1 copy.
+# Honor the active profile. Only the default profile falls back to Stage 1;
+# a missing custom profile says nothing about the default profile's pins.
 SETTINGS="${OPS_MODEL_PROBE_SETTINGS:-}"
 if [ -z "$SETTINGS" ]; then
-  SETTINGS="$HOME/.claude/settings.json"
-  [ -f "$SETTINGS" ] || SETTINGS="$HOME/linuxploitacious/claude/.claude/settings.json"
+  SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  if [ ! -f "$SETTINGS" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+    SETTINGS="$HOME/linuxploitacious/claude/.claude/settings.json"
+  fi
 fi
 [ -f "$SETTINGS" ] || { log "settings.json not found at $SETTINGS (run the Stage 1 deploy first)"; exit 2; }
 command -v jq >/dev/null 2>&1 || { log "jq not found; install jq and re-run"; exit 2; }
@@ -101,10 +105,13 @@ while IFS=$'\t' read -r id keys; do
     bad=1
     continue
   fi
-  # MCP stripped and run from $HOME so each probe is a bare text round-trip: no
-  # servers spun up, no project context loaded, minimal tokens.
+  # Disable tools, user customizations and transcript persistence: a model
+  # check must not run the user's startup hooks or plugin sync. Use safe-mode,
+  # not bare: bare ignores subscription OAuth credentials. Managed hooks still
+  # apply, and the CLI can update its own cache/auth state.
   out="$(cd "$HOME" && timeout "$PROBE_TIMEOUT" "$BIN" -p "Reply with exactly: ok" \
           --model "$id" \
+          --safe-mode --no-session-persistence --tools '' \
           --mcp-config '{"mcpServers":{}}' --strict-mcp-config 2>&1 </dev/null)"
   rc=$?
   one_line="$(printf '%s' "$out" | tr '\n\t' '  ' | cut -c1-300)"

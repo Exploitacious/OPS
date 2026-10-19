@@ -157,6 +157,14 @@ In order:
    locations (`~/.local/bin`, pnpm, npm-global, `/usr/local/bin`,
    `/opt/homebrew/bin`) to find `claude`.
 
+   Retirement first reads the CLI inventories. If a retired plugin or
+   marketplace is still declared in the user's settings, it warns and skips
+   that item: CLI removal would also rewrite `settings.json`, following its
+   Stage-1 symlink. Update Stage 1 before re-running deploy. Removals use
+   `--scope user` so they cannot alter the caller's project settings; a
+   marketplace registered outside that scope stays put with a warning.
+   Inventory and removal failures are visible warnings, never a silent success.
+
 8. **Seed the trust anchor.** Marks `$HOME` trusted in `~/.claude/.claude.json`
    (`hasTrustDialogAccepted: true`) so Claude Code's parent-dir trust walk
    covers every repo under `$HOME` with no folder-trust prompt. Keyed off

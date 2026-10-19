@@ -35,6 +35,9 @@ than 2026-10-18".
   `session-work-init.sh` as a heavy hook: it belongs on resume, which is where
   the current Stage-1 settings run it. New `verify-ops-selftest.sh` drives
   these checks against fixture trees under a throwaway `HOME`.
+  Review regressions also cover quoted and template-literal pins, JSON-escaped
+  ids, Opus 5 in skill workflows and commands, Haiku provider/context suffixes,
+  and a missing Haiku pin in another profile.
 - **Deploy never writes the Stage-1 settings.** `deploy.sh` step 8 ran
   `model-probe.sh --refresh`, which rewrote the `"model"` line of
   `~/.claude/settings.json`: a symlink into the user's linuxploitacious
@@ -42,23 +45,32 @@ than 2026-10-18".
   diff that fails that checkout's next `git pull --ff-only` whenever upstream
   changed the same file. The step is gone. `model-probe.sh` is
   now report-only: it probes each distinct pinned id and prints ok, FAIL, or
-  UNSURE, with `--list` for a no-API dry run, and never writes a file. New
-  `model-probe-selftest.sh` proves it against a mock CLI, including that `HOME`
-  is byte-identical afterwards. BOOTSTRAP recon reports its result instead of
+  UNSURE, with `--list` for a no-API dry run, and never edits settings. It honors
+  `CLAUDE_CONFIG_DIR` and disables user customizations, tools, and transcript
+  persistence while keeping subscription authentication. The CLI can update
+  its own cache/auth state; policy-managed hooks still apply. New
+  `model-probe-selftest.sh` checks those flags against a mock CLI, including
+  that the mock leaves `HOME` unchanged. BOOTSTRAP recon reports its result instead of
   "settling the pin".
 - **The caveman plugin is retired, not reinstalled.** `deploy.sh` and
   `deploy.ps1` installed caveman, unpinned, from its third-party marketplace
   right after Stage 1 uninstalled it. Both now uninstall caveman and ponytail
   through the CLI, like Stage 1. `DEPLOYMENT.md` verification checks they are
   absent, that the Stage-1 settings file is clean, and that the gate passes.
+  Retirement warns and skips declarations whose removal would rewrite
+  settings, scopes CLI removals to the user, and reports inventory/removal
+  failures. `plugin-retire-selftest.py` checks both deployers against mock and
+  local real CLI fixtures with symlinked Stage-1 settings.
 - **Permission defaults disclosed and made a choice.** README "Opinionated by
   design" now states what the Stage-1 settings turn on:
   `permissions.defaultMode: "bypassPermissions"`,
   `skipDangerousModePermissionPrompt`, `remoteControlAtStartup`, and
   auto-compaction, and what each means. BOOTSTRAP gains Round F, an explicit
   step to keep those defaults or switch to normal permission prompts (in the
-  terminal launch shim, or enforced through managed settings), with the exact
-  change and without editing the Stage-1 file.
+  terminal launch shim, or a managed normal default with bypass disabled),
+  with the exact change and without editing the Stage-1 file. Existing allow
+  rules and explicit CLI/IDE modes still apply; custom launch settings also
+  need the Remote Control opt-out.
 - **Questions use the structured question tool again.** The "AskUserQuestion
   is retired" rule is reversed in `CLAUDE.md`, the charter, and
   `working-preferences.md`: ask with the structured question tool where one

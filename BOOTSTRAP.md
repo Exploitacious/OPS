@@ -70,13 +70,17 @@ so recon is transparent, not spooky.
   .claude-config/bin/model-probe.sh --list   # what the settings pin; no API call
   .claude-config/bin/model-probe.sh          # one short request per distinct id
   ```
-  Report only: it prints `ok`, `FAIL`, or `UNSURE` per pinned id and changes
-  nothing. Model availability is plan-dependent and most Operators don't know
-  their own entitlements, so detect it and report the result in the recon
-  summary instead of asking. If an id FAILs (the plan lacks that model), say
-  which one and what it serves (`CONTEXT/model-roles.md`), and point the
+  Report only: it prints `ok`, `FAIL`, or `UNSURE` per pinned id and never edits
+  settings. User hooks, plugin sync, tools, and transcript persistence are
+  disabled; the CLI can update its own cache/auth state, and policy-managed
+  hooks still apply. Model availability is plan-dependent and most Operators
+  don't know their own entitlements, so check it and report the result in the
+  recon summary instead of asking. If an id FAILs, report the CLI error and
+  what that pin serves (`CONTEXT/model-roles.md`), and point the
   Operator at "Settings, pins, and the shared Stage-1 file" in that file; do
-  not edit a settings file to work around it. `UNSURE` (a timeout or a usage
+  not edit a settings file to work around it. A failed request can also mean
+  an authentication, network, or CLI problem, not a missing entitlement.
+  `UNSURE` (a timeout or a usage
   limit) says nothing about entitlement; mention it and move on.
 - **Repos under `~`:** a shallow scan for `.git` dirs (e.g.
   `find ~ -maxdepth 3 -name .git -type d 2>/dev/null | head -40`) sketches
@@ -161,9 +165,10 @@ Then ask, with these options:
   for `/remote-control`. Applies to every session launched through the
   `claude()` shell function; IDE extensions and other launchers keep the
   Stage-1 defaults.
-- `Normal permission prompts everywhere, enforced` (needs admin rights): the
-  same, for every launch path and every user on the machine, and bypass mode
-  can no longer be entered at all.
+- `Managed normal default, bypass disabled` (needs admin rights): set the
+  normal starting default and disable Remote Control at startup for every
+  launch path and user on the machine. Bypass mode cannot be entered, but
+  other explicit CLI or IDE permission-mode choices still apply.
 
 Prompts and the full-autonomy posture pull against each other: with prompts
 on, a run stops at each one until the Operator answers. If they pick prompts,
@@ -183,10 +188,11 @@ in their linuxploitacious checkout; an edit there dirties it, and its next
   settings file, so these keys win for that session; a re-deploy leaves the
   edited function alone. When the Operator passes their own `--settings` to a
   launch, the shim adds nothing, so they add `--permission-mode default` to
-  that launch. `"acceptEdits"` instead of `"default"` is the middle ground
-  (file edits without asking, shell commands still ask).
-- **Everywhere, enforced:** give the Operator this file to install with admin
-  rights (merge it into an existing file rather than overwrite one) at
+  that launch and merge `"remoteControlAtStartup":false` into their own
+  settings JSON as well. `"acceptEdits"` instead of `"default"` is the middle
+  ground (file edits without asking, unapproved shell commands still ask).
+- **Managed default, bypass disabled:** give the Operator this file to install
+  with admin rights (merge it into an existing file rather than overwrite one) at
   `/etc/claude-code/managed-settings.json` (Linux and WSL),
   `/Library/Application Support/ClaudeCode/managed-settings.json` (macOS), or
   `C:\Program Files\ClaudeCode\managed-settings.json` (Windows):
@@ -199,13 +205,22 @@ in their linuxploitacious checkout; an edit there dirties it, and its next
     "remoteControlAtStartup": false
   }
   ```
-  Managed settings outrank every other file and every `--settings` flag, and
+  Managed settings outrank every other settings file and `--settings` JSON.
   `disableBypassPermissionsMode` also rejects `--dangerously-skip-permissions`.
+  The starting default is not a mode lock: an explicit `--permission-mode`
+  or an IDE's saved mode can still select another non-bypass mode, including
+  `auto` or `acceptEdits`. Set those launchers to `default` too.
   Do not run the install yourself: it is a system-wide change the Operator
   makes.
 
-Check it took: in a new shell, launch `claude`; the footer no longer shows
-bypass permissions mode, and the first shell command asks before it runs.
+Existing permission `allow` rules still apply in normal mode, including broad
+shell approvals. Review `/permissions` with the Operator; changing the default
+does not erase those approvals. See [permission-mode precedence](https://code.claude.com/docs/en/permission-modes#which-mode-a-session-starts-in)
+and [permission rules](https://code.claude.com/docs/en/permissions#manage-permissions).
+
+Check it took: in a new shell, launch `claude`; the footer shows the normal
+mode, Remote Control has not connected, and a shell command without an
+existing approval asks before it runs. Check IDE launchers separately.
 Record the choice in the marker (`permissions=keep`, `permissions=shell`, or
 `permissions=managed`) and as a dated line under `working-preferences.md`
 § "Standing Orders", so a later session never quietly reverts it.

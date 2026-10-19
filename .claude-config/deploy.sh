@@ -436,21 +436,66 @@ CLAUDE_BIN="$(find_claude 2>/dev/null || true)"
 # unpinned, from its third-party marketplace head, right after Stage 1 had
 # uninstalled it; Stage 1 retires both plugins because their terse-prose and
 # lazy-engineering modes are now part of the harness's own operating rules.
-# It now UNINSTALLS any left on an already-provisioned host and is a no-op once
-# they are gone (idempotent). Removal goes through the CLI only, never an rm of
-# a plugins dir: the CLI owns profile selection and cleanup, and deleting
-# ~/.claude paths after a failed command can break a still-registered or
-# different profile (the same reasoning as Stage 1's retire step).
-if [[ -n "$CLAUDE_BIN" ]]; then
-  msg_ok "Claude CLI: $CLAUDE_BIN"
+# The CLI also edits settings.json when removing a declared plugin or
+# marketplace. Leave those declarations to Stage 1: CLI writes also follow
+# its symlink into another tracked checkout. Never delete plugin dirs by hand.
+retire_plugins() {
+  local settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  local plugins markets plg rc
+  if ! command -v jq >/dev/null 2>&1; then
+    msg_warn "jq unavailable: cannot safely inspect plugin retirement; skipping."
+    return 0
+  fi
+  if [[ -f "$settings" ]] && ! jq -e 'type == "object" and
+      ((.enabledPlugins // {}) | type == "object") and
+      ((.extraKnownMarketplaces // {}) | type == "object")' "$settings" >/dev/null 2>&1; then
+    msg_warn "Cannot read plugin declarations in $settings; retirement skipped."
+    return 0
+  fi
+  if ! plugins="$("$CLAUDE_BIN" plugin list --json 2>/dev/null)" ||
+     ! jq -e 'type == "array"' <<< "$plugins" >/dev/null 2>&1; then
+    msg_warn "Cannot list installed plugins; retirement skipped. Run: claude plugin list --json"
+    return 0
+  fi
+  if ! markets="$("$CLAUDE_BIN" plugin marketplace list --json 2>/dev/null)" ||
+     ! jq -e 'type == "array"' <<< "$markets" >/dev/null 2>&1; then
+    msg_warn "Cannot list plugin marketplaces; retirement skipped. Run: claude plugin marketplace list --json"
+    return 0
+  fi
   for plg in caveman ponytail; do
-    if "$CLAUDE_BIN" plugin uninstall "${plg}@${plg}" >/dev/null 2>&1; then
-      msg_ok "Removed retired plugin: ${plg}"
+    if [[ -f "$settings" ]] && jq -e --arg id "$plg@$plg" --arg name "$plg" \
+        '((.enabledPlugins // {}) | has($id)) or ((.extraKnownMarketplaces // {}) | has($name))' \
+        "$settings" >/dev/null 2>&1; then
+      msg_warn "Retired plugin $plg is declared in $settings; removal would edit Stage-1 settings. Update Stage 1, then re-run deploy."
+      continue
     fi
-    if "$CLAUDE_BIN" plugin marketplace remove "$plg" >/dev/null 2>&1; then
-      msg_ok "Removed retired plugin marketplace: ${plg}"
+    if jq -e --arg id "$plg@$plg" '.[] | select(.id == $id and .scope != "user")' <<< "$plugins" >/dev/null; then
+      msg_warn "Retired plugin $plg remains in a project or local scope; left unchanged to protect project settings."
+    fi
+    if jq -e --arg id "$plg@$plg" '.[] | select(.id == $id and .scope == "user")' <<< "$plugins" >/dev/null; then
+      if "$CLAUDE_BIN" plugin uninstall "$plg@$plg" --scope user >/dev/null 2>&1; then
+        msg_ok "Removed retired plugin: $plg"
+      else
+        rc=$?
+        msg_warn "Retired plugin $plg could not be removed (rc=$rc); inspect: claude plugin list --json"
+        continue
+      fi
+    fi
+    # Unscoped marketplace removal can edit the caller's project settings.
+    if jq -e --arg name "$plg" '.[] | select(.name == $name)' <<< "$markets" >/dev/null; then
+      if "$CLAUDE_BIN" plugin marketplace remove "$plg" --scope user >/dev/null 2>&1; then
+        msg_ok "Removed retired plugin marketplace: $plg"
+      else
+        rc=$?
+        msg_warn "Retired marketplace $plg remains (rc=$rc); inspect its declaration before removing it: claude plugin marketplace list --json"
+      fi
     fi
   done
+}
+
+if [[ -n "$CLAUDE_BIN" ]]; then
+  msg_ok "Claude CLI: $CLAUDE_BIN"
+  retire_plugins
 else
   msg_warn "Claude CLI not found in PATH or standard install locations."
   msg_warn "Checked: \$PATH, ~/.local/bin, ~/.local/share/pnpm, ~/.npm-global/bin, /usr/local/bin, /opt/homebrew/bin"
