@@ -45,6 +45,10 @@
 #   - a marker with no closing brace WARNs and leaves the file unchanged
 #   - preserves the file mode, leaves no temp files
 #
+# deploy_failure_lines (the closing summary of a failed deploy):
+#   - names every failure; adds the "sessions boot without CONTEXT/core.md"
+#     note only when core-rule is among them, never for git-identity alone
+#
 # Run:  bash ~/OPS/.claude-config/bin/tests/deploy-rc-wiring-test.sh
 # Exit: 0 = all pass; non-zero on first failure.
 set -uo pipefail
@@ -660,5 +664,17 @@ pass "refuses symlinked localrc"
 leftover="$(find "$TDIR" -name '*.wrapper.*' -o -name '*.legacy.*' -o -name '*.ultracode.*' | head -1)"
 [ -z "$leftover" ] || fail "temp file left behind: $leftover"
 pass "leaves no temp files behind"
+
+# --- deploy_failure_lines ------------------------------------------------------
+load extract_fn deploy_failure_lines
+c_red() { printf '%s\n' "$*"; }
+out="$(deploy_failure_lines " git-identity")"
+printf '%s' "$out" | grep -qF 'Deploy finished with failures: git-identity' || fail "failure summary does not name git-identity: $out"
+if printf '%s' "$out" | grep -q 'core-rule\|core.md'; then fail "git-identity alone printed the core-rule note: $out"; fi
+out="$(deploy_failure_lines " core-rule git-identity")"
+printf '%s' "$out" | grep -qF 'core-rule means sessions boot without CONTEXT/core.md' || fail "core-rule failure lost its note: $out"
+out="$(deploy_failure_lines " skills-mount")"
+if printf '%s' "$out" | grep -q 'core.md'; then fail "skills-mount alone printed the core-rule note: $out"; fi
+pass "failure summary adds the core-rule note only when core-rule failed"
 
 echo "ALL PASS"
