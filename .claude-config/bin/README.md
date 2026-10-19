@@ -2,30 +2,6 @@
 
 Small, tracked helper scripts that ship with OPS and sync to every machine.
 
-## `compact-cycle.sh`: automated /compact for a Claude session in tmux
-
-The deterministic half of the automated compact ritual (the judgment half is
-the `pre-compact-synthesis` skill, which runs the synthesis and writes the
-resume baton BEFORE spawning this). A session cannot fire `/compact` on itself,
-so this spawns a detached `Compactor-<Key>` tmux session (plain bash, no Claude)
-that waits for the target pane to go idle, types `/compact`, watches until
-compaction completes, types the baton (or `--resume` text) as the next user
-message, and self-destructs. On error/timeout it never types the resume: the
-target stays paused with synthesis already on disk.
-
-```
-compact-cycle.sh --target <Session|Session:win.pane> [--baton FILE] [--resume "TEXT"]
-                 [--no-resume] [--grace S] [--idle-timeout S] [--timeout S]
-```
-
-Runtime state (locks, logs, status, batons): `~/.claude-compact-cycle/`.
-Consumers: the skill's self-compact exit, the `[context-watch]` escalation
-ladder (`hooks/context-watch.sh`: Stop nags at 65/78/86/92% of the window
-plus mid-turn PostToolUse injections from 86%; both registered in the Stage 1
-`settings.json` template); `--no-resume` serves a session that re-wakes on
-its own. tmux gotcha baked in: targets use the `=Name:` exact form:
-bare names unique-prefix-match and pane-level commands reject bare `=Name`.
-
 ## `claude-window-ping.sh`: scheduled 5h-window opener
 
 Cron-fired dumb pipe: sends one headless `ping` to a brand-new Claude Code

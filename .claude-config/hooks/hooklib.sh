@@ -76,6 +76,19 @@ hook_python() {
   return 2
 }
 
+# hook_timeout: the timeout command a hook wraps a bounded call in. Prints
+# gnutimeout when present, else timeout; returns 1 when neither exists.
+# Why: on some hosts /usr/bin/timeout is the uutils build, which polls for its
+# child's exit and adds about 100 ms to every call (measured: 106 ms for
+# `timeout 3 true` against 5 ms for `gnutimeout 3 true`). Ubuntu ships GNU's
+# build beside it as gnutimeout. Both take -k and a duration in seconds, and
+# both exit 124 when the limit kills the command.
+hook_timeout() {
+  if command -v gnutimeout >/dev/null 2>&1; then printf gnutimeout; return 0; fi
+  if command -v timeout >/dev/null 2>&1; then printf timeout; return 0; fi
+  return 1
+}
+
 # Normalize a possibly-Windows path (drive letter, back/forward slashes) to a
 # POSIX path bash can stat. Uses cygpath when present (Git Bash); otherwise
 # prints the input unchanged (already POSIX on Linux/macOS).
@@ -125,9 +138,11 @@ hook_core_rule_matches() {
 }
 
 # work_session_key: the stable per-session key for session-scoped state files
-# under ~/.claude-compact-cycle/ (session-start stamp, work-log, resume baton).
-# MUST match the resume-baton key formula in the pre-compact-synthesis skill so
-# all surfaces agree on one name for a session:
+# under ~/.claude-compact-cycle/ (session-start stamp, work-log; the directory
+# name predates the retired tmux typer and is kept so existing state stays
+# readable). The hooks (session-work-init, pre-compact, session-briefing) and
+# the skills (session-close, pre-compact-synthesis) all derive the key here, so
+# every surface agrees on one name for a session:
 #     tmux name | tr ':. ' '---' | keep [A-Za-z0-9-]
 # In tmux: the live session name, stable for the life of the session, which is
 # why session-work-init.sh registers LAST at boot. Outside tmux: fall back to
