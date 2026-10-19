@@ -449,6 +449,11 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   means anything: the gate reads host state from `$HOME`, so a machine with no
   deployed OPS needs the throwaway-`HOME` run. AGENTS carries the same caveat,
   and BOOTSTRAP's recon gains a git-identity probe.
+- **A workflow script that did not parse.** The `context-coherence` lane prompt
+  in `.claude-config/workflows/harness-audit.js` had no closing backtick, so
+  the file was a syntax error; `node --check` on Node 24 had been reporting it
+  clean. The backtick is restored. The new `syntax` job catches this class, and
+  CONTRIBUTING and AGENTS now say how to check a workflow script.
 - **Third-party notices.** `SKILLS/THIRD_PARTY_NOTICES.md` lists every work the
   skills adapt, with its author, license, what OPS took and where the full
   license text lives: the `grill-me`, `tdd` and `diagnosing-bugs` skills from
@@ -461,17 +466,19 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   request, with no secrets, so a fork's pull request gets the same run. Four
   jobs: `syntax` (`bash -n`, `node --check`, `python3 -m py_compile` and a
   PowerShell parse over every tracked script, found by extension or `#!` line;
-  an empty list fails the job), `suites` (every suite under
-  `bin/tests/`, the `*-selftest` scripts and the two PowerShell suites, the
-  destructive ones inside `sandbox-run`), `smoke` (a fresh install in a
-  throwaway `HOME` with the current Stage-1 settings, a git identity and
+  an empty list fails the job; the workflow scripts are checked as the async
+  function bodies they run as, because plain `node --check` rejects them on Node
+  18 and, on newer Node, reports no error for a broken one), `suites` (every
+  suite under `bin/tests/`, the `*-selftest` scripts and the two PowerShell
+  suites, the destructive ones inside `sandbox-run`), `smoke` (a fresh install
+  in a throwaway `HOME` with the current Stage-1 settings, a git identity and
   `deploy.sh --no-system` run twice, then `verify-ops.sh`), and `secrets`
   (gitleaks over the full history, from a binary pinned by SHA-256 because the
-  official action wants a license key for organization repositories, then
-  OPS's own `secrets-scan.sh`). Actions are pinned by commit. Every job is
-  skipped outside the template repository, so private copies made from the
-  template do not spend runner minutes on every daily backup push. Not
-  covered: Windows and macOS hosts, and the Claude Code CLI.
+  official action wants a license key for organization repositories, then OPS's
+  own `secrets-scan.sh`). Actions are pinned by commit. Every job is skipped
+  outside the template repository, so private copies made from the template do
+  not spend runner minutes on every daily backup push. Not covered: Windows and
+  macOS hosts, and the Claude Code CLI.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

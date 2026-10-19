@@ -73,8 +73,19 @@ what you touched:
 
 ```bash
 bash -n <each shell script you touched>
-node --check <each .js file you touched>
 python3 -m py_compile <each .py file you touched>   # use PYTHONPYCACHEPREFIX=/tmp/pyc to keep __pycache__ out of the tree
+```
+
+Every tracked `.js` file is a workflow script: an `export const meta` and a body
+that uses top-level `await` and `return`, because the workflow runner runs the
+body as an async function. Plain `node --check <file>` is the wrong check for
+them. Node 18 rejects the valid files, and newer releases detect the `export`
+and then report no error even for a file with an unclosed brace. Check the body
+in the shape it runs in (error line numbers come out one higher than the
+source's):
+
+```bash
+{ echo ';(async () => {'; sed -E -e '1{/^#!/d}' -e 's/^export[[:space:]]+//' <file.js>; echo; echo '})'; } > /tmp/check.js && node --check /tmp/check.js
 ```
 
 **2. Every suite.** Run from your checkout root. This is the CI command; it

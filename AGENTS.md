@@ -36,8 +36,9 @@ current task allows.
   changed. A suite that runs a tool that deletes or moves files starts with
   the sandbox guard and runs only inside `.claude-config/bin/sandbox-run`
   (exit 97 elsewhere); the command line is in `.claude-config/bin/README.md`.
-  Every shell script you touch passes `bash -n`; every workflow script passes
-  `node --check`. In the template repository, CI
+  Every shell script you touch passes `bash -n`; every workflow script parses
+  (plain `node --check` is unreliable for them; CONTRIBUTING.md has the
+  command CI uses). In the template repository, CI
   (`.github/workflows/gate.yml`) runs the syntax checks, every suite, a
   fresh-install smoke test with `verify-ops.sh`, and a secrets scan on each push
   and pull request; CONTRIBUTING.md has the same commands for a local run.
@@ -49,7 +50,8 @@ current task allows.
 - This copy pushes only to its own private origin. The git-guard hook runs
   `.claude-config/bin/origin-private-check` on the agent pushes it can parse
   here and blocks one it cannot verify, or one to another remote. It is a
-  seatbelt, not a sandbox: DEPLOYMENT.md "Push gate" lists its limits.
+  seatbelt, not a sandbox: DEPLOYMENT.md, "What Stage 2 does" step 8 ("The
+  push gate"), lists its limits.
 - Contributions to the public template go by PR and follow
   [CONTRIBUTING.md](CONTRIBUTING.md): port the mechanic, never paste the file,
   keep your private-term list out of every PR and commit, and push the PR branch
