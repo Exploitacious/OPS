@@ -438,8 +438,11 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   anchor lives in `~/.claude/.claude.json`; deploy writes `~/.claude.json`,
   beside the directory. It also called a failed skill clone a warning, though
   that fails the deploy (`skills-mount`). It gains the exact outputs of its
-  verification commands, a recipe for testing a deploy under a throwaway `HOME`,
-  and a corrected count of the machinery deploy does not wire. CONTRIBUTING
+  verification commands, a recipe for testing a deploy under a throwaway `HOME`
+  (its clone's push URL is set to `/dev/null`: a new `HOME` hides neither your
+  `gh` login nor your SSH keys, so a clone of a private origin would otherwise
+  get deploy's `feat(memory): seed` commit pushed to the real origin), and a
+  corrected count of the machinery deploy does not wire. CONTRIBUTING
   gains the private-term rule (your list of private terms never goes in a file,
   a commit message or a PR), a section on where destructive tests run and why,
   and the `GIT_GUARD=off` rule for a PR branch. Its suite loop printed `FAILED`

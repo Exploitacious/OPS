@@ -332,6 +332,7 @@ run it under a throwaway `HOME`. CI does exactly this on every pull request
   mkdir -p ~/.claude
   curl -fsSL https://raw.githubusercontent.com/Exploitacious/linuxploitacious/HEAD/claude/.claude/settings.json -o ~/.claude/settings.json
   git clone <path or URL of your checkout> ~/OPS
+  git -C ~/OPS remote set-url --push origin /dev/null   # see below: never push from the copy
   bash ~/OPS/.claude-config/deploy.sh --no-system
   bash ~/OPS/.claude-config/bin/verify-ops.sh
 )
@@ -344,6 +345,16 @@ both commands exiting 0. `--no-system` keeps deploy off your crontab and root's
 rc files. Deploy still clones the public skill source over HTTPS, so the test
 needs network access, and the throwaway directory stays in your temp dir until
 you delete it.
+
+Do not drop the `set-url --push` line when you clone a URL. Deploy's memory sync
+commits to the copy and pushes it whenever the push gate finds origin private,
+and a new `HOME` hides neither your GitHub login (an exported `GH_TOKEN` or
+`GITHUB_TOKEN`, or `GH_CONFIG_DIR`) nor your SSH keys (ssh finds `~/.ssh`
+through the passwd entry, not `$HOME`). Without the line, a clone of your
+private repository gets a `feat(memory): seed .claude-memory/...` commit pushed
+to the real origin, and `--no-system` does not prevent that. With the push URL
+at `/dev/null` the gate answers "origin is a local path" and the commit stays in
+the throwaway copy (the same answer a clone of a local path gets).
 
 ## T3 Code hosts
 
