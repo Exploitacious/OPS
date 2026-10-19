@@ -40,11 +40,11 @@ f=$(mktemp); git -C ~/OPS show ops-template/main:.claude-config/bin/harness-upda
 (cd ~/OPS && bash "$f")                                                          # report only
 ```
 
-The scanner is self-contained by contract (it finds its root from the working directory and loads no helper file), so a temp copy works in any layout. With no marker it runs a first sync: every file that differs is CONFLICT, so nothing applies itself, and the walk through the flow below is per feature, with the Operator deciding bring in, adapt, or defer. `--apply-safe` from the temp copy only copies NEW files on a first sync. Step 7 writes the first marker, and from then on scans are deltas.
+The scanner is self-contained by contract (it finds its root from the working directory and loads no helper file), so a temp copy works in any layout. Because the working directory decides which repo it scans, every command below runs from inside the copy, `(cd ~/OPS && ...)`; run anywhere else, the scan refuses with `ERR_NOREPO` and changes nothing. With no marker it runs a first sync: every file that differs is CONFLICT, so nothing applies itself, and the walk through the flow below is per feature, with the Operator deciding bring in, adapt, or defer. `--apply-safe` from the temp copy only copies NEW files on a first sync. Step 7 writes the first marker, and from then on scans are deltas.
 
 ## The flow
 
-1. Scan, report-only. Run `~/OPS/.claude-config/bin/harness-update-scan.sh`. It ensures the `ops-template` remote exists (HTTPS, no SSH key needed to read a public template), fetches it, and prints a classified report plus a summary line. It touches and commits nothing. Add `--verbose` to list IDENTICAL files too.
+1. Scan, report-only. Run `(cd ~/OPS && .claude-config/bin/harness-update-scan.sh)`. It ensures the `ops-template` remote exists (HTTPS, no SSH key needed to read a public template), fetches it, and prints a classified report plus a summary line. It touches and commits nothing. Add `--verbose` to list IDENTICAL files too.
 
 2. Summarize the upstream CHANGELOG for the Operator in plain terms. The scan already fetched `ops-template`, so read what changed and translate it out of repo-speak:
 
@@ -57,7 +57,7 @@ The scanner is self-contained by contract (it finds its root from the working di
 
 3. Ask the Operator what to apply. Two decisions. Apply the safe classes (NEW + UPDATE) now? For each CONFLICT, how: port by pattern (recommended, carry the mechanic not the bytes), skip (leave the local version), or show the diff first (`git -C ~/OPS diff ops-template/main -- <path>`) then decide. Never bundle conflicts into one yes/no; each is its own judgment.
 
-4. Apply. Safe classes in one shot: `~/OPS/.claude-config/bin/harness-update-scan.sh --apply-safe`. It copies NEW + UPDATE only, never CONFLICT, never a hard-excluded file, never a deletion, never a commit. Then hand-port each approved CONFLICT: read the upstream version for structure and intent, rewrite it against the local tree's shape, leave unapproved ones alone. This is `CONTRIBUTING.md`'s porting discipline run public to private: port the pattern, do not paste the file.
+4. Apply. Safe classes in one shot: `(cd ~/OPS && .claude-config/bin/harness-update-scan.sh --apply-safe)`. It copies NEW + UPDATE only, never CONFLICT or MODE, never a hard-excluded file, never a deletion, never a commit. For each MODE line, ask the Operator, then run the `chmod` it names if the bit was not set on purpose. Then hand-port each approved CONFLICT: read the upstream version for structure and intent, rewrite it against the local tree's shape, leave unapproved ones alone. This is `CONTRIBUTING.md`'s porting discipline run public to private: port the pattern, do not paste the file.
 
 5. Translate paths on a renamed fork. Upstream assumes a root of `~/OPS` and `ops-*` unit and agent names. If this copy renamed itself, detected by comparing the checkout root and the local `AGENTS.md` (or `CLAUDE.md`, when present) against upstream's `~/OPS`, every copied and ported file needs a translation pass. After `--apply-safe`, sweep the applied files for `~/OPS`, `ops-template`, and `ops-*` names and rewrite them to the local convention. A verbatim upstream path in a renamed fork is a silent breakage.
 
@@ -81,8 +81,9 @@ The scanner is self-contained by contract (it finds its root from the working di
 | Class | Meaning | Action |
 |---|---|---|
 | NEW | Upstream has it, local doesn't | Safe copy (`--apply-safe`) |
-| UPDATE | Upstream changed it; local still matches the last synced copy | Safe fast-forward (`--apply-safe`) |
+| UPDATE | Upstream changed it (content, mode, or both); local still matches the last synced copy | Safe fast-forward (`--apply-safe`) |
 | CONFLICT | Changed upstream and locally (or first sync, no baseline) | Port by pattern, skip, or diff; never auto-apply |
+| MODE | Same content, but the exec bit differs from upstream and from the last synced copy (or first sync) | Ask, then `chmod a+x` or `a-x` by hand; never auto-applied |
 | IDENTICAL | Same on both sides | Nothing |
 | REMOVED | Upstream deleted it; local still has it | Manual call; the scan never auto-deletes |
 

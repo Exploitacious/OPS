@@ -9,7 +9,7 @@
 # identity/memory/handoff surfaces are hard-excluded in BOTH directions, and the
 # CONFLICT class is never auto-applied.
 #
-# Usage:
+# Usage (from inside the OPS copy: it scans the repo of the working directory):
 #   harness-update-scan.sh                 report only (default): classify, print, touch nothing
 #   harness-update-scan.sh --apply-safe     copy NEW + UPDATE classes only; never CONFLICT, never delete
 #   harness-update-scan.sh --verbose        also list IDENTICAL files (default: counted, not listed)
@@ -27,8 +27,14 @@
 # Env overrides: OPS_UPSTREAM (owner/repo), OPS_UPSTREAM_BRANCH (default main),
 # OPS_REMOTE (default ops-template).
 #
-# Exit: 0 = scan ran · 2 ERR_USAGE · 3 ERR_NOREPO · 4 ERR_REMOTE · 5 ERR_FETCH ·
-#       6 ERR_APPLY
+# Classes compare (mode, blob), not the blob alone, so a mode-only change (a
+# script made executable upstream) is an UPDATE when the local mode still
+# matches the last-synced one, and a MODE line (same content, different exec
+# bit) otherwise; MODE is reported, never applied. A template symlink is
+# applied as a symlink.
+#
+# Exit: 0 = scan ran · 2 ERR_USAGE · 3 ERR_NOREPO (not inside an OPS copy) ·
+#       4 ERR_REMOTE · 5 ERR_FETCH · 6 ERR_APPLY
 set -uo pipefail
 
 REMOTE="${OPS_REMOTE:-ops-template}"
@@ -53,8 +59,18 @@ done
 # The scan must run inside the OPS working tree: it compares the tree, not HEAD,
 # so the Operator's uncommitted personalization is part of the input.
 OPS_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "ERR_NOREPO: not inside a git repository (run from the OPS working tree)" >&2; exit 3; }
+  echo "ERR_NOREPO: not inside a git repository (run from the OPS working tree: cd ~/OPS)" >&2; exit 3; }
 cd "$OPS_ROOT" || { echo "ERR_NOREPO: cannot cd to repo root $OPS_ROOT" >&2; exit 3; }
+# Refuse any repo that is not an OPS copy, before the first write. The scan
+# acts on the cwd's repo, so run from a project clone it added the
+# ops-template remote there and --apply-safe copied the whole template into it
+# (2026-10-19). Every OPS copy has BOOTSTRAP.md (every template commit since the
+# first release carries it) or .claude-config/ (which holds the marker).
+if [ ! -f BOOTSTRAP.md ] && [ ! -d .claude-config ] && [ ! -f .claude-config/ops-upstream-ref ]; then
+  echo "ERR_NOREPO: $OPS_ROOT is not an OPS copy (no BOOTSTRAP.md, no .claude-config/); nothing was changed." >&2
+  echo "  Run the scan from inside your copy, for example: (cd ~/OPS && bash <this script> [--apply-safe])" >&2
+  exit 3
+fi
 
 MARKER=".claude-config/ops-upstream-ref"
 
@@ -179,12 +195,40 @@ is_excluded() {
   return 1
 }
 
-up_blob()   { git rev-parse -q --verify "$UP_REF:$1"      2>/dev/null; }  # blob sha upstream, empty if absent
-base_blob() { git rev-parse -q --verify "$LAST_SYNCED:$1" 2>/dev/null; }  # blob sha at last sync, empty if absent
-# Local blob sha via the same filters git would apply on commit (--path honors
-# .gitattributes eol/normalization) so a CRLF working-tree checkout does not read
-# as a false CONFLICT against the LF-normalized upstream blob.
-loc_blob()  { [ -f "$OPS_ROOT/$1" ] && git hash-object --path "$1" -- "$OPS_ROOT/$1" 2>/dev/null; }
+# Entries are "<mode> <blob>". A blob sha does not include the mode, so a file
+# made executable upstream with the same content compared IDENTICAL and was
+# never applied, and a copy whose scripts lost the exec bit was never told.
+# Paths are literal, never pathspecs.
+tree_entry() { GIT_LITERAL_PATHSPECS=1 git ls-tree "$1" -- "$2" 2>/dev/null | awk '$2 != "tree" {print $1 " " $3; exit}'; }
+up_entry()   { tree_entry "$UP_REF" "$1"; }                                # empty if absent upstream
+base_entry() { [ -n "$LAST_SYNCED" ] && tree_entry "$LAST_SYNCED" "$1"; }  # empty if absent at last sync
+# Where the filesystem keeps no exec bit (core.fileMode=false: Windows, some
+# mounts), the local mode comes from the index, or upstream's for an untracked
+# file, so the bit never reads as a difference.
+FILEMODE="$(git config --bool core.fileMode 2>/dev/null)" || FILEMODE=true
+# loc_entry <path>: the local "<mode> <blob>", empty when absent. The blob goes
+# through the same filters git applies on commit (--path honors .gitattributes
+# eol/normalization), so a CRLF checkout does not read as a false CONFLICT. A
+# symlink hashes as git stores it (its target), never the file it points to.
+# Exit 2 when the path exists but cannot be read as a file or link (a hash
+# failure, a directory in the way): that must never read as "absent" and NEW.
+loc_entry() {
+  local f="$OPS_ROOT/$1" sha mode t
+  if [ -L "$f" ]; then
+    t="$(readlink "$f")" && sha="$(printf '%s' "$t" | git hash-object --stdin 2>/dev/null)" || return 2
+    printf '120000 %s' "$sha"
+  elif [ -f "$f" ]; then
+    sha="$(git hash-object --path "$1" -- "$f" 2>/dev/null)" && [ -n "$sha" ] || return 2
+    if [ "$FILEMODE" = false ]; then
+      mode="$(GIT_LITERAL_PATHSPECS=1 git ls-files -s -- "$1" 2>/dev/null | awk '{print $1; exit}')"
+      [ -n "$mode" ] || mode="${2%% *}"
+    elif [ -x "$f" ]; then mode=100755
+    else mode=100644; fi
+    printf '%s %s' "${mode:-100644}" "$sha"
+  elif [ -e "$f" ]; then
+    return 2
+  fi
+}
 
 # Only files upstream changed since last sync. --no-renames is required: git
 # diff detects renames by default (diff.renames, git 2.9+), and a rename line
@@ -192,26 +236,32 @@ loc_blob()  { [ -f "$OPS_ROOT/$1" ] && git hash-object --path "$1" -- "$OPS_ROOT
 # old path never REMOVED) and the next sync commit advanced last_synced past it
 # for good. With --no-renames a rename is a D (old path, REMOVED) plus an A (new
 # path, NEW). --name-only drops the status column, and -z stops git C-quoting
-# unusual paths, which would match no blob.
-candidates_delta() {
-  git diff --no-renames --name-only -z "$LAST_SYNCED..$UP_REF" | tr '\0' '\n'
-}
-candidates_first() { git ls-tree -r --name-only -z "$UP_REF" | tr '\0' '\n'; }  # every upstream file (local-only paths never enter here)
+# unusual paths, which would match no blob. The list stays NUL-delimited to the
+# reader, so a path holding a newline is one path, not two fragments.
+candidates_delta() { git diff --no-renames --name-only -z "$LAST_SYNCED..$UP_REF"; }
+candidates_first() { git ls-tree -r --name-only -z "$UP_REF"; }  # every upstream file (local-only paths never enter here)
 
 gen_candidates() { if [ "$MODE" = delta ]; then candidates_delta; else candidates_first; fi; }
 
-NEW=0; UPD=0; CON=0; IDENT=0; REM=0; EXC=0
+NEW=0; UPD=0; CON=0; IDENT=0; REM=0; EXC=0; MODES=0
 APPLY_LIST=()
+SEEN=$'\n'   # the delta's paths, so the mode audit below skips them
+
+is_file_mode() { case "$1" in 100644|100755) return 0 ;; esac; return 1; }
 
 classify_one() {
-  local path="$1" up loc base
+  local path="$1" up loc base rc=0
   if is_excluded "$path"; then EXC=$((EXC+1)); return 0; fi
-  up="$(up_blob "$path")"
-  loc="$(loc_blob "$path")"
+  SEEN="$SEEN$path"$'\n'
+  up="$(up_entry "$path")"
+  loc="$(loc_entry "$path" "$up")" || rc=$?
   if [ -z "$up" ]; then
     # gone from upstream. Never auto-delete a local file; surface it for a manual call.
-    if [ -n "$loc" ]; then echo "REMOVED   $path"; REM=$((REM+1)); fi
+    if [ -n "$loc" ] || [ "$rc" -ne 0 ]; then echo "REMOVED   $path"; REM=$((REM+1)); fi
     return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "CONFLICT  $path (the local path cannot be read as a file; check it by hand)"; CON=$((CON+1)); return 0
   fi
   if [ -z "$loc" ]; then
     echo "NEW       $path"; NEW=$((NEW+1)); APPLY_LIST+=("$path"); return 0
@@ -222,35 +272,87 @@ classify_one() {
     return 0
   fi
   # differs upstream. UPDATE only when local still matches the last-synced version
-  # (Operator never touched it) → a safe fast-forward. Otherwise both sides moved.
+  # (Operator never touched it) → a safe fast-forward. A mode-only difference is
+  # an UPDATE too when the local mode is still the last-synced one. Otherwise
+  # both sides moved.
   if [ "$MODE" = delta ]; then
-    base="$(base_blob "$path")"
-    if [ -n "$base" ] && [ "$loc" = "$base" ]; then
+    base="$(base_entry "$path")"
+    if [ -n "$base" ] && { [ "$loc" = "$base" ] || { [ "${loc#* }" = "${up#* }" ] && [ "${loc%% *}" = "${base%% *}" ]; }; }; then
       echo "UPDATE    $path"; UPD=$((UPD+1)); APPLY_LIST+=("$path"); return 0
     fi
   fi
+  if [ "${loc#* }" = "${up#* }" ] && is_file_mode "${loc%% *}" && is_file_mode "${up%% *}"; then
+    mode_line "$path" "${loc%% *}" "${up%% *}"; return 0
+  fi
   echo "CONFLICT  $path"; CON=$((CON+1)); return 0
+}
+
+mode_line() {
+  local fix="a+x"; [ "$3" = 100644 ] && fix="a-x"
+  echo "MODE      $1 (local $2, upstream $3: same content; chmod $fix if you did not change it on purpose)"
+  MODES=$((MODES+1))
+}
+
+# Delta mode visits only what upstream changed, so a script an earlier scanner
+# wrote without its exec bit (the copy then failed deploy's memory-init check)
+# was never seen. This pass reports every other upstream file whose content
+# matches but whose exec bit differs. Never applied: the bit may be on purpose.
+mode_audit() {
+  [ "$FILEMODE" = false ] && return 0
+  local entry mode rest sha path f lm
+  while IFS= read -r -d '' entry; do
+    mode="${entry%% *}"; rest="${entry#* }"; rest="${rest#* }"
+    sha="${rest%%$'\t'*}"; path="${entry#*$'\t'}"
+    is_file_mode "$mode" || continue
+    is_excluded "$path" && continue
+    case "$SEEN" in *$'\n'"$path"$'\n'*) continue ;; esac
+    f="$OPS_ROOT/$path"
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    if [ -x "$f" ]; then lm=100755; else lm=100644; fi
+    [ "$lm" = "$mode" ] && continue
+    [ "$(git hash-object --path "$path" -- "$f" 2>/dev/null)" = "$sha" ] || continue
+    mode_line "$path" "$lm" "$mode"
+  done < <(git ls-tree -r -z "$UP_REF")
 }
 
 # The mode comes from the upstream tree entry, not the redirect: `> dest`
 # creates a NEW file at the umask mode (no exec bit) and keeps an UPDATE file's
 # old mode, so a template script arrived non-executable and deploy.sh's
 # `[[ -x memory-init ]]` failed the migration. 100755 means executable; any
-# other blob mode clears the bit, as a checkout would.
+# other blob mode clears the bit, as a checkout would. chmod names who (a+x,
+# a-x): a bare +x/-x is filtered by the umask, which under 027 left group or
+# other bits behind and made chmod fail. A 120000 entry is a symlink and is
+# created as one (`> dest` wrote its target as text). Each file is built
+# beside its destination and renamed into place: the old path (a symlink, or
+# this script while it runs) is replaced, never written through.
 apply_safe() {
-  local path dest mode rc=0
+  local path dest dir mode tmp target rc=0 n=0
   for path in "${APPLY_LIST[@]}"; do
-    dest="$OPS_ROOT/$path"
-    mkdir -p "$(dirname "$dest")" || { echo "ERR_APPLY: mkdir failed for $path" >&2; rc=1; continue; }
-    mode="$(git ls-tree "$UP_REF" -- "$path" 2>/dev/null | awk '{print $1; exit}')"
+    dest="$OPS_ROOT/$path"; dir="$(dirname "$dest")"
+    mode="$(tree_entry "$UP_REF" "$path")"; mode="${mode%% *}"
     if [ -z "$mode" ]; then
       echo "ERR_APPLY: no tree entry for $path in $UP_REF" >&2; rc=1; continue
     fi
-    if ! git cat-file -p "$UP_REF:$path" > "$dest" 2>/dev/null; then
-      echo "ERR_APPLY: could not write $path" >&2; rc=1; continue
+    if [ -d "$dest" ] && [ ! -L "$dest" ]; then
+      echo "ERR_APPLY: a directory is in the way of $path" >&2; rc=1; continue
     fi
-    if [ "$mode" = 100755 ]; then chmod +x "$dest"; else chmod -x "$dest"; fi \
-      || { echo "ERR_APPLY: wrote $path but could not set mode $mode" >&2; rc=1; continue; }
+    mkdir -p "$dir" || { echo "ERR_APPLY: mkdir failed for $path" >&2; rc=1; continue; }
+    n=$((n + 1)); tmp="$dir/.harness-update.$$.$n"
+    rm -f "$tmp"
+    if [ "$mode" = 120000 ]; then
+      target="$(git cat-file -p "$UP_REF:$path" 2>/dev/null)" && ln -s "$target" "$tmp" \
+        || { rm -f "$tmp"; echo "ERR_APPLY: could not create the symlink $path" >&2; rc=1; continue; }
+    else
+      git cat-file -p "$UP_REF:$path" > "$tmp" 2>/dev/null \
+        || { rm -f "$tmp"; echo "ERR_APPLY: could not write $path" >&2; rc=1; continue; }
+      if [ "$mode" = 100755 ]; then chmod a+x "$tmp"; else chmod a-x "$tmp"; fi \
+        || { rm -f "$tmp"; echo "ERR_APPLY: could not set mode $mode on $path" >&2; rc=1; continue; }
+    fi
+    # rm first: mv onto a symlink to a directory would move into that directory.
+    if { [ -e "$dest" ] || [ -L "$dest" ]; } && ! rm -f "$dest"; then
+      rm -f "$tmp"; echo "ERR_APPLY: could not replace $path" >&2; rc=1; continue
+    fi
+    mv "$tmp" "$dest" || { rm -f "$tmp"; echo "ERR_APPLY: could not move $path into place" >&2; rc=1; continue; }
     echo "OK applied $path"
   done
   return $rc
@@ -269,16 +371,18 @@ echo "#   (USER, voice, standing-orders, work-tracking, team, tools, .bootstrapp
 echo "#   and the retired about-me, brand-voice, working-preferences, boot-digest),"
 echo "#   .claude-memory/ .claude-handoffs/ NOTES/ DELIVERABLES/ PROJECTS/ ARCHIVE/"
 echo "# classes: NEW=safe copy · UPDATE=fast-forward copy · CONFLICT=port by hand ·"
-echo "#   IDENTICAL=in sync · REMOVED=upstream deleted (manual call). local-only files hidden."
+echo "#   MODE=same content, exec bit differs (chmod by hand) · IDENTICAL=in sync ·"
+echo "#   REMOVED=upstream deleted (manual call). local-only files hidden."
 [ "$APPLY" = 1 ] && echo "# --apply-safe: copying NEW + UPDATE only"
 echo "#"
 
-while IFS= read -r p; do
+while IFS= read -r -d '' p; do
   [ -n "$p" ] && classify_one "$p"
 done < <(gen_candidates)
+[ "$MODE" = delta ] && mode_audit
 
 echo "#"
-echo "# summary: $NEW new · $UPD update · $CON conflict · $IDENT identical · $REM removed ($EXC excluded)"
+echo "# summary: $NEW new · $UPD update · $CON conflict · $MODES mode · $IDENT identical · $REM removed ($EXC excluded)"
 
 if [ "$APPLY" = 1 ]; then
   if [ "${#APPLY_LIST[@]}" -eq 0 ]; then

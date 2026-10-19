@@ -248,6 +248,31 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `gh` 30 s, the same 30 s the harness gives the git-guard hook, so a hung
   `gh` timed the hook out before the agent saw why. `gh` now gets 10 s. New
   case in `origin-private-check-test.sh`.
+- **Template sync writes only into an OPS copy.** `harness-update-scan.sh`
+  scans the repo of the working directory, and the harness-update skill ran
+  it by absolute path, so from a project clone it added the `ops-template`
+  remote there and `--apply-safe` copied the whole template into it. It now
+  refuses (`ERR_NOREPO`, nothing written) unless the repo has `BOOTSTRAP.md`
+  or `.claude-config/`, and prints the `cd` to run from; the skill's
+  commands run as `(cd ~/OPS && ...)`. New case in
+  `harness-update-scan-test.sh`.
+- **Template sync sees modes.** Files were compared by blob alone, so an
+  upstream `chmod +x` with the same content was never applied, and a script
+  an earlier scan wrote without its exec bit (which then failed deploy's
+  `memory-init` check) read as IDENTICAL forever. Files now compare as (mode,
+  blob): a mode-only change is an UPDATE when the local mode is still the
+  last-synced one, and any other exec-bit difference is a new MODE line, with
+  the `chmod` to run, in delta and first-sync scans alike. New cases.
+- **Template sync sets modes under any umask.** `chmod +x`/`-x` with no
+  `who` is filtered by the umask, so under 027 clearing the bit left group
+  or other bits set and the scan exited 6 after writing the file. It now
+  uses `chmod a+x`/`a-x`. New case under umask 027.
+- **Template symlinks arrive as symlinks.** A mode 120000 entry was written
+  as a regular file holding the link target. It is now created with
+  `ln -s`. Each applied file is built beside its destination and renamed
+  into place, so a local symlink is replaced rather than written through,
+  and the scan can update itself while it runs. A local path that cannot be
+  hashed is a CONFLICT, never NEW. New case.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

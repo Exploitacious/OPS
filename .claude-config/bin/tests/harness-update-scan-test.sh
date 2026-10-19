@@ -15,6 +15,14 @@
 #   4. --apply-safe sets each file's mode from the upstream tree entry, so a
 #      template script lands executable and a dropped exec bit is cleared.
 #   5. A marker whose last line has no trailing newline still yields delta mode.
+# And it acts only where it should, the way a checkout would:
+#   6. Run from a repo that is not an OPS copy, it refuses and writes nothing
+#      (no remote, no file): the skill once ran it from a project clone.
+#   7. Classes compare (mode, blob): a mode-only upstream change is an UPDATE
+#      when the local mode is the last-synced one; a script that lost its exec
+#      bit is reported as MODE, never silently IDENTICAL, and never changed.
+#   8. Under umask 027 the exec bit is still set and cleared (chmod a+x/a-x).
+#   9. A template symlink arrives as a symlink, not a file holding its target.
 # No network: the ops-template remote points at a local bare repo.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +47,9 @@ SCAN_TMP="$T/scan.sh"; cp "$SCAN_SRC" "$SCAN_TMP"
 run_scan(){ (cd "$1" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" "${@:2}"); }
 
 # --- 1. old layout, no marker, no .claude-config at all ---
-g init -q "$T/old"; echo keep > "$T/old/README.md"; echo mine > "$T/old/NOTES.md"
+# Copies from the template's first release have BOOTSTRAP.md (every template
+# commit carries it), which is how the scan knows it stands in an OPS copy.
+g init -q "$T/old"; echo keep > "$T/old/README.md"; echo mine > "$T/old/NOTES.md"; echo boot > "$T/old/BOOTSTRAP.md"
 g -C "$T/old" add -A; g -C "$T/old" commit -qm mine
 g -C "$T/old" remote add ops-template "$T/up.git"
 before="$(cd "$T/old" && git status --porcelain; find . -path ./.git -prune -o -type f -print | sort)"
@@ -123,6 +133,62 @@ printf 'upstream=local/test\nlast_synced=%s' "$BASE2" > "$T/copy3/.claude-config
 out="$(cd "$T/copy3" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^# mode: delta since last_synced ${BASE2:0:12}" <<<"$out" \
   && ok "marker: last line without newline still read (delta mode)" || bad "marker: no-newline last_synced dropped: rc=$rc: $out"
+
+# --- 8. not an OPS copy: refuse before any write ---
+g init -q "$T/client"; echo app > "$T/client/app.txt"; g -C "$T/client" add -A; g -C "$T/client" commit -qm app
+before="$(cd "$T/client" && git remote; git status --porcelain; find . -path ./.git -prune -o -print | sort)"
+out="$(cd "$T/client" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" --apply-safe 2>&1)"; rc=$?
+after="$(cd "$T/client" && git remote; git status --porcelain; find . -path ./.git -prune -o -print | sort)"
+[ "$rc" -eq 3 ] && grep -q '^ERR_NOREPO: .* is not an OPS copy' <<<"$out" && grep -q 'cd ~/OPS' <<<"$out" \
+  && ok "non-OPS repo: refused with ERR_NOREPO and the cd to run from" || bad "non-OPS repo: rc=$rc: $out"
+[ "$before" = "$after" ] && [ -z "$(git -C "$T/client" remote)" ] \
+  && ok "non-OPS repo: no remote added, no file written" || bad "non-OPS repo: the repo changed: $(git -C "$T/client" remote) / $(git -C "$T/client" status --porcelain)"
+
+# --- 9. mode-only changes and a lost exec bit ---
+g init -q "$T/up3"; mkdir -p "$T/up3/bin" "$T/up3/docs"
+echo 'echo flip' > "$T/up3/bin/flip"; chmod 644 "$T/up3/bin/flip"
+echo 'echo tool' > "$T/up3/bin/tool"; chmod 755 "$T/up3/bin/tool"
+echo 'target body' > "$T/up3/docs/target.md"
+g -C "$T/up3" add -A; g -C "$T/up3" commit -qm base; BASE3="$(git -C "$T/up3" rev-parse HEAD)"
+chmod 755 "$T/up3/bin/flip"; ln -s target.md "$T/up3/docs/newlink.md"
+g -C "$T/up3" add -A; g -C "$T/up3" commit -qm "flip mode, add a link"
+git -C "$T/up3" diff --raw "$BASE3..HEAD" -- bin/flip | grep -q '^:100644 100755 \([0-9a-f]*\) \1 M' \
+  && ok "mode fixture: bin/flip is a mode-only change" || bad "mode fixture: bin/flip is not mode-only: $(git -C "$T/up3" diff --raw "$BASE3..HEAD")"
+g clone -q --bare "$T/up3" "$T/up3.git"
+mkcopy3() {  # mkcopy3 <dir> [marker]: a copy at the base commit, its tool script without its exec bit
+  g clone -q "$T/up3" "$1"; g -C "$1" reset -q --hard "$BASE3"
+  g -C "$1" remote add ops-template "$T/up3.git"; mkdir -p "$1/.claude-config"
+  [ -z "${2:-}" ] || printf 'upstream=local/test\nlast_synced=%s\n' "$BASE3" > "$1/.claude-config/ops-upstream-ref"
+  chmod 644 "$1/bin/tool"
+}
+mkcopy3 "$T/copy5" marker
+out="$(cd "$T/copy5" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" --apply-safe 2>&1)"; rc=$?; out5="$out"
+[ "$rc" -eq 0 ] && grep -q -E '^UPDATE +bin/flip$' <<<"$out" && [ -x "$T/copy5/bin/flip" ] \
+  && ok "mode-only: an upstream chmod +x is an UPDATE and lands executable" || bad "mode-only: rc=$rc, flip $(ls -l "$T/copy5/bin/flip"): $out"
+grep -q -E '^MODE +bin/tool \(local 100644, upstream 100755' <<<"$out" && [ ! -x "$T/copy5/bin/tool" ] \
+  && ok "mode-only: a lost exec bit is reported as MODE (delta) and left alone" || bad "mode-only: bin/tool not reported as MODE: $out"
+grep -q '1 mode' <<<"$out" && ok "mode-only: the summary counts MODE" || bad "mode-only: summary lacks the mode count: $out"
+mkcopy3 "$T/copy6"
+out="$(cd "$T/copy6" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && grep -q -E '^MODE +bin/tool ' <<<"$out" && grep -q -E '^MODE +bin/flip ' <<<"$out" \
+  && ok "mode-only: first-sync reports both exec-bit differences as MODE" || bad "mode-only first-sync: rc=$rc: $out"
+
+# --- 10. symlinks arrive as symlinks ---
+grep -q -E '^NEW +docs/newlink.md$' <<<"$out5" && [ -L "$T/copy5/docs/newlink.md" ] && [ "$(readlink "$T/copy5/docs/newlink.md")" = target.md ] \
+  && ok "symlink: a template symlink is created as a symlink" || bad "symlink: docs/newlink.md is $(ls -l "$T/copy5/docs/newlink.md" 2>&1)"
+out="$(cd "$T/copy5" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" --verbose 2>&1)"
+grep -q -E '^IDENTICAL +docs/newlink.md$' <<<"$out" && ok "symlink: the applied link then reads IDENTICAL" || bad "symlink: rescan does not see the link as IDENTICAL: $out"
+
+# --- 11. umask 027: modes still set and cleared, no chmod failure ---
+g clone -q "$T/up2" "$T/copy4"; g -C "$T/copy4" reset -q --hard "$BASE2"
+g -C "$T/copy4" remote add ops-template "$T/up2.git"; mkdir -p "$T/copy4/.claude-config"
+printf 'upstream=local/test\nlast_synced=%s\n' "$BASE2" > "$T/copy4/.claude-config/ops-upstream-ref"
+chmod 755 "$T/copy4/bin/wasexec"
+out="$(cd "$T/copy4" && umask 027 && OPS_UPSTREAM=local/test bash "$SCAN_TMP" --apply-safe 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && [ ! -x "$T/copy4/bin/wasexec" ] && [ -z "$(find "$T/copy4/bin/wasexec" -perm /111)" ] && grep -q 'echo v2' "$T/copy4/bin/wasexec" \
+  && ok "umask 027: an UPDATE to 100644 clears every exec bit, exit 0" || bad "umask 027: rc=$rc, $(ls -l "$T/copy4/bin/wasexec"): $out"
+[ -x "$T/copy4/bin/newtool" ] && [ -x "$T/copy4/bin/runme" ] \
+  && ok "umask 027: NEW and UPDATE 100755 files land executable" || bad "umask 027: $(ls -l "$T/copy4/bin")"
 
 echo; echo "harness-update-scan-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS"
