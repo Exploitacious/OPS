@@ -1,6 +1,6 @@
 ---
 name: session-close
-description: "Use when the Operator says \"close this session\", \"close this out for good\", \"shut this session down\", \"end this session permanently\", \"we're done with this session\", \"close out for the day\", or \"I'm done working\". Permanently closes a Claude Code session end to end: closeout synthesis (work committed, docs matching reality, memory captured, nothing hanging), then the WIP and work-tracking reconciliation gate (reconcile what the session did against your ticketing / time / board systems per CONTEXT/work-tracking.md: log time, advance the card, flag blockers, or draft the entry when no tool is wired), then deregister from the reboot-resume registry and tear down its tmux session. NOT for pausing (that is a closeout plus /compact via pre-compact-synthesis, no reconciliation) and NOT for moving work elsewhere (that is session-handoff). Close means documented, reconciled, archived, gone."
+description: "Use when the Operator says close/shut down/end this session for good, or close out for the day. Reconciliation and teardown, not pre-compact-synthesis or session-handoff."
 ---
 
 # Close a session, permanently and cleanly
@@ -15,6 +15,10 @@ Permanently end a finished session: document it, reconcile it, archive it, tear 
 
 Close is for a finished purpose, not a finished day. If real work is still in-flight, say so and offer handoff or compact instead. A close with open threads is a future archaeology dig.
 
+A session never closes itself. Run this skill only after the operator's explicit word to close in this conversation. A finished purpose, an empty task list, or a completed handoff is the cue to say the work is done and offer the endings (close, archive, keep it open), then wait. Autonomy to compact at a rest stop is not authority to close: a close writes to external systems and ends the session you are speaking from, so it is the operator's call.
+
+Run this skill end to end; do not hand-roll a close. Writing the time entry or ticket note by hand, or skipping the step-2 reconciliation, is the failure to avoid: a hand-rolled close updates memory but leaves the backend running, the registry row, the session stamps, and any vault rollup live, because only the skill's teardown drops them. One hand-assembled close declared itself closed with its backend still running, and its skipped time-entry read-back let a retry double-fire byte-identical entries seconds apart until a later redo caught the duplicate.
+
 The reconciliation gate in step 2 is the point of this skill. It is the operator's primary way of entering time and tracking WIP, so it runs on every close as a firm forcing function: skip an item only with a reason the operator gives, never silently. It runs identically on any profile; the reconciliation decides billable versus personal per item.
 
 ## Flow
@@ -25,8 +29,10 @@ Run the full hygiene checklist from `pre-compact-synthesis`, everything except i
 
 - Git: every touched repo committed and pushed; working trees clean, or deliberately dirty with the operator's knowledge. Name what you leave.
 - Docs match reality: README, CHANGELOG, and lessons files updated for what this session shipped, in the same pass, not "later".
-- Memory: durable lessons, decisions, and feedback written to the memory pool, one fact per file, indexed. Then evict what this close terminates: per foreman-charter section "Eviction", fold a closing project's entries into `CONTEXT/projects/<project>-lessons.md` and delete them, index lines too, no stubs.
+- Memory: durable lessons, decisions, and feedback written to the memory pool, one fact per file, indexed. Then evict what this close terminates: per `pre-compact-synthesis` closeout hygiene, "Flush the memory cache", fold a closing project's entries to that project's home (its own docs tree by PR when the repo has one the team reads, else `CONTEXT/projects/<project>-lessons.md`) and delete them, index lines too, no stubs.
 - Tasks: the session's task list is resolved, completed or re-homed with the operator's sign-off. Nothing silently abandoned.
+- Pending items: reconcile them in every repo this session touched per `pre-compact-synthesis/closeout-hygiene.md` step 5: delete what the work completed, correct what drifted, route what is new.
+- Notes vault (optional, only when the operator keeps one): the rollup and inbox sweep in `closeout-hygiene.md` step 6.
 - Leftovers: if a genuinely open thread survives all of the above, write a handoff baton (`session-handoff` WRITE). A clean close usually needs none.
 
 ### 2. WIP and work-tracking reconciliation (the gate)
@@ -37,7 +43,7 @@ A. Assemble the work picture; do not ask the operator to remember it. The sessio
 
 B. Resolve each touched work area to a candidate item. Consult the repo-to-item map named in `work-tracking.md` for a hint, then confirm it is the right OPEN item. A repo is not 1:1 with an item; phase-scoped work spawns new ones. Confirm, never auto-pick. Check what is already logged today so a day captured elsewhere is not double-logged.
 
-C. Present the table and offer, one AskUserQuestion, multiSelect. Show a compact reconciliation table, then let the operator pick what to apply:
+C. Present the table, then the offer with the structured question tool where one exists (multi-select, so the operator can pick several), otherwise numbered prose. Show a compact reconciliation table, then let the operator pick what to apply:
 
 ```
 This session: Xh wall / Yh git-active (t0 to now)
@@ -60,20 +66,23 @@ Non-billable is still loggable: internal or overhead items take entries for trac
 
 ### 3. One decision from the Operator
 
-Ask (AskUserQuestion, two options):
+Ask with the structured question tool where one exists, otherwise numbered prose (two options):
 - Archive (default): the registry row moves to the archive file. It stops returning on reboot but keeps its session-id, workdir, and profile; `archive-remote-claude.sh revive <Name>` brings it back with full history.
 - Forget: deregister entirely, no archive row. The transcript still exists on disk (`claude --resume` finds it by id), but the harness stops tracking it.
 
+A session with no registry row (started by hand, run as a T3 Code thread, or a tmux session nothing registered) has nothing to archive or forget. Skip the question, say so in the receipt, and tear the backend down per `teardown.md`.
+
 ### 4. Deliver the closeout receipt
 
-Report BEFORE teardown; step 5 ends this session mid-breath and nothing printed after it arrives anywhere. The receipt names what was committed and pushed (repos plus short SHAs), what memory and lessons were written, what docs changed, the WIP and work-tracking outcome (hours logged with item numbers, cards advanced, tasks updated, or what was declined and why), any baton written, and the revive command if archived.
+Report BEFORE teardown; step 5 can end this session mid-breath and nothing printed after it arrives anywhere. The receipt names what was committed and pushed (repos plus short SHAs), what memory and lessons were written, what docs changed, the WIP and work-tracking outcome (hours logged with item numbers, cards advanced, tasks updated, or what was declined and why), any baton written, and the revive command if archived.
 
 ### 5. Last act: teardown (final tool call of the session)
 
-Deregister and tear down the tmux session. The dead-pane hazard that can kill a sibling session, and the not-in-tmux case, are in `teardown.md`. This kills the session you are in, so make it the absolute last tool call, after the receipt is out.
+Deregister and tear down the backend this session runs on. The tmux branch, the dead-pane hazard that can kill a sibling session, the no-registry-row case, and the not-in-tmux case (a T3 Code thread, an IDE, a plain terminal) are in `teardown.md`. In tmux this kills the session you are in, so make it the absolute last tool call, after the receipt is out. Outside tmux nothing is killed from here.
 
 ## Notes
 
 - Closing never deletes history. Registry rows are pointers; transcripts live under the profile's `projects/` dir untouched.
 - A remote-controlled session disappears from the operator's claude.ai device list when its tmux dies. Expected, part of "gone".
 - To close a DIFFERENT session by name (not the one you are in), skip steps 1 and 2; you cannot run another session's closeout or reconcile its work-tracking from here. Warn that its in-session state is whatever it is, then archive or forget its row. Prefer telling the operator to run the close from inside that session so its gate fires.
+- Archiving or settling a thread in a host's own UI is not a session close: the reconciliation never ran. Only the operator's word settles a thread they work in, and only the foreman thread itself closes its own session, never a lane.
