@@ -104,20 +104,28 @@ jobs:
           exit "$rc"
 
       - name: node --check on every .js
-        # The workflow scripts are ES modules (a top-level `export const meta`).
-        # node treats a .js file as CommonJS unless it detects module syntax,
-        # which only newer releases do by default (Node 18 rejects them), so a
-        # file that fails as a script is checked again as a module. A real syntax
-        # error fails both ways; the result no longer depends on the runner's node.
+        # The .js files here are workflow scripts: a top-level `export const
+        # meta`, and a body that uses top-level `await` and `return`, because the
+        # workflow runner executes the body as an async function. node --check on
+        # the file itself cannot be trusted for them. Node 18 rejects the valid
+        # files (it reads .js as CommonJS), and newer releases detect the
+        # `export`, treat the file as a module, and then report no error even for
+        # a file with an unclosed brace (checked on Node 24). So each file is
+        # checked in the shape it runs in: `export` dropped, the body wrapped in
+        # an async function, and that file given to node --check. Error line
+        # numbers are one more than the source's (the wrapper line). Any real
+        # syntax error fails on every node release.
         run: |
           node --version
-          mkdir -p "$RUNNER_TEMP/esm"
           rc=0
           while IFS= read -r f; do
-            node --check "$f" 2>/dev/null && continue
-            cp "$f" "$RUNNER_TEMP/esm/check.mjs"
-            node --check "$RUNNER_TEMP/esm/check.mjs" \
-              || { echo "::error file=$f::node --check failed (as a script and as a module)"; rc=1; }
+            { echo ';(async () => {'
+              sed -E -e '1{/^#!/d}' -e 's/^export[[:space:]]+//' "$f"
+              echo
+              echo '})'
+            } > "$RUNNER_TEMP/check.js"
+            node --check "$RUNNER_TEMP/check.js" \
+              || { echo "::error file=$f::node --check failed (checked as an async function body)"; rc=1; }
           done < "$RUNNER_TEMP/node.lst"
           exit "$rc"
 
