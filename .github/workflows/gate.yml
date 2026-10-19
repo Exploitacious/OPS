@@ -104,11 +104,20 @@ jobs:
           exit "$rc"
 
       - name: node --check on every .js
+        # The workflow scripts are ES modules (a top-level `export const meta`).
+        # node treats a .js file as CommonJS unless it detects module syntax,
+        # which only newer releases do by default (Node 18 rejects them), so a
+        # file that fails as a script is checked again as a module. A real syntax
+        # error fails both ways; the result no longer depends on the runner's node.
         run: |
           node --version
+          mkdir -p "$RUNNER_TEMP/esm"
           rc=0
           while IFS= read -r f; do
-            node --check "$f" || { echo "::error file=$f::node --check failed"; rc=1; }
+            node --check "$f" 2>/dev/null && continue
+            cp "$f" "$RUNNER_TEMP/esm/check.mjs"
+            node --check "$RUNNER_TEMP/esm/check.mjs" \
+              || { echo "::error file=$f::node --check failed (as a script and as a module)"; rc=1; }
           done < "$RUNNER_TEMP/node.lst"
           exit "$rc"
 
@@ -158,10 +167,12 @@ jobs:
         # sandbox-run needs a root-owned bwrap. One root-wrapper case runs in zsh
         # (it prints SKIP without it), and the skill-mount tests exercise the
         # rsync engine as well as the tar fallback. Ubuntu 24.04 can restrict
-        # unprivileged user namespaces through AppArmor; if the plain probe
-        # fails, lift that restriction for this runner and probe again. The last
-        # probe is not optional: without a working sandbox the destructive-tool
-        # suites cannot run, and skipping them would hide a broken gate.
+        # unprivileged user namespaces through AppArmor; if the probe fails,
+        # lift that restriction for this runner and probe again. The probe uses
+        # the namespaces and mounts sandbox-run itself asks for (a new PID and
+        # network namespace, /dev and a fresh /proc). The last probe is not
+        # optional: without a working sandbox the destructive-tool suites cannot
+        # run, and skipping them would hide a broken gate.
         run: |
           need=()
           for pkg in bubblewrap:bwrap zsh:zsh rsync:rsync; do
@@ -172,11 +183,12 @@ jobs:
             sudo apt-get install -y --no-install-recommends "${need[@]}"
           fi
           bwrap --version
-          if ! bwrap --ro-bind / / true 2>/dev/null; then
+          probe() { bwrap --die-with-parent --unshare-pid --unshare-net --new-session --ro-bind / / --dev /dev --proc /proc true; }
+          if ! probe 2>/dev/null; then
             echo "bwrap is blocked here; lifting the AppArmor user-namespace restriction"
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          bwrap --ro-bind / / true
+          probe
 
       - name: Fetch the Stage-1 settings for the verify-ops self-test
         # verify-ops-selftest.sh also runs the shipped tree against a real
