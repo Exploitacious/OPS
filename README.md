@@ -105,7 +105,10 @@ Git Bash), and these on the machine:
   often has none, and then every commit fails: the memory sync's, the daily
   backup's, and every agent's. Deploy asks `git var` for the author and
   committer identity and, when either is missing, prints those two commands and
-  finishes with a failure named `git-identity` (`DEPLOYMENT.md`, step 7).
+  finishes with a failure named `git-identity` (`DEPLOYMENT.md`, step 7). Use
+  git 2.45 or newer: branch cleanup reads `git rev-parse --show-ref-format` and,
+  on an older git (Ubuntu 24.04 ships 2.43), skips every repository and logs the
+  skip; the rest of OPS works either way.
 - **`gh`, signed in (`gh auth login`).** The private-origin check and branch
   cleanup ask GitHub through it. Without a signed-in `gh`, the automatic pushes
   stay local and branch cleanup removes nothing.

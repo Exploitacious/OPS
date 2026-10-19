@@ -422,7 +422,6 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   permissions across a pull.
 
 ### Docs, notices and CI
-
 - **No em dashes.** The 139 em dashes still in tracked text (16 files: the
   `CONTEXT/` templates and the project kata, comments in hooks, scripts and
   self-tests, the design brand template, and two READMEs) are rewritten with
@@ -431,24 +430,27 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   self-tests' result lines, `sync-check.sh`'s messages, the `ops-verify` unit
   description), and no test greps any of those strings.
 - **The docs match the code.** README gains the requirements (git with an
-  identity, a signed-in `gh`, `python3`, `jq`), the T3 Code path, and sections
-  on what deploy does, the push gate and its limits, the daily backup, skill
-  mounts, template sync, and how to check a copy; its list of what the git
-  guard blocks now includes a bare `tmux kill-server` and an unverified push.
-  DEPLOYMENT said the trust anchor lives in `~/.claude/.claude.json`; deploy
-  writes `~/.claude.json`, beside the directory. It also called a failed skill
-  clone a warning, though that fails the deploy (`skills-mount`). It gains the
-  exact outputs of its verification commands, a recipe for testing a deploy
-  under a throwaway `HOME`, and a corrected count of the machinery deploy does
-  not wire. CONTRIBUTING gains the private-term rule (your list of private
-  terms never goes in a file, a commit message or a PR), a section on where
-  destructive tests run and why, and the `GIT_GUARD=off` rule for a PR branch.
-  Its suite loop printed `FAILED` but always exited 0; the command now counts
-  failures and exits non-zero, and runs the self-tests and the PowerShell
-  suites too. It also no longer implies that `verify-ops.sh` on a bare checkout
-  means anything: the gate reads host state from `$HOME`, so a machine with no
-  deployed OPS needs the throwaway-`HOME` run. AGENTS carries the same caveat,
-  and BOOTSTRAP's recon gains a git-identity probe.
+  identity and git 2.45 or newer, a signed-in `gh`, `python3`, `jq`), the T3
+  Code path, and sections on what deploy does, the push gate and its limits, the
+  daily backup, skill mounts, template sync, and how to check a copy; its list
+  of what the git guard blocks now includes a bare `tmux kill-server` and an
+  unverified push. DEPLOYMENT said the trust anchor lives in
+  `~/.claude/.claude.json`; deploy writes `~/.claude.json`, beside the
+  directory. It also called a failed skill clone a warning, though that fails
+  the deploy (`skills-mount`). It gains the exact outputs of its verification
+  commands, a recipe for testing a deploy under a throwaway `HOME`, and a
+  corrected count of the machinery deploy does not wire. CONTRIBUTING gains the
+  private-term rule (your list of private terms never goes in a file, a commit
+  message or a PR), a section on where destructive tests run and why, and the
+  `GIT_GUARD=off` rule for a PR branch. Its suite loop printed `FAILED` but
+  always exited 0; the command now counts failures and exits non-zero, and runs
+  the self-tests and the PowerShell suites too. It also no longer implies that
+  `verify-ops.sh` on a bare checkout means anything: the gate reads host state
+  from `$HOME`, so a machine with no deployed OPS needs the throwaway-`HOME`
+  run. AGENTS carries the same caveat, and BOOTSTRAP's recon gains a
+  git-identity probe. README and DEPLOYMENT also say that `branch-gc` needs git
+  2.45 or newer: on an older git, such as Ubuntu 24.04's 2.43, it skips every
+  repository (fail closed) and the nightly backup logs the skip.
 - **A workflow script that did not parse.** The `context-coherence` lane prompt
   in `.claude-config/workflows/harness-audit.js` had no closing backtick, so
   the file was a syntax error; `node --check` on Node 24 had been reporting it
@@ -470,15 +472,17 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   function bodies they run as, because plain `node --check` rejects them on Node
   18 and, on newer Node, reports no error for a broken one), `suites` (every
   suite under `bin/tests/`, the `*-selftest` scripts and the two PowerShell
-  suites, the destructive ones inside `sandbox-run`), `smoke` (a fresh install
-  in a throwaway `HOME` with the current Stage-1 settings, a git identity and
-  `deploy.sh --no-system` run twice, then `verify-ops.sh`), and `secrets`
-  (gitleaks over the full history, from a binary pinned by SHA-256 because the
-  official action wants a license key for organization repositories, then OPS's
-  own `secrets-scan.sh`). Actions are pinned by commit. Every job is skipped
-  outside the template repository, so private copies made from the template do
-  not spend runner minutes on every daily backup push. Not covered: Windows and
-  macOS hosts, and the Claude Code CLI.
+  suites, the destructive ones inside `sandbox-run`; the job installs
+  bubblewrap, zsh and rsync and upgrades an older git, because `branch-gc` needs
+  2.45), `smoke` (a fresh install in a throwaway `HOME` with the current Stage-1
+  settings, a git identity and `deploy.sh --no-system` run twice, then
+  `verify-ops.sh`), and `secrets` (gitleaks over the full history, from a binary
+  pinned by SHA-256 because the official action wants a license key for
+  organization repositories, then OPS's own `secrets-scan.sh`). Actions are
+  pinned by commit. Every job is skipped outside the template repository, so
+  private copies made from the template do not spend runner minutes on every
+  daily backup push. Not covered: Windows and macOS hosts, and the Claude Code
+  CLI.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
