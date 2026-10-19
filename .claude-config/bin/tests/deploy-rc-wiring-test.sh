@@ -166,6 +166,30 @@ bk="$(ls "$CORE_RULE".backup_* 2>/dev/null | head -1)"
 case "$bk" in *.md) fail "backup name ends in .md, so Claude Code would load it as a rule" ;; esac
 pass "backs up a regular file in the way under a name Claude Code does not load"
 
+# Two redeploys in one second must not overwrite the first operator backup.
+date() { printf 'fixed-second\n'; }
+for text in 'first operator rule' 'second operator rule'; do
+  command rm -f "$CORE_RULE"
+  printf '%s\n' "$text" > "$CORE_RULE"
+  ensure_core_rule || fail 'repeated core rule backup failed'
+done
+unset -f date
+for text in 'first operator rule' 'second operator rule'; do
+  grep -qxF "$text" "$CORE_RULE".backup_* || fail "lost backup: $text"
+done
+pass "preserves distinct core-rule backups on rapid redeploys"
+
+# Failure to unlink a stale rule must not turn ln into a write inside the old
+# symlink target, which can be another checkout or an operator's directory.
+command rm -f "$CORE_RULE"
+mkdir -p "$TDIR/core-external"
+ln -s "$TDIR/core-external" "$CORE_RULE"
+rm() { return 1; }
+ensure_core_rule && fail 'failed rule unlink reported successful linking'
+unset -f rm
+[ -z "$(ls -A "$TDIR/core-external")" ] || fail 'linking wrote through a stale rule symlink'
+pass "failed unlink does not write through a stale rule symlink"
+
 # --- A symlinked rules dir is refused, nothing written through it. -------------
 rm -rf "$CORE_RULE_DIR"; mkdir -p "$TDIR/dotfiles-rules"
 ln -s "$TDIR/dotfiles-rules" "$CORE_RULE_DIR"
@@ -495,6 +519,40 @@ ensure_claude_localrc "$TDIR/uc-conflict" && fail "conflicting custom settings w
 cmp -s "$TDIR/uc-conflict" "$TDIR/uc-conflict-orig" || fail "a refused heal changed the file"
 grep -q '^WARN ' "$LOG" || fail "conflicting custom settings refusal not reported: $(cat "$LOG")"
 pass "refuses old blocks with conflicting --settings JSON and leaves the file unchanged"
+
+# A valid shell-quoted apostrophe cannot be captured by the migration's simple
+# single-quoted JSON matcher. Refuse that form rather than truncate the value.
+printf '%s\n' "$OLD_BOOT_SHIM" > "$TDIR/uc-apostrophe"
+python3 - "$TDIR/uc-apostrophe" <<'PYTEST'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+quoted = "'" + '{"ultracode":true,"env":{"LABEL":"it' + "'\\''" + 's"}}' + "'"
+p.write_text(p.read_text().replace("'{\"ultracode\":true}'", quoted))
+PYTEST
+bash -n "$TDIR/uc-apostrophe" || fail 'apostrophe fixture is not valid shell'
+cp "$TDIR/uc-apostrophe" "$TDIR/uc-apostrophe-before"
+ensure_claude_localrc "$TDIR/uc-apostrophe" && fail 'partially captured settings JSON was migrated'
+cmp -s "$TDIR/uc-apostrophe" "$TDIR/uc-apostrophe-before" || fail 'truncated a shell-escaped settings value'
+pass "refuses settings shell quoting it cannot preserve, without changing the file"
+
+for variant in file double; do
+  printf '%s\n' "$OLD_BOOT_SHIM" > "$TDIR/uc-unsupported"
+  python3 - "$TDIR/uc-unsupported" "$variant" <<'PYTEST'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+value = '{"permissions":{"defaultMode":"default"}}'
+replacement = ('--settings "$HOME/settings.json"' if sys.argv[2] == 'file'
+               else '--settings "' + value.replace('"', '\\"') + '"')
+p.write_text(p.read_text().replace("--settings '{\"ultracode\":true}'", replacement))
+PYTEST
+  bash -n "$TDIR/uc-unsupported" || fail 'custom settings fixture is not valid shell'
+  cp "$TDIR/uc-unsupported" "$TDIR/uc-unsupported-before"
+  ensure_claude_localrc "$TDIR/uc-unsupported" && fail "silently reset $variant settings argument"
+  cmp -s "$TDIR/uc-unsupported" "$TDIR/uc-unsupported-before" || fail "changed $variant settings argument"
+done
+pass "refuses unsupported settings argument forms without resetting operator choices"
 
 # --- Old block mid-file: content after it survives, new block lands last. ---
 printf '%s\n\n%s\n\nexport FOO=1\n' "$BASE" "$OLD_BOOT_SHIM" > "$TDIR/uc-mid"

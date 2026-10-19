@@ -131,8 +131,8 @@ done
 # existing clone: a re-deploy must not pull an unreviewed upstream HEAD into
 # skills every session loads. Update deliberately: `git -C <clone> pull
 # --ff-only`, then `skills-vendor.sh sync`. HTTPS, because a public repo needs
-# no SSH key. A failed clone (no network) is a warning; the drift gate keeps
-# reporting the mounts MISSING until a re-run clones them.
+# no SSH key. Clone into a temporary sibling so a failed or interrupted clone
+# cannot poison the canonical path and block the next deploy's retry.
 echo ""
 c_yel "Mounting shared skills..."
 SKILLS_SOURCE_URL="https://github.com/Exploitacious/agent-skills.git"
@@ -140,26 +140,52 @@ SKILLS_SOURCE_DIR="${OPS_ROOT}/PROJECTS/Exploitacious/agent-skills"
 SKILLS_VENDOR="${CONFIG_DIR}/bin/skills-vendor.sh"
 
 mount_skills() {
+  if [[ ! -r "${OPS_ROOT}/SKILLS/VENDORED.tsv" ]]; then
+    msg_bad "Cannot read SKILLS/VENDORED.tsv: mounted skills cannot be verified."
+    return 1
+  fi
   if ! grep -qE '^[^#[:space:]][^[:space:]]*[[:space:]]+Exploitacious/agent-skills/' "${OPS_ROOT}/SKILLS/VENDORED.tsv" 2>/dev/null; then
     msg_ok "No mounted skills from Exploitacious/agent-skills in SKILLS/VENDORED.tsv"
     return 0
   fi
-  if [[ -d "$SKILLS_SOURCE_DIR/.git" ]]; then
+  if [[ -d "$SKILLS_SOURCE_DIR/.git" || -f "$SKILLS_SOURCE_DIR/.git" ]]; then
+    if ! git -C "$SKILLS_SOURCE_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+      msg_bad "$SKILLS_SOURCE_DIR is an incomplete clone: move it aside, then re-run."
+      return 1
+    fi
     msg_ok "Skill source already cloned: $SKILLS_SOURCE_DIR (not pulled; see the comment above)"
-  elif [[ -e "$SKILLS_SOURCE_DIR" ]]; then
+  elif [[ -e "$SKILLS_SOURCE_DIR" || -L "$SKILLS_SOURCE_DIR" ]]; then
     msg_bad "$SKILLS_SOURCE_DIR exists but is not a git clone: move it aside, then re-run."
     return 1
   elif ! command -v git >/dev/null 2>&1; then
-    msg_warn "git not found: cannot clone $SKILLS_SOURCE_URL. Mounted skills stay MISSING."
-    return 0
-  elif git clone --quiet "$SKILLS_SOURCE_URL" "$SKILLS_SOURCE_DIR"; then
-    msg_ok "Cloned $SKILLS_SOURCE_URL -> $SKILLS_SOURCE_DIR"
+    msg_bad "git not found: cannot clone $SKILLS_SOURCE_URL. Mounted skills stay MISSING."
+    return 1
   else
-    msg_warn "Could not clone $SKILLS_SOURCE_URL (network?). Mounted skills stay MISSING; re-run deploy to retry."
-    return 0
+    local clone_tmp
+    if ! mkdir -p "${SKILLS_SOURCE_DIR%/*}" \
+       || ! clone_tmp="$(mktemp -d "${SKILLS_SOURCE_DIR}.clone.XXXXXX")"; then
+      msg_bad "Cannot prepare a temporary skill-source clone."
+      return 1
+    fi
+    if ! git clone --quiet "$SKILLS_SOURCE_URL" "$clone_tmp"; then
+      rm -rf -- "$clone_tmp"
+      msg_bad "Could not clone $SKILLS_SOURCE_URL (network?). Re-run deploy to retry."
+      return 1
+    fi
+    # -T prevents copying into a concurrently created directory; -n preserves
+    # it. GNU mv can return zero when -n skips, so also require the temp gone.
+    if ! mv -Tn -- "$clone_tmp" "$SKILLS_SOURCE_DIR" || [[ -e "$clone_tmp" ]]; then
+      rm -rf -- "$clone_tmp"
+      msg_bad "Skill source appeared during cloning: left $SKILLS_SOURCE_DIR unchanged. Re-run deploy."
+      return 1
+    fi
+    msg_ok "Cloned $SKILLS_SOURCE_URL -> $SKILLS_SOURCE_DIR"
   fi
-  if OPS_DIR="$OPS_ROOT" bash "$SKILLS_VENDOR" sync; then
-    msg_ok "Mounted skills synced into ${OPS_ROOT}/SKILLS"
+  if OPS_DIR="$OPS_ROOT" bash "$SKILLS_VENDOR" sync \
+     && OPS_DIR="$OPS_ROOT" bash "$SKILLS_VENDOR" --check; then
+    # sync deliberately skips uncloned sources. A deploy must also prove every
+    # declared mount exists, rather than reporting success with missing skills.
+    msg_ok "Mounted skills synced and verified in ${OPS_ROOT}/SKILLS"
   else
     msg_bad "skills-vendor.sh sync failed: mounted skills are out of date (verify-ops reports DRIFT)."
     return 1
@@ -205,15 +231,32 @@ ensure_core_rule() {
       return 0
     fi
     msg_action "Repointing $CORE_RULE (was $(readlink "$CORE_RULE"))"
-    rm -f "$CORE_RULE"
+    if ! rm -f -- "$CORE_RULE"; then
+      msg_bad "Could not remove the stale core rule at $CORE_RULE."
+      return 1
+    fi
   elif [[ -e "$CORE_RULE" ]]; then
-    # The backup name does not end in .md, so Claude Code does not load it.
+    if [[ ! -f "$CORE_RULE" ]]; then
+      msg_bad "$CORE_RULE is not a regular file: refusing to replace it."
+      return 1
+    fi
+    # Unique even on rapid redeploys. A timestamp alone can overwrite the only
+    # copy of a prior operator rule. The suffix is not .md, so it is not loaded.
     local backup
-    backup="${CORE_RULE}.backup_$(date +%Y%m%d_%H%M%S)"
-    mv "$CORE_RULE" "$backup"
+    if ! backup="$(mktemp "${CORE_RULE}.backup_XXXXXX")"; then
+      msg_bad "Could not reserve a backup for $CORE_RULE."
+      return 1
+    fi
+    if ! mv -T -- "$CORE_RULE" "$backup"; then
+      rm -f -- "$backup"
+      msg_bad "Could not back up $CORE_RULE: left the rule unchanged."
+      return 1
+    fi
     msg_warn "Backed up existing $CORE_RULE to $backup"
   fi
-  if ln -s "$CORE_SRC" "$CORE_RULE"; then
+  # -T rejects a directory or directory symlink created at the target by a
+  # concurrent deploy; plain ln would instead create a link inside that tree.
+  if ln -sT -- "$CORE_SRC" "$CORE_RULE"; then
     msg_ok "Linked core: $CORE_RULE -> $CORE_SRC"
   else
     msg_bad "Failed to link $CORE_RULE"
@@ -438,7 +481,7 @@ claude() {
 SHIM
   )" || return 1
   if ! result="$(python3 - "$target" "$ULTRACODE_MARKER" "$ULTRACODE_SHIM_TAG" "$shim" <<'PYRC'
-import os, re, stat, subprocess, sys, tempfile
+import json, os, re, stat, subprocess, sys, tempfile
 from pathlib import Path
 path = Path(sys.argv[1])
 marker = sys.argv[2].encode()
@@ -496,7 +539,26 @@ try:
             new_block += b"\n"
     else:
         # Untagged blocks: carry over one customized --settings JSON, if any.
-        custom = {v for b in blocks for v in SETTINGS_RE.findall(b) if v != DEFAULT}
+        values = set()
+        for block in blocks:
+            for line in block.splitlines():
+                if line.lstrip().startswith(b"#") or b"command claude" not in line:
+                    continue
+                args = line.split(b"command claude", 1)[1]
+                if re.search(rb"--settings(?:[ \t=]|$)", args):
+                    found = SETTINGS_RE.findall(args)
+                    if not found:
+                        raise ValueError("custom --settings quoting or file argument; migrate that shim manually")
+                    values.update(found)
+        # This matcher handles the generated single-quoted JSON form only.
+        # Shell-escaped apostrophes truncate a match into invalid JSON; reject
+        # it before replacing a valid, customized function with a broken one.
+        for value in values:
+            try:
+                json.loads(value)
+            except (ValueError, UnicodeError):
+                raise ValueError("old --settings argument is not intact JSON; migrate that customized shim manually") from None
+        custom = values - {DEFAULT}
         if len(custom) > 1:
             raise ValueError("old blocks carry conflicting --settings JSON")
         new_block = shim
@@ -556,9 +618,11 @@ if [[ -x "$MEMORY_INIT" ]]; then
     else
       msg_warn "memory-init exited rc=$rc: inspect manually."
     fi
+    DEPLOY_FAILED="$DEPLOY_FAILED memory-init"
   fi
 else
   msg_bad "memory-init not executable at $MEMORY_INIT: memory sync not initialized."
+  DEPLOY_FAILED="$DEPLOY_FAILED memory-init"
 fi
 
 # --- Daily backup cron job ---
@@ -719,34 +783,60 @@ seed_trust() {
   local jsonfile="$1"
   if ! command -v python3 >/dev/null 2>&1; then
     msg_warn "python3 absent: cannot seed trust anchor in ${jsonfile}"
-    return 0
+    return 1
   fi
   python3 - "$jsonfile" "$HOME" <<'PY'
-import json, os, sys
-path, home = sys.argv[1], sys.argv[2]
+import json, os, stat, sys, tempfile
+from pathlib import Path
+path, home = Path(sys.argv[1]), sys.argv[2]
 try:
-    with open(path) as f:
-        d = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    d = {}
-entry = d.setdefault("projects", {}).setdefault(home, {})
-if entry.get("hasTrustDialogAccepted") is True:
-    print("ok"); sys.exit(0)
-entry["hasTrustDialogAccepted"] = True
-tmp = path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(d, f, indent=2)
-os.replace(tmp, path)
-print("set")
+    if path.is_symlink():
+        raise ValueError("symlinked app state; configure trust manually")
+    original = path.read_bytes() if path.exists() else None
+    # An unreadable or malformed config can still contain recoverable auth,
+    # MCP, and project state. Never replace it with an empty object.
+    d = json.loads(original) if original is not None else {}
+    if not isinstance(d, dict):
+        raise ValueError("app state must be a JSON object")
+    projects = d.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise ValueError("projects must be a JSON object")
+    entry = projects.setdefault(home, {})
+    if not isinstance(entry, dict):
+        raise ValueError("project entry must be a JSON object")
+    if entry.get("hasTrustDialogAccepted") is True:
+        print("ok"); sys.exit(0)
+    entry["hasTrustDialogAccepted"] = True
+    mode = stat.S_IMODE(path.stat().st_mode) if original is not None else 0o600
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".trust.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(d, f, indent=2)
+            f.flush()
+            os.fchmod(f.fileno(), mode)
+        if path.is_symlink() or (path.read_bytes() if path.exists() else None) != original:
+            raise ValueError("app state changed during trust update")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print("set")
+except (OSError, ValueError, UnicodeError) as e:
+    print("Cannot seed trust; existing app state left unchanged: " + str(e), file=sys.stderr)
+    sys.exit(1)
 PY
 }
 
-jf="${CLAUDE_HOME}/.claude.json"
+# Claude's default app state is beside ~/.claude/, not inside it.
+jf="${HOME}/.claude.json"
 if result="$(seed_trust "$jf")"; then
   case "$result" in
     set) msg_ok "Trust anchor set for \$HOME in ${jf}" ;;
     ok)  msg_ok "Trust anchor already present in ${jf}" ;;
   esac
+else
+  msg_bad "Trust anchor could not be seeded in ${jf}; existing state was preserved."
+  DEPLOY_FAILED="$DEPLOY_FAILED trust-anchor"
 fi
 
 # --- T3 Code hosts: the headless browser (pointer only) ---

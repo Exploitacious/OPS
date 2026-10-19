@@ -269,6 +269,35 @@ core_case core-import
 printf '@%s\n' "$OPS/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
 run check_core_boot
 chk "rules import file (deploy.ps1 fallback) -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
+core_case core-import-missing
+printf '@%s\n' "$HOME/missing/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "import of a nonexistent core -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case core-import-other
+mkdir -p "$HOME/other/CONTEXT"
+printf '# Other core\n' > "$HOME/other/CONTEXT/core.md"
+printf '@%s\n' "$HOME/other/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "import of another checkout's core -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case 'core import spaces'
+printf '@%s\n' "$OPS/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "unescaped spaces truncate an import -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+printf '@%s\n' "${OPS// /\\ }/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "escaped spaces in an import -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
+core_case core-import-code
+printf '```\n@%s\n```\n' "$OPS/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "an import inside a code fence is not loaded -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case core-profile
+ln -s "$OPS/CONTEXT/core.md" "$HOME/.claude/rules/ops-core.md"
+CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_core_boot
+chk "active profile without its own core rule -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+mkdir -p "$HOME/other-profile/rules"
+ln -s "$OPS/CONTEXT/core.md" "$HOME/other-profile/rules/ops-core.md"
+CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_core_boot
+chk "active profile with a valid core rule -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
 core_case core-oversized
 ln -s "$OPS/CONTEXT/core.md" "$HOME/.claude/rules/ops-core.md"
 head -c 15360 /dev/zero | tr '\0' 'x' >> "$OPS/CONTEXT/core.md"
@@ -345,6 +374,19 @@ chk "line ref in a mounted skill -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; e
 printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/localx/SKILL.md"
 run check_linerefs
 chk "line ref in a local skill -> WARN" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'localx'; echo $?)"
+
+# A gate cannot return green when its mirror verifier cannot run or encounters
+# an unsafe manifest or filesystem error. MISSING sources retain their WARN.
+new_case vendored-error
+mkdir -p "$OPS/.claude-config/bin"
+printf '#!/usr/bin/env bash\necho "skills-vendor: unsafe mirror destination" >&2\nexit 3\n' \
+  > "$OPS/.claude-config/bin/skills-vendor.sh"
+chmod +x "$OPS/.claude-config/bin/skills-vendor.sh"
+run check_skills_vendored
+chk "mirror verifier error -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+chmod -x "$OPS/.claude-config/bin/skills-vendor.sh"
+run check_skills_vendored
+chk "mirror verifier not executable -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"

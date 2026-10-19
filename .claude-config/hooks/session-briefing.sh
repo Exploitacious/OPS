@@ -68,10 +68,12 @@ printf ' Ultra:   ultracode is session-set via the alias (--settings); /effort t
 # counts when it names this core.
 _core="$OPS_DIR/CONTEXT/core.md"
 _rule="$CFG/rules/ops-core.md"
-if [ -L "$_rule" ] && [ "$(readlink -f "$_rule" 2>/dev/null)" = "$(readlink -f "$_core" 2>/dev/null)" ]; then
-  _boot="core.md loaded via rules/ops-core.md"
-elif [ -f "$_rule" ] && [ ! -L "$_rule" ] && grep -qF "CONTEXT/core.md" "$_rule" 2>/dev/null; then
-  _boot="core.md loaded via rules/ops-core.md (import)"
+if hook_core_rule_matches "$_rule" "$_core"; then
+  if [ -L "$_rule" ]; then
+    _boot="core.md loaded via rules/ops-core.md"
+  else
+    _boot="core.md loaded via rules/ops-core.md (import)"
+  fi
 else
   _boot="core.md NOT linked (run .claude-config/deploy.sh)"
 fi

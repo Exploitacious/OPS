@@ -18,6 +18,10 @@
 # Add new checks as functions + a line in main; keep each check independent.
 set -uo pipefail
 
+# Share the boot-target check with the live SessionStart briefing so both
+# surfaces reject missing, unrelated, or syntactically inactive imports.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" && pwd)/hooklib.sh" || exit 1
+
 OPS="${OPS_DIR:-$HOME/OPS}"
 QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
@@ -461,7 +465,7 @@ _check_haiku_pin() {
 OPS_CORE_MAX=15360
 check_core_boot() {
   local core="$OPS/CONTEXT/core.md" dep="$OPS/.claude-config/deploy.sh"
-  local rule="$HOME/.claude/rules/ops-core.md" sz bad="" f stale=""
+  local rule="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/rules/ops-core.md" sz bad="" f stale=""
   if [ ! -f "$core" ]; then
     fail "CONTEXT/core.md missing: sessions boot without the always-loaded core"
     return
@@ -469,14 +473,10 @@ check_core_boot() {
   sz="$(wc -c < "$core" | tr -d ' ')"
   [ "$sz" -lt "$OPS_CORE_MAX" ] || bad="$bad; core.md is ${sz} bytes, the budget is under ${OPS_CORE_MAX}"
   grep -qF 'rules/ops-core.md' "$dep" 2>/dev/null || bad="$bad; deploy.sh no longer links the core into ~/.claude/rules"
-  if [ -L "$rule" ]; then
-    [ "$(readlink -f "$rule" 2>/dev/null)" = "$(readlink -f "$core")" ] \
-      || bad="$bad; $rule resolves to $(readlink -f "$rule" 2>/dev/null || echo nothing), not $core (re-run deploy.sh)"
-  elif [ -f "$rule" ]; then
-    grep -qE "^@.*CONTEXT/core\.md[[:space:]]*$" "$rule" \
-      || bad="$bad; $rule is neither a link to nor an import of $core (re-run deploy.sh)"
-  else
+  if [ ! -e "$rule" ] && [ ! -L "$rule" ]; then
     bad="$bad; $rule missing (run .claude-config/deploy.sh)"
+  elif ! hook_core_rule_matches "$rule" "$core"; then
+    bad="$bad; $rule is neither a working link to nor an import of $core (re-run deploy.sh)"
   fi
   if [ -n "$bad" ]; then
     fail "always-loaded core broken${bad}"
@@ -653,13 +653,13 @@ check_retired_context() {
 # so the source not being cloned is the normal fresh-fork state).
 check_skills_vendored() {
   local sv="$OPS/.claude-config/bin/skills-vendor.sh" out rc
-  [ -x "$sv" ] || { warn "skills-vendor.sh missing/not executable"; return; }
+  [ -x "$sv" ] || { fail "skills-vendor.sh missing/not executable: cannot verify mounted skills"; return; }
   out="$(OPS_DIR="$OPS" "$sv" --check 2>&1)"; rc=$?
   case "$rc" in
     0) ok "skills mirror in sync with source repos" ;;
     1) fail "skills mirror DRIFT (source edit not vendored; run skills-vendor.sh sync):"$'\n'"$(printf '%s' "$out" | grep '^DRIFT' | head -10)" ;;
     2) warn "skills mirror source repo(s) not cloned (run skills-vendor.sh sync after cloning them):"$'\n'"$(printf '%s' "$out" | grep '^MISSING' | head -10)" ;;
-    *) warn "skills-vendor.sh --check errored (rc=$rc):"$'\n'"$(printf '%s' "$out" | head -5)" ;;
+    *) fail "skills-vendor.sh --check errored (rc=$rc):"$'\n'"$(printf '%s' "$out" | head -5)" ;;
   esac
 }
 

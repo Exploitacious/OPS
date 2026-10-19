@@ -43,10 +43,20 @@ if [ ! -d "$ROOT" ]; then
   echo "skills-vendor: no harness root found ($ROOT)" >&2
   exit 3
 fi
+ROOT="$(cd "$ROOT" && pwd -P)" || exit 3
 
 PROJECTS="$ROOT/PROJECTS"
 SKILLS="$ROOT/SKILLS"
 MANIFEST="$SKILLS/VENDORED.tsv"
+# A mirror root must be a real directory: rsync follows a destination symlink
+# with a trailing slash, and the fallback creates its staging dirs here.
+if [ -L "$SKILLS" ] || [ ! -d "$SKILLS" ]; then
+  echo "skills-vendor: unsafe skills directory: $SKILLS" >&2
+  exit 3
+fi
+if [ -d "$PROJECTS" ]; then
+  PROJECTS="$(cd "$PROJECTS" && pwd -P)" || exit 3
+fi
 
 # GUI dual-track scaffolding is SKILLS-local by convention: the claude.ai Project
 # mirror (00_System_Prompt.md, its SETUP.md install guide, and the
@@ -78,11 +88,54 @@ fi
 RSYNC_EXCL=(--exclude='.git')
 TAR_EXCL=(--exclude='.git')
 DIFF_EXCL=(-x '.git')
+GUI_FIND=()
 for g in "${GUI_LOCAL[@]}"; do
   RSYNC_EXCL+=(--exclude="$g")
   TAR_EXCL+=(--exclude="$g")
   DIFF_EXCL+=(-x "$g")
+  [ "${#GUI_FIND[@]}" -eq 0 ] || GUI_FIND+=(-o)
+  GUI_FIND+=(-name "$g")
 done
+
+# Validate the whole manifest before any mount changes. A bad later row must
+# not leave an earlier mirror partially synced. Membership declares ownership;
+# it does not grant access to SKILLS itself, a symlink target, or a local file.
+names=()
+sources=()
+while IFS=$'\t' read -r name src || [ -n "$name" ]; do
+  case "$name" in ''|'#'*) continue ;; esac
+  [ -n "$src" ] || { echo "skills-vendor: malformed manifest row (no source): '$name'" >&2; exit 3; }
+  if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    echo "skills-vendor: unsafe manifest name: '$name'" >&2; exit 3
+  fi
+  case "$src" in *..*|/*|.|./*|*/./*|*/.) echo "skills-vendor: unsafe manifest source: '$src'" >&2; exit 3 ;; esac
+  srcdir="$PROJECTS/$src"
+  dstdir="$SKILLS/$name"
+  if [ -L "$dstdir" ] || { [ -e "$dstdir" ] && [ ! -d "$dstdir" ]; }; then
+    echo "skills-vendor: unsafe mirror destination: $dstdir" >&2; exit 3
+  fi
+  if [ -d "$srcdir" ]; then
+    srcdir="$(cd "$srcdir" && pwd -P)" || exit 3
+    case "$srcdir" in
+      "$PROJECTS"/*) ;;
+      *) echo "skills-vendor: source escapes PROJECTS: $src" >&2; exit 3 ;;
+    esac
+  fi
+  names+=("$name")
+  sources+=("$srcdir")
+done < "$MANIFEST"
+
+# Refuse a source symlink where preserving a GUI-local file needs a directory.
+# mkdir -p and cp would otherwise follow it and write outside the staging tree.
+gui_parent_dirs() {
+  local base="$1" rel="${2#./}" component
+  while [[ "$rel" == */* ]]; do
+    component="${rel%%/*}"
+    rel="${rel#*/}"
+    base="$base/$component"
+    [ ! -L "$base" ] && mkdir -p "$base" || return 1
+  done
+}
 
 # tar_mirror <src> <dst>: the rsync-free sync. Builds the new mirror in a temp
 # dir beside <dst> (source minus the excludes, plus <dst>'s own GUI-local files,
@@ -90,38 +143,56 @@ done
 # differs. Prints "changed" or "same"; returns non-zero on any failure, leaving
 # <dst> as it was.
 tar_mirror() {
-  local src="$1" dst="$2" tmp rel g
+  local src="$1" dst="$2" tmp rel rc
   tmp="$(mktemp -d "$SKILLS/.vendor.XXXXXX")" || return 1
-  if ! (cd "$src" && tar "${TAR_EXCL[@]}" -cf - .) | (cd "$tmp" && tar -xf -); then
+  mkdir "$tmp/tree" || { rm -rf "$tmp"; return 1; }
+  if ! (cd "$src" && tar "${TAR_EXCL[@]}" -cf - .) | (cd "$tmp/tree" && tar -xf -); then
     rm -rf "$tmp"; return 1
   fi
   if [ -d "$dst" ]; then
-    for g in "${GUI_LOCAL[@]}"; do
-      while IFS= read -r rel; do
-        [ -n "$rel" ] || continue
-        mkdir -p "$tmp/$(dirname "$rel")" && cp -p "$dst/$rel" "$tmp/$rel" || { rm -rf "$tmp"; return 1; }
-      done < <(cd "$dst" && find . -type f -name "$g")
-    done
+    # Save find's status as well as its NUL-delimited results. Process
+    # substitution hides read errors and newline-delimited names lose data.
+    # Like rsync's excludes, preserve matching symlinks and whole directories;
+    # prune them so their children cannot be copied a second time.
+    (cd "$dst" && find . \( "${GUI_FIND[@]}" \) -prune -print0) > "$tmp/gui-files" || { rm -rf "$tmp"; return 1; }
+    while IFS= read -r -d '' rel; do
+      gui_parent_dirs "$tmp/tree" "$rel" && [ ! -L "$tmp/tree/$rel" ] &&
+        cp -a "$dst/$rel" "$tmp/tree/$rel" || { rm -rf "$tmp"; return 1; }
+    done < "$tmp/gui-files"
   fi
-  if [ -d "$dst" ] && diff -rq "$tmp" "$dst" >/dev/null 2>&1; then
-    rm -rf "$tmp"; echo same; return 0
+  if [ -d "$dst" ]; then
+    diff -rq --no-dereference "$tmp/tree" "$dst" >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+      0) rm -rf "$tmp" || return 1; echo same; return 0 ;;
+      1) ;;
+      *) rm -rf "$tmp"; return 1 ;;
+    esac
   fi
-  rm -rf "$dst" && mv "$tmp" "$dst" || { rm -rf "$tmp"; return 1; }
-  chmod 755 "$dst"   # mktemp -d creates 0700; match a normal checkout dir
+  chmod 755 "$tmp/tree" || { rm -rf "$tmp"; return 1; }
+  # Keep the prior mirror until installation succeeds. -T prevents a concurrent
+  # destination directory or symlink from turning the rename into a nested move.
+  if [ -d "$dst" ]; then
+    mv -T "$dst" "$tmp/previous" || { rm -rf "$tmp"; return 1; }
+  fi
+  if ! mv -T "$tmp/tree" "$dst"; then
+    if [ -d "$tmp/previous" ] && ! mv -T "$tmp/previous" "$dst"; then
+      echo "skills-vendor: restore failed; previous mirror retained at $tmp/previous" >&2
+      return 1
+    fi
+    rm -rf "$tmp"; return 1
+  fi
+  rm -rf "$tmp" || return 1
   echo changed
 }
 
 drift=0
 missing=0
 
-while IFS=$'\t' read -r name src || [ -n "$name" ]; do
-  case "$name" in ''|'#'*) continue ;; esac
-  [ -n "$src" ] || { echo "skills-vendor: malformed manifest row (no source): '$name'" >&2; exit 3; }
-  # rsync --delete aims at $SKILLS/$name; refuse any row that could escape it
-  case "$name" in *..*|*/*) echo "skills-vendor: unsafe manifest name: '$name'" >&2; exit 3 ;; esac
-  case "$src" in *..*|/*) echo "skills-vendor: unsafe manifest source: '$src'" >&2; exit 3 ;; esac
-
-  srcdir="$PROJECTS/$src"
+for i in "${!names[@]}"; do
+  name="${names[$i]}"
+  srcdir="${sources[$i]}"
+  src="${srcdir#"$PROJECTS"/}"
   dstdir="$SKILLS/$name"
 
   if [ "$MODE" = "--check" ]; then
@@ -132,8 +203,12 @@ while IFS=$'\t' read -r name src || [ -n "$name" ]; do
       printf 'DRIFT    %s (not vendored yet)\n' "$name"
       drift=1
     else
-      out="$(diff -rq "${DIFF_EXCL[@]}" "$srcdir" "$dstdir" 2>&1)"
-      if [ -n "$out" ]; then
+      out="$(diff -rq --no-dereference "${DIFF_EXCL[@]}" "$srcdir" "$dstdir" 2>&1)"
+      rc=$?
+      if [ "$rc" -gt 1 ]; then
+        echo "skills-vendor: diff failed for $name (rc=$rc): $out" >&2
+        exit 3
+      elif [ "$rc" -ne 0 ]; then
         printf 'DRIFT    %s\n' "$name"
         echo "$out" | sed 's/^/         /'
         drift=1
@@ -150,7 +225,7 @@ while IFS=$'\t' read -r name src || [ -n "$name" ]; do
     continue
   fi
   if [ "$USE_RSYNC" = 1 ]; then
-    mkdir -p "$dstdir"
+    mkdir -p "$dstdir" || exit 3
     # --checksum: rsync's default quick check skips a file whose size and mtime
     # match, so an edit that kept the size within the same second stayed DRIFT
     # (--check compares content) while sync said UNCHANGED. Skill dirs are
@@ -174,7 +249,7 @@ while IFS=$'\t' read -r name src || [ -n "$name" ]; do
   else
     printf 'UNCHANGED %s\n' "$name"
   fi
-done < "$MANIFEST"
+done
 
 if [ "$MODE" = "--check" ]; then
   [ "$drift" -ne 0 ] && exit 1

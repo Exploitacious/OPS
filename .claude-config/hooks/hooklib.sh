@@ -87,6 +87,43 @@ hook_pathnorm() {
   fi
 }
 
+# Validate the two forms deploy creates: a symlink or a small import file.
+# A filename mentioned in prose, a fenced example, or an import of a different
+# checkout cannot prove boot. Match the real target, not just its basename.
+hook_core_rule_matches() {
+  local rule="$1" core="$2" expected resolved line imported=""
+  local import_re='^([^[:space:]\\]|\\[[:space:]])+$'
+  [ -f "$core" ] && [ -s "$core" ] && [ -r "$core" ] \
+    && [ -f "$rule" ] && [ -r "$rule" ] || return 1
+  expected="$(readlink -f "$core" 2>/dev/null)" || return 1
+  [ -n "$expected" ] || return 1
+  if [ -L "$rule" ]; then
+    resolved="$(readlink -f "$rule" 2>/dev/null)" || return 1
+  else
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|'#'*) continue ;;
+        @*) [ -z "$imported" ] || return 1; imported="${line#@}" ;;
+        *) return 1 ;;
+      esac
+    done < "$rule"
+    # Claude ends imports at unescaped whitespace; quoting the path does not
+    # escape it. Windows deploy normalizes slashes and escapes each space.
+    [[ "$imported" =~ $import_re ]] || return 1
+    imported="${imported//\\ / }"
+    imported="$(hook_pathnorm "$imported")"
+    case "$imported" in
+      \~/*) imported="$HOME/${imported:2}" ;;
+      /*) ;;
+      *) imported="$(dirname "$rule")/$imported" ;;
+    esac
+    [ -f "$imported" ] && [ -r "$imported" ] || return 1
+    resolved="$(readlink -f "$imported" 2>/dev/null)" || return 1
+  fi
+  [ "$resolved" = "$expected" ]
+}
+
 # work_session_key: the stable per-session key for session-scoped state files
 # under ~/.claude-compact-cycle/ (session-start stamp, work-log, resume baton).
 # MUST match the resume-baton key formula in the pre-compact-synthesis skill so

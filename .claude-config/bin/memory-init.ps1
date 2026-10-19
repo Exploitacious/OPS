@@ -140,10 +140,20 @@ function Init-OneEncoded {
             if (Test-Path $existing) {
                 $existingItem = Get-Item $existing -Force
                 if ($existingItem.PSIsContainer) {
-                    Get-ChildItem -LiteralPath $existing -Force | ForEach-Object {
-                        Move-Item -LiteralPath $_.FullName -Destination $target -Force -ErrorAction SilentlyContinue
+                    $entries = @(Get-ChildItem -LiteralPath $existing -Force)
+                    # Profiles can hold different notes under the same name.
+                    # Preflight every entry before moving any of them, and keep
+                    # the current link when a collision needs manual resolution.
+                    foreach ($entry in $entries) {
+                        $destPath = Join-Path $target $entry.Name
+                        if ($null -ne (Get-Item -LiteralPath $destPath -Force -ErrorAction SilentlyContinue)) {
+                            throw "[$Encoded] conflicting target entry: $($entry.Name); both pools and the current link are unchanged"
+                        }
                     }
-                    Remove-Item -LiteralPath $existing -Force -ErrorAction SilentlyContinue
+                    foreach ($entry in $entries) {
+                        Move-Item -LiteralPath $entry.FullName -Destination $target -ErrorAction Stop
+                    }
+                    Remove-Item -LiteralPath $existing -Force -ErrorAction Stop
                 }
             }
             Remove-Item -LiteralPath $source -Force

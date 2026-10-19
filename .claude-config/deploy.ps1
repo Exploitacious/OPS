@@ -147,7 +147,8 @@ foreach ($entry in $LinkMap) {
     $target = Join-Path $ClaudeHome $subdir
 
     if (-not (Test-Path $source)) {
-        Write-Warn "Source missing, skipping: $source"
+        Write-Bad "Source missing, cannot link ${subdir}: $source"
+        $DeployFailed += "link-$subdir"
         continue
     }
 
@@ -183,6 +184,7 @@ foreach ($entry in $LinkMap) {
             Write-Bad "Failed to create symlink or junction for $subdir/."
             Write-Bad "  Enable Developer Mode or run as Administrator."
             Write-Bad "  Error: $_"
+            $DeployFailed += "link-$subdir"
         }
     }
 }
@@ -198,9 +200,10 @@ Write-Status "Linking the always-loaded core..." "Yellow"
 $CoreSrc     = Join-Path $OpsRoot "CONTEXT\core.md"
 $CoreRuleDir = Join-Path $ClaudeHome "rules"
 $CoreRule    = Join-Path $CoreRuleDir "ops-core.md"
-$CoreImport  = "@" + ($CoreSrc -replace '\\', '/')
+# Claude imports end at an unescaped space, including in Windows profile names.
+$CoreImport  = "@" + (($CoreSrc -replace '\\', '/') -replace ' ', '\ ')
 function Set-CoreRule {
-    if (-not (Test-Path $CoreSrc)) { Write-Bad "CONTEXT\core.md missing at $CoreSrc -- sessions would boot without the core."; return $false }
+    if (-not (Test-Path -LiteralPath $CoreSrc -PathType Leaf)) { Write-Bad "CONTEXT\core.md missing at $CoreSrc -- sessions would boot without the core."; return $false }
     if (Test-Path $CoreRuleDir) {
         if ((Get-Item $CoreRuleDir -Force).LinkType) { Write-Bad "$CoreRuleDir is a link -- refusing to write into it."; return $false }
     } else { New-Item -ItemType Directory -Path $CoreRuleDir -Force | Out-Null }
@@ -223,9 +226,17 @@ function Set-CoreRule {
         Write-Good "Linked core: $CoreRule -> $CoreSrc"
     }
     catch {
-        # No BOM: a byte-order mark before the @ would break the import line.
-        [IO.File]::WriteAllText($CoreRule, "$CoreImport`n", (New-Object System.Text.UTF8Encoding $false))
-        Write-Good "Core imported through $CoreRule ($CoreImport); symlinks need Developer Mode here"
+        # CreateNew refuses an entry that appeared while creating the symlink.
+        # WriteAllText would follow that entry and could overwrite its target.
+        $stream = $null
+        try {
+            $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes("$CoreImport`n")
+            $stream = [IO.File]::Open($CoreRule, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream.Write($bytes, 0, $bytes.Length)
+            Write-Good "Core imported through $CoreRule ($CoreImport); symlinks need Developer Mode here"
+        }
+        catch { Write-Bad "Cannot create core import at ${CoreRule}: $_"; return $false }
+        finally { if ($stream) { $stream.Dispose() } }
     }
     return $true
 }
@@ -280,9 +291,13 @@ $MemoryInit = Join-Path $ConfigDir "bin\memory-init.ps1"
 # CLAUDE_CONFIG_DIR, call this again with that dir.
 function Invoke-MemoryInit {
     param([string]$ConfigDir, [string]$Label)
-    if (-not (Test-Path $MemoryInit)) { Write-Warn "memory-init.ps1 not present -- skipping $Label memory sync."; return }
+    if (-not (Test-Path $MemoryInit)) { Write-Bad "memory-init.ps1 not present -- $Label memory sync failed."; $script:DeployFailed += 'memory-init'; return }
     $prev = $env:CLAUDE_CONFIG_DIR
+    $prevOps = $env:OPS_DIR
     $env:CLAUDE_CONFIG_DIR = $ConfigDir
+    # Deploy initializes this checkout, even when the invoking shell selected a
+    # different OPS_DIR or this clone is not under the default ~/OPS path.
+    $env:OPS_DIR = $OpsRoot
     try {
         & $MemoryInit -AutoCommit
         if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
@@ -290,17 +305,22 @@ function Invoke-MemoryInit {
         }
         elseif ($LASTEXITCODE -eq 2) {
             Write-Warn "memory-init ($Label): .gitignore excludes target. Fix and re-run."
+            $script:DeployFailed += 'memory-init'
         }
         else {
             Write-Warn "memory-init ($Label) exited rc=$LASTEXITCODE -- inspect manually."
+            $script:DeployFailed += 'memory-init'
         }
     }
     catch {
         Write-Warn "memory-init.ps1 ($Label) failed: $_"
+        $script:DeployFailed += 'memory-init'
     }
     finally {
         if ($null -eq $prev) { Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
         else { $env:CLAUDE_CONFIG_DIR = $prev }
+        if ($null -eq $prevOps) { Remove-Item Env:\OPS_DIR -ErrorAction SilentlyContinue }
+        else { $env:OPS_DIR = $prevOps }
     }
 }
 
@@ -310,7 +330,8 @@ Invoke-MemoryInit -ConfigDir $ClaudeHome -Label "default"
 # Mark $HOME trusted so Claude's parent-dir-walking trust check covers every
 # repo beneath it -- no folder-trust prompt, ever. Keyed off $env:USERPROFILE
 # (never a hardcoded username), merged into the existing .claude.json without
-# touching other keys. Mirrors deploy.sh's seed_trust.
+# touching other keys. Default app state is ~/.claude.json, beside ~/.claude/.
+# Mirrors deploy.sh's seed_trust.
 #
 # NOTE: if you run a second Claude Code profile via CLAUDE_CONFIG_DIR (a
 # separate .claude.json/.credentials.json sharing this config surface), run
@@ -322,23 +343,42 @@ Write-Status "Seeding trust anchor..." "Yellow"
 function Set-TrustAnchor {
     param([string]$ConfigDir, [string]$Label)
     $jf = Join-Path $ConfigDir ".claude.json"
+    $temp = Join-Path $ConfigDir ('.claude.json.tmp-' + [guid]::NewGuid())
     try {
-        if (Test-Path $jf) { $cfg = Get-Content $jf -Raw | ConvertFrom-Json }
+        $entry = Get-Item -LiteralPath $jf -Force -ErrorAction SilentlyContinue
+        if ($entry -and ($entry.LinkType -or $entry.PSIsContainer)) { throw 'App state is a link or directory; refusing to replace it' }
+        $original = $null
+        if ($entry) {
+            $original = [IO.File]::ReadAllText($jf)
+            # ConvertFrom-Json unwraps a one-element root array in PS 5.1.
+            if ($original.TrimStart() -notmatch '^\{') { throw 'Expected an app-state JSON object' }
+            $cfg = $original | ConvertFrom-Json -ErrorAction Stop
+            if ($cfg -isnot [pscustomobject]) { throw 'Expected an app-state JSON object' }
+        }
         else { $cfg = [pscustomobject]@{} }
         if (-not $cfg.PSObject.Properties['projects']) {
             $cfg | Add-Member -NotePropertyName projects -NotePropertyValue ([pscustomobject]@{}) -Force
         }
+        elseif ($cfg.projects -isnot [pscustomobject]) { throw 'Expected a projects object' }
         $homeKey = $env:USERPROFILE
         if (-not $cfg.projects.PSObject.Properties[$homeKey]) {
             $cfg.projects | Add-Member -NotePropertyName $homeKey -NotePropertyValue ([pscustomobject]@{}) -Force
         }
+        elseif ($cfg.projects.$homeKey -isnot [pscustomobject]) { throw 'Expected a project object' }
         $cfg.projects.$homeKey | Add-Member -NotePropertyName hasTrustDialogAccepted -NotePropertyValue $true -Force
-        $cfg | ConvertTo-Json -Depth 20 | Set-Content $jf -Encoding UTF8
+        $json = $cfg | ConvertTo-Json -Depth 100 -WarningAction Stop
+        [IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding $false))
+        if ($entry) {
+            if ([IO.File]::ReadAllText($jf) -cne $original -or (Get-Item -LiteralPath $jf -Force).LinkType) { throw 'App state changed during deployment; retry' }
+            [IO.File]::Replace($temp, $jf, [NullString]::Value)
+        }
+        else { [IO.File]::Move($temp, $jf) }
         Write-Good "Trust anchor set ($Label)."
     }
-    catch { Write-Warn "Could not seed $Label trust anchor: $_" }
+    catch { Write-Bad "Could not seed $Label trust anchor: $_"; $script:DeployFailed += 'trust-anchor' }
+    finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force } }
 }
-Set-TrustAnchor -ConfigDir $ClaudeHome -Label "default"
+Set-TrustAnchor -ConfigDir $env:USERPROFILE -Label "default"
 
 # --- Always-on ultracode shim (operator directive) -> profile.local.ps1 seam ---
 # Wrap `claude` so every interactive session runs with ultracode unless the
@@ -463,22 +503,63 @@ else {
         Write-Bad "$SkillsSrcDir exists but is not a git clone -- move it aside, then re-run."; $DeployFailed += 'skills-mount'
     }
     elseif (-not $cloned) {
-        $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & git clone --quiet $SkillsSrcUrl $SkillsSrcDir 2>&1 | Out-Null
-        $cloned = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $SkillsSrcDir ".git"))
-        $ErrorActionPreference = $prevEap
-        if ($cloned) { Write-Good "Cloned $SkillsSrcUrl -> $SkillsSrcDir" }
-        else { Write-Warn "Could not clone $SkillsSrcUrl (network?) -- mounted skills stay MISSING; re-run to retry." }
+        # Publish only a complete clone. Interrupted clones must not occupy the
+        # canonical source path and prevent a later deploy from retrying.
+        $cloneParent = Split-Path $SkillsSrcDir -Parent
+        $cloneTemp = Join-Path $cloneParent ('.agent-skills.clone-' + [guid]::NewGuid())
+        $prevEap = $ErrorActionPreference
+        try {
+            New-Item -ItemType Directory -Path $cloneParent -Force | Out-Null
+            $ErrorActionPreference = "Continue"
+            & git clone --quiet $SkillsSrcUrl $cloneTemp 2>&1 | Out-Null
+            $cloneRc = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            if ($cloneRc -ne 0 -or -not (Test-Path (Join-Path $cloneTemp ".git"))) { throw "git clone failed (rc=$cloneRc)" }
+            # Directory.Move refuses an existing destination instead of nesting
+            # into or replacing a source another process created meanwhile.
+            [IO.Directory]::Move($cloneTemp, $SkillsSrcDir)
+            $cloned = $true
+            Write-Good "Cloned $SkillsSrcUrl -> $SkillsSrcDir"
+        }
+        catch { Write-Bad "Could not clone ${SkillsSrcUrl}: $_. Mounted skills are missing; re-run to retry."; $DeployFailed += 'skills-mount' }
+        finally {
+            $ErrorActionPreference = $prevEap
+            if (Test-Path -LiteralPath $cloneTemp) { Remove-Item -LiteralPath $cloneTemp -Recurse -Force }
+        }
     }
     else { Write-Good "Skill source already cloned: $SkillsSrcDir (not pulled)" }
     if ($cloned) {
         if ($BashExe) {
-            $opsUnix = (& $BashExe -lc "cygpath -u '$OpsRoot'" 2>$null).Trim()
-            $svOut = & $BashExe -lc "OPS_DIR='$opsUnix' bash '$opsUnix/.claude-config/bin/skills-vendor.sh' sync" 2>&1
-            if ($LASTEXITCODE -eq 0) { Write-Good "Mounted skills synced into SKILLS\" }
-            else { Write-Bad "skills-vendor.sh sync failed:"; $svOut | ForEach-Object { Write-Warn "  $_" }; $DeployFailed += 'skills-mount' }
+            # Pass the root as data, including spaces and apostrophes. Piping a
+            # constant script also avoids Windows PowerShell native argv quoting.
+            $prevRoot = $env:OPS_DEPLOY_ROOT
+            $prevEap = $ErrorActionPreference
+            try {
+                $env:OPS_DEPLOY_ROOT = $OpsRoot
+                $ErrorActionPreference = "Continue"
+                $mountScript = @'
+opsUnix=$(cygpath -u "$OPS_DEPLOY_ROOT") || exit
+OPS_DIR="$opsUnix" bash "$opsUnix/.claude-config/bin/skills-vendor.sh" sync || exit
+# sync skips absent sources; verify every required mount before reporting success.
+OPS_DIR="$opsUnix" bash "$opsUnix/.claude-config/bin/skills-vendor.sh" --check
+exit $?
+'@
+                # Windows native pipelines append CRLF. Supply LF script lines
+                # and exit before that appended newline can become shell input.
+                $mountScript = ($mountScript -replace "`r", '') + "`n"
+                $svOut = $mountScript | & $BashExe -ls 2>&1
+                $svRc = $LASTEXITCODE
+            }
+            catch { $svOut = @($_); $svRc = 1 }
+            finally {
+                $ErrorActionPreference = $prevEap
+                if ($null -eq $prevRoot) { Remove-Item Env:\OPS_DEPLOY_ROOT -ErrorAction SilentlyContinue }
+                else { $env:OPS_DEPLOY_ROOT = $prevRoot }
+            }
+            if ($svRc -eq 0) { Write-Good "Mounted skills synced into SKILLS\" }
+            else { Write-Bad "skills-vendor.sh sync or completeness check failed:"; $svOut | ForEach-Object { Write-Warn "  $_" }; $DeployFailed += 'skills-mount' }
         }
-        else { Write-Warn "Git Bash not found -- mounted skills not synced (run skills-vendor.sh sync after installing Git for Windows)." }
+        else { Write-Bad "Git Bash not found -- mounted skills not synced (install Git for Windows, then re-run deploy.ps1)."; $DeployFailed += 'skills-mount' }
     }
 }
 
@@ -643,6 +724,10 @@ Write-Host "  Claude home:    $ClaudeHome" -ForegroundColor DarkGray
 Write-Host "  Always loaded:  $CoreRule -> $CoreSrc" -ForegroundColor DarkGray
 Write-Host "  Memory store:   $(Join-Path $ConfigDir 'memory')" -ForegroundColor DarkGray
 Write-Host ""
+
+# Report an actionable process result before the interactive prompt, so failed
+# unattended deployments cannot appear successful or wait for a keypress.
+if ($DeployFailed.Count -gt 0) { exit 1 }
 
 if ($Host.Name -eq "ConsoleHost") {
     Write-Host "Press any key to exit..." -ForegroundColor DarkGray

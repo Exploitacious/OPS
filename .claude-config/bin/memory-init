@@ -198,11 +198,23 @@ init_one_encoded() {
           log "[$ENCODED] migrating files from $EXISTING -> $TARGET"
           shopt -s dotglob nullglob
           local f
+          # A same-named note can carry different facts in another profile.
+          # Check the whole move first: neither overwrite it nor repoint away
+          # from the old pool while its unresolved notes remain there.
           for f in "$EXISTING"/*; do
-            mv -n -- "$f" "$TARGET/" || true
+            if [[ -e "$TARGET/$(basename "$f")" || -L "$TARGET/$(basename "$f")" ]]; then
+              log "[$ENCODED] conflicting target entry: $(basename "$f"); leaving both pools and the current symlink unchanged"
+              shopt -u dotglob nullglob
+              return 1
+            fi
+          done
+          for f in "$EXISTING"/*; do
+            mv -n -- "$f" "$TARGET/" || { shopt -u dotglob nullglob; return 1; }
+            # GNU mv -n returns success when a concurrent destination wins.
+            [[ ! -e "$f" && ! -L "$f" ]] || { shopt -u dotglob nullglob; return 1; }
           done
           shopt -u dotglob nullglob
-          rmdir "$EXISTING" 2>/dev/null || log "[$ENCODED] old target not empty, leaving in place"
+          rmdir "$EXISTING" 2>/dev/null || { log "[$ENCODED] old target not empty; current symlink left in place"; return 1; }
         fi
         ln -sfn "$TARGET" "$SOURCE"
         log "[$ENCODED] symlink repointed"
@@ -311,10 +323,18 @@ log "processing ${#ENCODED_LIST[@]} encoded subdir(s): ${ENCODED_LIST[*]}"
 echo
 
 # --- Process each ----------------------------
+had_error=0
 for enc in "${ENCODED_LIST[@]}"; do
-  init_one_encoded "$enc" || log "[$enc] non-fatal error: continuing with next"
+  if ! init_one_encoded "$enc"; then
+    log "[$enc] initialization failed: continuing with next"
+    had_error=1
+  fi
   echo
 done
 
-log "done"
-exit 0
+if (( had_error )); then
+  log "done, with errors: see above"
+else
+  log "done"
+fi
+exit "$had_error"
