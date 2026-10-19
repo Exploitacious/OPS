@@ -50,7 +50,12 @@ Run the repo's own gates from your branch root:
 ```bash
 .claude-config/bin/secrets-scan.sh CONTEXT SKILLS .claude-config
 OPS_DIR="$PWD" .claude-config/bin/verify-ops.sh   # checks this checkout (default ~/OPS)
-for t in .claude-config/bin/tests/*.sh; do bash "$t" || echo "FAILED: $t"; done
+# every suite, through the sandbox (needs bwrap; .claude-config/bin/README.md, "tests/")
+for t in .claude-config/bin/tests/*-test.sh .claude-config/bin/tests/*-test.py; do
+  case "$t" in */sandbox-run-test.sh) bash "$t" || echo "FAILED: $t"; continue ;; esac
+  case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
+  .claude-config/bin/sandbox-run --no-bind --no-net --ro-bind "$PWD" -- "${run[@]}" "$t" || echo "FAILED: $t"
+done
 bash -n <every shell script you touched>
 node --check <every js file you touched>
 ```
