@@ -139,8 +139,9 @@ In order:
    change into skills every session loads. Update on purpose:
    `git -C ~/OPS/PROJECTS/Exploitacious/agent-skills pull --ff-only`, then
    `~/OPS/.claude-config/bin/skills-vendor.sh sync`. A failed clone (no
-   network) is a warning; `verify-ops.sh` reports the mounts MISSING until a
-   re-run clones them.
+   network) prints an `[XX]` line and fails the deploy (`skills-mount`);
+   `verify-ops.sh` warns that the mounts are MISSING until a re-run clones
+   them.
 
 3. **Link the always-loaded core** into `~/.claude/rules/ops-core.md` (see "How
    the core loads"). A regular file in the way is backed up under a name Claude
@@ -245,8 +246,9 @@ In order:
    marketplace registered outside that scope stays put with a warning.
    Inventory and removal failures are visible warnings, never a silent success.
 
-10. **Seed the trust anchor.** Marks `$HOME` trusted in `~/.claude/.claude.json`
-    (`hasTrustDialogAccepted: true`) so Claude Code's parent-dir trust walk
+10. **Seed the trust anchor.** Marks `$HOME` trusted in `~/.claude.json`, which
+    sits beside `~/.claude/`, not inside it (`hasTrustDialogAccepted: true`), so
+    Claude Code's parent-dir trust walk
     covers every repo under `$HOME` with no folder-trust prompt. Keyed off
     `$HOME`; idempotent; merges into the existing file without touching other
     keys. A second profile via `CLAUDE_CONFIG_DIR` is not covered
@@ -293,19 +295,53 @@ claude plugin list
 # Stage 2 left the Stage-1 settings alone (expect: no output)
 git -C ~/linuxploitacious status --short -- claude/.claude/settings.json
 
-# The drift gate passes (expect: "0 fail" on the last line)
+# The drift gate passes (expect: no FAIL line, and "0 fail" in the last line,
+# "verify-ops: <n> ok · <n> warn · 0 fail (<timestamp>)")
 bash ~/OPS/.claude-config/bin/verify-ops.sh
 
 # Backup scheduler
 crontab -l | grep OPS                       # Linux
 schtasks /Query /TN "OPS Daily Backup"      # Windows
 
-# The backup may push (expect exit 0 and "private: github.com/<you>/<repo> is private")
+# The backup may push (expect exit 0 and the line
+# "origin-private-check: private: github.com/<you>/<repo> is private";
+# exit 1 is a public origin, exit 2 one it cannot verify)
 bash ~/OPS/.claude-config/bin/origin-private-check ~/OPS; echo "exit $?"
+
+# Commits can run (expect one line, "Your Name <you@example.com> <timestamp> <offset>";
+# an error means every commit will fail)
+git -C ~/OPS var GIT_AUTHOR_IDENT
 ```
 
 Then open a new session (any launch path) and check the briefing's `Boot:`
 line. If all succeed, deployment is complete.
+
+### Testing a deploy under a throwaway HOME
+
+To try a deploy, or a change to the deployer, without touching your real setup,
+run it under a throwaway `HOME`. CI does exactly this on every pull request
+(the `smoke` job in `.github/workflows/gate.yml`). The subshell keeps the new
+`HOME` out of your session:
+
+```bash
+(
+  export HOME="$(mktemp -d)"; unset CLAUDE_CONFIG_DIR
+  git config --global user.name "Throwaway" && git config --global user.email throwaway@example.invalid
+  mkdir -p ~/.claude
+  curl -fsSL https://raw.githubusercontent.com/Exploitacious/linuxploitacious/HEAD/claude/.claude/settings.json -o ~/.claude/settings.json
+  git clone <path or URL of your checkout> ~/OPS
+  bash ~/OPS/.claude-config/deploy.sh --no-system
+  bash ~/OPS/.claude-config/bin/verify-ops.sh
+)
+```
+
+The `curl` line fetches the Stage-1 settings a new host has; the git identity
+is the prerequisite from step 7. Expect `Deploy complete.` and, on the last
+line of the gate, `verify-ops: <n> ok · 0 warn · 0 fail (<timestamp>)`, with
+both commands exiting 0. `--no-system` keeps deploy off your crontab and root's
+rc files. Deploy still clones the public skill source over HTTPS, so the test
+needs network access, and the throwaway directory stays in your temp dir until
+you delete it.
 
 ## T3 Code hosts
 
@@ -336,7 +372,7 @@ terminal option does not reach T3 threads; the managed-settings option does.
 
 ## Hooks and the drift gate (activated outside Stage 2)
 
-Two pieces of OPS machinery ship in the repo but are **not** wired by the
+Three pieces of OPS machinery ship in the repo but are **not** wired by the
 Stage 2 deploy scripts.
 
 - **Hooks:** the scripts in `.claude-config/hooks/` (SessionStart briefing,
@@ -566,6 +602,8 @@ If a new piece of OPS setup needs to run on every host:
 - `.claude-config/bin/memory-init`, `memory-init.ps1`, `memory-index`: auto-memory git-sync and its index.
 - `.claude-config/bin/skills-vendor.sh`, `SKILLS/VENDORED.tsv`: the skill mounts.
 - `.claude-config/bin/tests/`: the tests for the above.
+- `.github/workflows/gate.yml`: the CI gate (syntax checks, every suite, a fresh-install smoke test with `verify-ops.sh`, a secrets scan); it runs on the template repository only.
+- `SKILLS/THIRD_PARTY_NOTICES.md`: the third-party works the skills adapt, and their licenses.
 - `SKILLS/README.md`: what gets symlinked into `~/.claude/skills/`.
 - [`Exploitacious/linuxploitacious`](https://github.com/Exploitacious/linuxploitacious):
   the public Stage 1 repo (dotfiles + host provisioning).

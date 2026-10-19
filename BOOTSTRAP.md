@@ -51,8 +51,13 @@ anything wrong"), so recon is transparent.
 - **Identity the box already has:**
   ```bash
   git config --get user.name; git config --get user.email
+  git var GIT_AUTHOR_IDENT     # an error means every commit fails
   gh auth status 2>&1 | head
   ```
+  If `git var` errors, tell the Operator to run `git config --global user.name`
+  and `user.email`: deploy fails with `git-identity` until they are set
+  (`DEPLOYMENT.md`, step 7), and a missing identity breaks the memory sync and
+  the daily backup.
 - **Installed toolchain** (probe presence, install nothing):
   ```bash
   for t in docker node python3 pwsh go rustc psql terraform kubectl; do \
