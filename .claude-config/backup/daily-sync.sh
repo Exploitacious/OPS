@@ -57,6 +57,12 @@ push_ops() {
     fi
 }
 
+# git needs a usable identity to stash or commit; a fresh install may have none.
+identity_hint() {
+    git var GIT_COMMITTER_IDENT >/dev/null 2>&1 && return 0
+    log "     no git identity: run git config --global user.name \"Your Name\" and git config --global user.email <your-email>"
+}
+
 # --- Stage 1: back up the OPS repo itself ----------------------------------
 backup_ops() {
     cd "$OPS_DIR" 2>/dev/null || { log "OPS: ERROR cannot cd to $OPS_DIR"; return 1; }
@@ -92,6 +98,7 @@ backup_ops() {
     local stash_label="daily-sync-auto-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
     if ! git stash push -u -m "$stash_label" >/dev/null 2>&1; then
         log "OPS: ERROR git stash failed; aborting OPS backup to avoid clobbering work"
+        identity_hint
         return 1
     fi
 
@@ -113,7 +120,15 @@ backup_ops() {
         return 0
     fi
 
-    git commit -m "Daily Backup $(date '+%Y-%m-%d')" >/dev/null
+    # A commit can fail (no git identity, a hook, signing). Pushing or logging
+    # "kept locally" after a failed commit reported a backup that did not exist
+    # (seen 2026-10-19 on a fresh Debian install with no git identity).
+    local commit_err
+    if ! commit_err="$(git commit -m "Daily Backup $(date '+%Y-%m-%d')" 2>&1 >/dev/null)"; then
+        log "OPS: ERROR commit failed; changes left staged, nothing pushed: $(printf '%s' "$commit_err" | tail -1)"
+        identity_hint
+        return 1
+    fi
     push_ops "$branch"
 }
 

@@ -325,6 +325,19 @@ function Init-OneEncoded {
         }
     }
 
+    # --- keep the pool in git (see memory-init: an empty pool vanished after
+    # the daily backup's stash, leaving the memory link dangling) ------------
+    if (-not $DryRun -and (Test-Path -LiteralPath $source)) {
+        if (-not (Test-Path -LiteralPath $target)) {
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            Log "[$Encoded] pool directory was missing -- recreated"
+        }
+        if (-not (Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            New-Item -ItemType File -Force -Path (Join-Path $target '.gitkeep') | Out-Null
+            Log "[$Encoded] seeded .gitkeep so git keeps the empty pool"
+        }
+    }
+
     # --- per-encoded auto-commit + push -------------------------------------
     if ($AutoCommit -and -not $DryRun) {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -339,7 +352,8 @@ function Init-OneEncoded {
             git add $targetRel 2>$null | Out-Null
             if ($LASTEXITCODE -ne 0) { Log "[$Encoded] auto-commit: git add failed -- leaving untracked"; return }
             $commitMsg = "feat(memory): seed .claude-memory/${Host_}-${Encoded}"
-            git commit -m $commitMsg 2>$null | Out-Null
+            # Commit the pool path only: anything else staged is not ours.
+            git commit -m $commitMsg -- $targetRel 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 Log "[$Encoded] auto-commit: committed"
                 # One gate answer per run: it may call the GitHub API.

@@ -102,4 +102,29 @@ grep -q 'gh auth login), or confirm the repo is private, then run: git -C ".*" c
 [ "$(remote_head)" = "$before" ] || fail "pushed to an unverified origin"
 pass "unverifiable origin: commit kept locally, the log names gh auth and the opt-in"
 
+# --- A failed commit is an error, never a backup ------------------------------
+# (2026-10-19: a fresh install whose commit failed logged "commit kept locally",
+# or "pushed successfully", for a backup that did not exist)
+before="$(remote_head)"; head_before="$(local_head)"
+printf 'fourth note\n' > "$OPS/note4.md"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$OPS/.git/hooks/pre-commit"; chmod +x "$OPS/.git/hooks/pre-commit"
+GH_ANSWER=true run_sync
+grep -q 'OPS: ERROR commit failed; changes left staged, nothing pushed' "$LOG" || fail "a failed commit was not logged as an error"
+if grep -q -e 'backup pushed successfully' -e 'commit kept locally' "$LOG"; then fail "a failed commit was reported as a backup"; fi
+[ "$(local_head)" = "$head_before" ] && [ "$(remote_head)" = "$before" ] || fail "a commit or push happened after the commit failed"
+grep -q 'projects stage ran (--auto)' "$LOG" || fail "the project stage did not run after the failed commit"
+rm -f "$OPS/.git/hooks/pre-commit"
+pass "failed commit: logged as an error, nothing pushed, project stage still ran"
+
+# --- No git identity: the failure names the fix --------------------------------
+(
+  export GIT_AUTHOR_NAME= GIT_COMMITTER_NAME= GIT_AUTHOR_EMAIL= GIT_COMMITTER_EMAIL= GIT_CONFIG_GLOBAL=/dev/null
+  GH_ANSWER=true run_sync
+)
+grep -q 'OPS: ERROR' "$LOG" || fail "a backup without an identity did not log an error"
+grep -q 'no git identity: run git config --global user.name' "$LOG" || fail "the identity fix is not in the log"
+if grep -q -e 'backup pushed successfully' -e 'commit kept locally' "$LOG"; then fail "a backup without an identity was reported as done"; fi
+[ "$(local_head)" = "$head_before" ] && [ "$(remote_head)" = "$before" ] || fail "a commit or push happened without an identity"
+pass "no git identity: the backup fails loudly, names the fix, and pushes nothing"
+
 echo "ALL PASS"

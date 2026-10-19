@@ -69,6 +69,36 @@ grep -q 'auto-commit: pushed' "$GATE/log" || { cat "$GATE/log" >&2; echo 'FAIL: 
 [[ "$(git -C "$FAKE_REMOTE" rev-parse main)" == "$(git -C "$OPS_DIR" rev-parse HEAD)" ]] || { echo 'FAIL: memory not pushed to a private origin' >&2; exit 1; }
 echo 'PASS: auto-commit pushes held and new commits to a private origin'
 
+# Auto-commit commits the pool path only; other staged work stays staged.
+printf 'unrelated\n' > "$OPS_DIR/unrelated.txt"; git -C "$OPS_DIR" add unrelated.txt
+printf 'third note\n' > "$POOL/three.md"
+bash "$INIT" --hostname fixture --only-home --auto-commit > "$GATE/log" 2>&1 || { cat "$GATE/log" >&2; echo 'FAIL: memory-init failed with staged unrelated work' >&2; exit 1; }
+if git -C "$OPS_DIR" show --name-only --format= HEAD | grep -qx unrelated.txt; then echo 'FAIL: auto-commit swept in unrelated staged work' >&2; exit 1; fi
+git -C "$OPS_DIR" show --name-only --format= HEAD | grep -q 'three.md' || { echo 'FAIL: the pool change was not committed' >&2; exit 1; }
+git -C "$OPS_DIR" diff --cached --name-only | grep -qx unrelated.txt || { echo 'FAIL: unrelated staged work was lost' >&2; exit 1; }
+echo 'PASS: auto-commit commits only the memory pool'
+
+# An empty pool stays in git through the daily backup's stash, and a pool an
+# earlier backup removed is recreated (2026-10-19: git stash -u dropped the
+# empty pool directory and left the memory link dangling).
+EMPTYH="$WORK/empty"
+(
+  export HOME="$EMPTYH/home" OPS_DIR="$EMPTYH/OPS" CLAUDE_CONFIG_DIR="$EMPTYH/config"
+  mkdir -p "$HOME"
+  git init -q -b main "$OPS_DIR" && git -C "$OPS_DIR" commit -q --allow-empty -m seed
+  E="${HOME//\//-}"; P="$OPS_DIR/.claude-memory/fixture$E"; L="$CLAUDE_CONFIG_DIR/projects/$E/memory"
+  bash "$INIT" --hostname fixture --only-home > "$EMPTYH/log" 2>&1 || { cat "$EMPTYH/log" >&2; echo 'FAIL: init of an empty pool failed' >&2; exit 1; }
+  [[ -L "$L" && -f "$P/.gitkeep" ]] || { cat "$EMPTYH/log" >&2; echo 'FAIL: the empty pool has no placeholder' >&2; exit 1; }
+  printf 'x\n' > "$OPS_DIR/other.txt"
+  git -C "$OPS_DIR" stash push -q -u -m probe && git -C "$OPS_DIR" stash pop -q
+  [[ -d "$L" ]] || { echo 'FAIL: the pool did not survive stash -u and pop' >&2; exit 1; }
+  rm -rf "$P"
+  [[ ! -d "$L" ]] || { echo 'FAIL: fixture did not dangle the link' >&2; exit 1; }
+  bash "$INIT" --hostname fixture --only-home > "$EMPTYH/log" 2>&1 || { cat "$EMPTYH/log" >&2; echo 'FAIL: rerun on a dangling pool failed' >&2; exit 1; }
+  [[ -d "$L" && -f "$P/.gitkeep" ]] || { cat "$EMPTYH/log" >&2; echo 'FAIL: the dangling pool was not healed' >&2; exit 1; }
+) || exit 1
+echo 'PASS: an empty pool survives the backup stash, and a removed pool is recreated'
+
 # The deploy caller must retain the initializer's failure in its final status.
 DEPLOY="$(cd "$(dirname "$INIT")/.." && pwd)/deploy.sh"
 CONFIG_DIR="$WORK/deploy-config"
@@ -81,3 +111,14 @@ DEPLOY_FAILED=''
 eval "$(awk '/^MEMORY_INIT=/ {p=1} p && /^# --- Daily backup/ {exit} p {print}' "$DEPLOY")"
 [[ "$DEPLOY_FAILED" == *memory-init* ]] || { echo 'FAIL: deploy swallowed memory initialization failure' >&2; exit 1; }
 echo 'PASS: deploy records memory initialization failure'
+
+# A failed crontab install fails the deploy (2026-10-19: it printed
+# "Deploy complete." and exited 0 with no backup scheduled).
+CRONW="$WORK/cron"; mkdir -p "$CRONW/bin" "$CONFIG_DIR/backup"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$CRONW/bin/crontab"; chmod +x "$CRONW/bin/crontab"
+printf '#!/usr/bin/env bash\n' > "$CONFIG_DIR/backup/daily-sync.sh"
+c_yel() { :; }
+DEPLOY_FAILED=''; NO_SYSTEM=0
+PATH="$CRONW/bin:$PATH" eval "$(awk '/^# --- Daily backup cron job ---/ {p=1} p && /^# --- Claude Code plugins/ {exit} p {print}' "$DEPLOY")"
+[[ "$DEPLOY_FAILED" == *cron* ]] || { echo 'FAIL: a failed cron install did not fail the deploy' >&2; exit 1; }
+echo 'PASS: deploy records a failed cron install'

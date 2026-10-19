@@ -119,6 +119,14 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   pre-compact-synthesis and session-handoff skills run `origin-private-check`
   before their additive-sync push, the same gate `memory-init` and the daily
   backup use.
+- **Backups that cannot happen say so.** The daily backup checks its commit:
+  a failed commit (no git identity, a hook) or a failed stash is logged as an
+  ERROR with the fix, and nothing is pushed or reported as backed up; before,
+  the log claimed a backup that did not exist. A new memory pool gets a
+  `.gitkeep`, because the backup's `git stash -u` dropped the empty directory
+  and left the memory link dangling; `memory-init` also recreates a pool an
+  earlier backup removed, and commits only the pool path. A failed crontab
+  install now fails the deploy.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

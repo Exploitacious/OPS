@@ -647,6 +647,7 @@ else
       msg_ok "Cron job installed (daily at 9:00 AM): $BACKUP_SCRIPT"
     else
       msg_bad "Failed to install cron job. Add manually: $CRON_LINE"
+      DEPLOY_FAILED="$DEPLOY_FAILED cron"
     fi
   fi
 fi
