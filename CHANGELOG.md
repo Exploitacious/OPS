@@ -26,7 +26,8 @@ ports those pieces from the maintainer's private harness.
 - **`branch-gc`** removes local branches a merged PR provably carried and
   parks their worktrees in a 7-day trash it can restore from; it fails closed
   on any doubt. It runs nightly from `daily-sync.sh`, from the PreCompact hook
-  for the cwd repo (detached, never for a lane's compaction), and at closeout.
+  for the cwd repo (detached; skipped when the payload names a sub-agent),
+  and at closeout.
 - **Destructive tests run in a sandbox.** `bin/sandbox-run` (bubblewrap: a
   read-only root, a fresh home and `/tmp`, nothing writable by default) plus
   a guard every suite that runs branch-gc, pre-compact, memory-init, deploy or

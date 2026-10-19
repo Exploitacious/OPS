@@ -222,7 +222,11 @@ fi
 # Everything that can remove anything is branch-gc's own fail-closed checks;
 # worktrees go to its 7-day trash. A payload carrying agent_id is a sub-agent
 # lane's compaction, not the session's, so it is skipped: a lane that compacts
-# every few minutes must not start a sweep each time.
+# every few minutes must not start a sweep each time. Known limit: some Claude
+# Code builds send a lane's PreCompact without agent_id (with the parent's
+# session id and cwd), so such a compaction still starts a run; branch-gc's own
+# skip window (BRANCH_GC_SKIP_SECONDS, 600 s on unchanged refs) then turns the
+# repeats into a cheap no-op.
 #
 # The timeout. A kill can land inside a quarantine (the worktree moved, its
 # manifest not yet written) or inside a deletion, so the worker passes branch-gc
