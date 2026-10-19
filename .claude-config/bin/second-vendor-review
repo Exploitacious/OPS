@@ -118,9 +118,12 @@ for e in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do SPECS+=(":(exclude)$e"); done
 
 # Each git step is checked on its own: a diff that failed must never reach the
 # reviewer as an empty change it then calls clean.
-STAT="$(git -C "$REPO" diff --stat "$BASE_SHA...$HEAD_SHA" -- "${SPECS[@]}" 2>&1)" \
+# --no-ext-diff/--no-textconv/--no-color: the packet must be the raw change,
+# not whatever an external diff driver or textconv filter in the user's config
+# renders (a driver could hide a hunk from the reviewer).
+STAT="$(git -C "$REPO" diff --no-ext-diff --no-textconv --no-color --stat "$BASE_SHA...$HEAD_SHA" -- "${SPECS[@]}" 2>&1)" \
   || die 6 "git diff --stat failed: $(printf '%s' "$STAT" | tail -n 1)"
-DIFF="$(git -C "$REPO" diff "$BASE_SHA...$HEAD_SHA" -- "${SPECS[@]}" 2>&1)" \
+DIFF="$(git -C "$REPO" diff --no-ext-diff --no-textconv --no-color "$BASE_SHA...$HEAD_SHA" -- "${SPECS[@]}" 2>&1)" \
   || die 6 "git diff failed: $(printf '%s' "$DIFF" | tail -n 1)"
 [ -n "$DIFF" ] || die 6 "no reviewable changes between $BASE and HEAD (after excludes)"
 

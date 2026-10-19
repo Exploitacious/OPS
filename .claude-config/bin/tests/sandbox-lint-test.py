@@ -10,8 +10,9 @@
     error is exit 2, never a verdict.
 
 verify-ops.sh check 24 runs the lint over the real tree, and
-verify-ops-selftest.sh pins that check against fixture suites. COWORK's version
-of this file also drives its gate's suite runner, which OPS does not have.
+verify-ops-selftest.sh pins that check against fixture suites. The private
+harness this template comes from also drives a gate suite runner from it; OPS
+has no suite runner.
 
 The fixtures use a made-up tool name (fake-deleter), so this file names no real
 destructive tool and runs anywhere, the sandbox included (a mutation run of the
