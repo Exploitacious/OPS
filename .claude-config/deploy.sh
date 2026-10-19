@@ -13,8 +13,14 @@
 #   4. Wire claude-wrapper.sh into the invoking user's + root's shellrcs (flock/permission-mode shim)
 #   5. Initialize Claude Code auto-memory git-sync (ac-memory-init)
 #   6. Schedule daily backup cron entry
-#   7. Install caveman Claude Code plugin
-#   8. Settle the main-session model pin for this machine (bin/model-probe.sh)
+#   7. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
+#
+# Never writes settings.json: on a linuxploitacious host it is a symlink into
+# the user's tracked Stage-1 checkout, so a write there dirties that public
+# repo, and its next `git pull --ff-only` fails whenever upstream changed the
+# same file. An earlier version ran
+# bin/model-probe.sh here, which rewrote the "model" pin on every deploy; that
+# step is gone, and model-probe.sh now only reports.
 #
 # Idempotent. Safe to re-run after any OPS git pull.
 # Full procedure: see ~/OPS/DEPLOYMENT.md.
@@ -382,9 +388,9 @@ else
   fi
 fi
 
-# --- Claude Code plugins ---
+# --- Claude Code plugins: retire caveman + ponytail ---
 echo ""
-c_yel "Checking Claude Code plugins..."
+c_yel "Retiring caveman + ponytail Claude Code plugins..."
 
 # A bare `bash deploy.sh` doesn't source the user's login profile, so PATH
 # may lack ~/.local/bin or pnpm's bin dir even when claude is installed.
@@ -426,20 +432,70 @@ find_claude() {
 
 CLAUDE_BIN="$(find_claude 2>/dev/null || true)"
 
+# Retire the caveman + ponytail plugins. This block used to INSTALL caveman,
+# unpinned, from its third-party marketplace head, right after Stage 1 had
+# uninstalled it; Stage 1 retires both plugins because their terse-prose and
+# lazy-engineering modes are now part of the harness's own operating rules.
+# The CLI also edits settings.json when removing a declared plugin or
+# marketplace. Leave those declarations to Stage 1: CLI writes also follow
+# its symlink into another tracked checkout. Never delete plugin dirs by hand.
+retire_plugins() {
+  local settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  local plugins markets plg rc
+  if ! command -v jq >/dev/null 2>&1; then
+    msg_warn "jq unavailable: cannot safely inspect plugin retirement; skipping."
+    return 0
+  fi
+  if [[ -f "$settings" ]] && ! jq -e 'type == "object" and
+      ((.enabledPlugins // {}) | type == "object") and
+      ((.extraKnownMarketplaces // {}) | type == "object")' "$settings" >/dev/null 2>&1; then
+    msg_warn "Cannot read plugin declarations in $settings; retirement skipped."
+    return 0
+  fi
+  if ! plugins="$("$CLAUDE_BIN" plugin list --json 2>/dev/null)" ||
+     ! jq -e 'type == "array"' <<< "$plugins" >/dev/null 2>&1; then
+    msg_warn "Cannot list installed plugins; retirement skipped. Run: claude plugin list --json"
+    return 0
+  fi
+  if ! markets="$("$CLAUDE_BIN" plugin marketplace list --json 2>/dev/null)" ||
+     ! jq -e 'type == "array"' <<< "$markets" >/dev/null 2>&1; then
+    msg_warn "Cannot list plugin marketplaces; retirement skipped. Run: claude plugin marketplace list --json"
+    return 0
+  fi
+  for plg in caveman ponytail; do
+    if [[ -f "$settings" ]] && jq -e --arg id "$plg@$plg" --arg name "$plg" \
+        '((.enabledPlugins // {}) | has($id)) or ((.extraKnownMarketplaces // {}) | has($name))' \
+        "$settings" >/dev/null 2>&1; then
+      msg_warn "Retired plugin $plg is declared in $settings; removal would edit Stage-1 settings. Update Stage 1, then re-run deploy."
+      continue
+    fi
+    if jq -e --arg id "$plg@$plg" '.[] | select(.id == $id and .scope != "user")' <<< "$plugins" >/dev/null; then
+      msg_warn "Retired plugin $plg remains in a project or local scope; left unchanged to protect project settings."
+    fi
+    if jq -e --arg id "$plg@$plg" '.[] | select(.id == $id and .scope == "user")' <<< "$plugins" >/dev/null; then
+      if "$CLAUDE_BIN" plugin uninstall "$plg@$plg" --scope user >/dev/null 2>&1; then
+        msg_ok "Removed retired plugin: $plg"
+      else
+        rc=$?
+        msg_warn "Retired plugin $plg could not be removed (rc=$rc); inspect: claude plugin list --json"
+        continue
+      fi
+    fi
+    # Unscoped marketplace removal can edit the caller's project settings.
+    if jq -e --arg name "$plg" '.[] | select(.name == $name)' <<< "$markets" >/dev/null; then
+      if "$CLAUDE_BIN" plugin marketplace remove "$plg" --scope user >/dev/null 2>&1; then
+        msg_ok "Removed retired plugin marketplace: $plg"
+      else
+        rc=$?
+        msg_warn "Retired marketplace $plg remains (rc=$rc); inspect its declaration before removing it: claude plugin marketplace list --json"
+      fi
+    fi
+  done
+}
+
 if [[ -n "$CLAUDE_BIN" ]]; then
   msg_ok "Claude CLI: $CLAUDE_BIN"
-  msg_action "Registering caveman plugin marketplace..."
-  if "$CLAUDE_BIN" plugin marketplace add JuliusBrussee/caveman >/dev/null 2>&1; then
-    msg_ok "Marketplace registered."
-    msg_action "Installing caveman plugin..."
-    if "$CLAUDE_BIN" plugin install caveman@caveman >/dev/null 2>&1; then
-      msg_ok "Caveman plugin installed."
-    else
-      msg_warn "Plugin install failed. Run manually: $CLAUDE_BIN plugin install caveman@caveman"
-    fi
-  else
-    msg_warn "Marketplace add failed. Run manually: $CLAUDE_BIN plugin marketplace add JuliusBrussee/caveman"
-  fi
+  retire_plugins
 else
   msg_warn "Claude CLI not found in PATH or standard install locations."
   msg_warn "Checked: \$PATH, ~/.local/bin, ~/.local/share/pnpm, ~/.npm-global/bin, /usr/local/bin, /opt/homebrew/bin"
@@ -494,29 +550,6 @@ if result="$(seed_trust "$jf")"; then
   esac
 fi
 
-# --- Model availability probe ---
-# Which foreman this machine can actually run is plan-dependent, so the pin
-# stage 1 shipped is a guess until something checks. The probe settles it
-# (Fable 5 where the plan allows, Opus 4.8 otherwise) at the END of deploy,
-# once the CLI and config surface it needs are wired.
-#
-# Deliberately NON-FATAL: a probe that cannot reach the API must not fail an
-# otherwise-good deploy — the pin stays whatever stage 1 wrote, and the next
-# session's own probe (BOOTSTRAP recon / harness-update gate) re-settles it.
-echo ""
-c_yel "Settling model pin for this machine..."
-
-MODEL_PROBE="${CONFIG_DIR}/bin/model-probe.sh"
-if [[ ! -x "$MODEL_PROBE" ]]; then
-  msg_warn "model-probe.sh not present at $MODEL_PROBE — skipping (pin left as stage 1 wrote it)."
-elif [[ -z "$CLAUDE_BIN" ]]; then
-  msg_warn "Claude CLI not found — skipping model probe (pin left as stage 1 wrote it)."
-elif "$MODEL_PROBE" --refresh; then
-  msg_ok "Model pin settled."
-else
-  msg_warn "model-probe.sh exited rc=$? — pin left as stage 1 wrote it; re-run: $MODEL_PROBE --refresh"
-fi
-
 echo ""
 c_cyan "--------------------------------------------------"
 c_green "Deploy complete."
@@ -524,4 +557,7 @@ echo ""
 echo "  Config source:   $CONFIG_DIR"
 echo "  Claude home:     $CLAUDE_HOME       (launch: claude)"
 echo "  Skills source:   ${OPS_ROOT}/SKILLS"
+echo ""
+echo "  Model pins come from your Stage-1 settings.json; deploy does not change them."
+echo "  To check they answer on your plan: ${CONFIG_DIR}/bin/model-probe.sh (report only)"
 echo ""

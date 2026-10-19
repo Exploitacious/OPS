@@ -4,6 +4,85 @@ Notable changes to OPS, newest first. Format: date — what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
+
+A fresh install against the current Stage-1 settings pinned retired models,
+failed its own drift gate, had its deploy rewrite the shared Stage-1
+`settings.json`, and reinstalled a plugin Stage 1 had just retired. This
+release fixes those, and discloses the permission defaults Stage 1 sets.
+Upgrading an existing copy: `DEPLOYMENT.md` § "Upgrading from a copy older
+than 2026-10-18".
+
+- **Model tiers brought current.** Opus 5.5 (`claude-opus-5-5[1m]`) is the
+  foreman and the high-criticality lane; Sonnet 5.5 (`claude-sonnet-5-5[1m]`)
+  is every lane's default; Haiku 5.5 (`claude-haiku-5-5`, exact id) is allowed
+  for cheap reads under 100K tokens; Fable 5.1 is rare. Sonnet 5 and Opus 4.8
+  are retired and pinned nowhere; the Opus 5 exact-id ban stands; every Haiku
+  except Haiku 5.5 is banned. `CONTEXT/model-roles.md` is rewritten as the one
+  table, and the foreman charter, operating doctrine (P12), README, BOOTSTRAP,
+  and session briefing follow it. The `ops-worker`, `ops-reviewer`, and
+  `ops-auditor` agents pin Sonnet 5.5 (the reviewer notes that a split review
+  gate lands in a later release); the two judgment lanes of `harness-audit.js`
+  pin Opus 5.5.
+- **The drift gate passes a fresh install.** `verify-ops.sh` check 15 matches
+  the Opus 5 id at its boundary, so `claude-opus-5-5` no longer trips it, and
+  its remediation names the current tiers. New check 15b fails on a retired id
+  (Sonnet 5, Opus 4.8) in agents, workflows, skill workflow scripts, or the
+  settings files, on any Haiku other than `claude-haiku-5-5`, on the bare
+  `haiku` alias as a value, and on an `ANTHROPIC_DEFAULT_HAIKU_MODEL` pin that
+  is not exactly `claude-haiku-5-5`. Check 14 now WARNs only when the session
+  pin is not the Opus 5.5 foreman. Check 18 no longer counts
+  `session-work-init.sh` as a heavy hook: it belongs on resume, which is where
+  the current Stage-1 settings run it. New `verify-ops-selftest.sh` drives
+  these checks against fixture trees under a throwaway `HOME`.
+  Review regressions also cover quoted and template-literal pins, JSON-escaped
+  ids, Opus 5 in skill workflows and commands, Haiku provider/context suffixes,
+  and a missing Haiku pin in another profile.
+- **Deploy never writes the Stage-1 settings.** `deploy.sh` step 8 ran
+  `model-probe.sh --refresh`, which rewrote the `"model"` line of
+  `~/.claude/settings.json`: a symlink into the user's linuxploitacious
+  checkout. It pinned a retired id or one that is not the foreman, and left a
+  diff that fails that checkout's next `git pull --ff-only` whenever upstream
+  changed the same file. The step is gone. `model-probe.sh` is
+  now report-only: it probes each distinct pinned id and prints ok, FAIL, or
+  UNSURE, with `--list` for a no-API dry run, and never edits settings. It honors
+  `CLAUDE_CONFIG_DIR` and disables user customizations, tools, and transcript
+  persistence while keeping subscription authentication. The CLI can update
+  its own cache/auth state; policy-managed hooks still apply. New
+  `model-probe-selftest.sh` checks those flags against a mock CLI, including
+  that the mock leaves `HOME` unchanged. BOOTSTRAP recon reports its result instead of
+  "settling the pin".
+- **The caveman plugin is retired, not reinstalled.** `deploy.sh` and
+  `deploy.ps1` installed caveman, unpinned, from its third-party marketplace
+  right after Stage 1 uninstalled it. Both now uninstall caveman and ponytail
+  through the CLI, like Stage 1. `DEPLOYMENT.md` verification checks they are
+  absent, that the Stage-1 settings file is clean, and that the gate passes.
+  Retirement warns and skips declarations whose removal would rewrite
+  settings, scopes CLI removals to the user, and reports inventory/removal
+  failures. `plugin-retire-selftest.py` checks both deployers against mock and
+  local real CLI fixtures with symlinked Stage-1 settings.
+- **Permission defaults disclosed and made a choice.** README "Opinionated by
+  design" now states what the Stage-1 settings turn on:
+  `permissions.defaultMode: "bypassPermissions"`,
+  `skipDangerousModePermissionPrompt`, `remoteControlAtStartup`, and
+  auto-compaction, and what each means. BOOTSTRAP gains Round F, an explicit
+  step to keep those defaults or switch to normal permission prompts (in the
+  terminal launch shim, or a managed normal default with bypass disabled),
+  with the exact change and without editing the Stage-1 file. Existing allow
+  rules and explicit CLI/IDE modes still apply; custom launch settings also
+  need the Remote Control opt-out.
+- **Questions use the structured question tool again.** The "AskUserQuestion
+  is retired" rule is reversed in `CLAUDE.md`, the charter, and
+  `working-preferences.md`: ask with the structured question tool where one
+  exists, otherwise in numbered prose.
+- **Compaction text matches the settings.** "Autocompact OFF" was wrong: the
+  Stage-1 settings turn auto-compaction on as a backstop near the end of the
+  window (Haiku 5.5 at a 100K window). The rhythm is manual compaction at
+  natural breaks, and at about 300K tokens if no break has come.
+- **Not in this release.** The larger port (one always-loaded core, the split
+  review gate, retiring the fleet, refreshed skills, lane-aware context
+  watching) follows separately.
+
 ## 2026-09-04 — Boot surface rides the system prompt; rest-stop compaction
 
 - **Charter + identity digest ride the cached system prompt.** The `claude()`

@@ -1,282 +1,135 @@
 #!/usr/bin/env bash
-# model-probe.sh — decides which foreman model THIS machine pins, and writes
-# that decision into the deployed settings.json.
+# model-probe.sh: report whether the models your Claude Code settings pin
+# actually answer on this account. Report only: it never edits settings or
+# chooses a model for you. Claude Code can update its own cache/auth state;
+# policy-managed hooks still apply.
 #
-# The harness names a foreman ROLE, not a fixed model: Fable 5 where the
-# Operator's plan grants it, Opus 4.8 everywhere else — same charter either
-# way. Whether a plan grants Fable cannot be read out of a config file, so it
-# is probed: one throwaway headless round-trip against the Fable model id. A
-# clean exit means this account can reach it; a clean rejection means it
-# cannot, and the box pins the fallback foreman instead.
+# Why report-only. The settings file it reads is, on a linuxploitacious host,
+# a symlink into the tracked Stage-1 checkout shared by every profile. An
+# earlier version rewrote the "model" line there on every deploy: it pinned
+# retired tiers, left a diff in that public checkout, and made its next
+# `git pull --ff-only` fail. Which tier to run is a policy decision
+# (CONTEXT/model-roles.md); this script only tells you whether a pinned id
+# works on your plan, so you can decide.
 #
 # Usage:
-#   model-probe.sh                   probe + apply the verdict (same as --refresh)
-#   model-probe.sh --refresh         probe + apply the verdict
-#   model-probe.sh --status          print pin / last verdict / override / sticky
-#   model-probe.sh --force fable     pin Fable and stop probing (Operator override)
-#   model-probe.sh --force opus48    pin Opus 4.8 and stop probing
-#   model-probe.sh --clear-override  drop the override, resume probing
+#   model-probe.sh           probe each distinct id the settings pin (one short
+#                            headless request per id; spends a few tokens)
+#   model-probe.sh --list    print the ids and where they are pinned; no API call
+#   model-probe.sh -h        this help
 #
-# Exit: 0 = pin is in its intended state (a graceful skip counts) · 1 = could
-# not apply the pin, settings left exactly as found · 2 = usage or state error.
+# Ids read (jq): the top-level "model" pin and the env keys
+# ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL,
+# ANTHROPIC_DEFAULT_HAIKU_MODEL, CLAUDE_CODE_SUBAGENT_MODEL.
 #
-# Runs unattended — Stage 1 calls it at deploy time, and an Operator who
-# changes plans re-runs (or schedules) it later. No prompts, no stdin, one
-# line of output per event, every line prefixed "model-probe:". Overlapping
-# runs are serialized by a non-blocking flock; the second one exits quietly.
+# Exit: 0 = every id answered (or --list) · 1 = at least one id was rejected or
+# the probe was inconclusive (timeout, rate or usage limit) · 2 = usage or
+# environment error (no settings, no jq, no claude CLI).
 #
-# State (~/.local/state/ops, every write tmp+mv so a killed run never leaves a
-# half-file the next run would misread):
-#   model-probe-result         last verdict + ISO timestamp
-#   model-probe-override       Operator-forced verdict; --refresh obeys it blindly
-#   model-probe-fable-capable  sticky: this box has probed Fable-positive before
-#   model-probe-settings.bak   settings.json as it was before the last pin write
-#
-# The sticky marker is why one bad day cannot demote a Fable box. On a plan
-# where Fable is available it is usage-capped, so a probe fired mid-cap gets a
-# quota-shaped rejection that looks nothing like "your plan lacks Fable" —
-# demoting on that would flip the pin every time the Operator worked hard.
-# Once a machine has proven Fable access, a quota-shaped or timed-out probe
-# leaves the pin alone; only a clean, non-quota failure demotes it.
-#
-# The pin is applied by rewriting an EXISTING top-level "model" line in place,
-# never by re-emitting the file, so the Operator's formatting and key order
-# survive. settings.json is resolved through readlink -f first: Stage 1
-# symlinks ~/.claude/settings.json into its own repo, and an in-place edit of
-# the symlink would replace it with a plain copy and silently detach the box
-# from Stage 1. A settings.json with NO "model" key is left structurally
-# alone — that Operator is running on the ANTHROPIC_DEFAULT_* aliases on
-# purpose, and a probe has no business restructuring someone's JSON.
-#
-# Knobs / test hooks: OPS_MODEL_PROBE_SETTINGS (settings file to read+write),
-# OPS_MODEL_PROBE_MODEL (model id to probe), OPS_MODEL_PROBE_BIN (claude
-# binary), OPS_MODEL_PROBE_TIMEOUT (seconds, default 120),
-# OPS_MODEL_PROBE_STATE_DIR (state dir).
+# Knobs / test hooks: OPS_MODEL_PROBE_SETTINGS (settings file to read),
+# OPS_MODEL_PROBE_BIN (claude binary), OPS_MODEL_PROBE_TIMEOUT (seconds per
+# probe, default 120).
 set -uo pipefail
 
-STATE_DIR="${OPS_MODEL_PROBE_STATE_DIR:-$HOME/.local/state/ops}"
-PROBE_MODEL="${OPS_MODEL_PROBE_MODEL:-claude-fable-5}"
 PROBE_TIMEOUT="${OPS_MODEL_PROBE_TIMEOUT:-120}"
 
-FABLE_PIN="claude-fable-5[1m]"
-OPUS48_PIN="claude-opus-4-8[1m]"
-
 log() { printf 'model-probe: %s\n' "$*"; }
-iso() { date -Is; }
+usage() { echo "usage: model-probe.sh [--list | -h]"; }
 
-mkdir -p "$STATE_DIR" 2>/dev/null || { log "cannot create state dir $STATE_DIR"; exit 2; }
+MODE="probe"
+case "${1:-}" in
+  "")       ;;
+  --list)   MODE="list" ;;
+  -h|--help) usage; exit 0 ;;
+  *)        log "unknown argument: $1"; usage >&2; exit 2 ;;
+esac
 
-RESULT="$STATE_DIR/model-probe-result"
-OVERRIDE="$STATE_DIR/model-probe-override"
-STICKY="$STATE_DIR/model-probe-fable-capable"
-BACKUP="$STATE_DIR/model-probe-settings.bak"
-LOCK="$STATE_DIR/.model-probe.lock"
-
-# Settings target. Stage 1 owns ~/.claude/settings.json; before that deploy has
-# run, its repo copy is the only settings file on the box.
+# Honor the active profile. Only the default profile falls back to Stage 1;
+# a missing custom profile says nothing about the default profile's pins.
 SETTINGS="${OPS_MODEL_PROBE_SETTINGS:-}"
 if [ -z "$SETTINGS" ]; then
-  SETTINGS="$(readlink -f "$HOME/.claude/settings.json" 2>/dev/null)"
-  [ -n "$SETTINGS" ] && [ -f "$SETTINGS" ] || SETTINGS="$HOME/linuxploitacious/claude/.claude/settings.json"
+  SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  if [ ! -f "$SETTINGS" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+    SETTINGS="$HOME/linuxploitacious/claude/.claude/settings.json"
+  fi
+fi
+[ -f "$SETTINGS" ] || { log "settings.json not found at $SETTINGS (run the Stage 1 deploy first)"; exit 2; }
+command -v jq >/dev/null 2>&1 || { log "jq not found; install jq and re-run"; exit 2; }
+jq -e 'type == "object"' "$SETTINGS" >/dev/null 2>&1 || { log "$SETTINGS is not a JSON settings object"; exit 2; }
+
+# "<id>\t<keys>": each distinct pinned id once, with every key that pins it,
+# the session pin first. An env block that is not an object yields nothing.
+PINS="$(jq -r '
+  def envval($k): ((.env // {}) | if type == "object" then (.[$k] // "") else "" end) | tostring;
+  [ ["model", ((.model // "") | tostring)],
+    ["ANTHROPIC_DEFAULT_OPUS_MODEL",   envval("ANTHROPIC_DEFAULT_OPUS_MODEL")],
+    ["ANTHROPIC_DEFAULT_SONNET_MODEL", envval("ANTHROPIC_DEFAULT_SONNET_MODEL")],
+    ["ANTHROPIC_DEFAULT_HAIKU_MODEL",  envval("ANTHROPIC_DEFAULT_HAIKU_MODEL")],
+    ["CLAUDE_CODE_SUBAGENT_MODEL",     envval("CLAUDE_CODE_SUBAGENT_MODEL")] ]
+  | map(select(.[1] != "")) | group_by(.[1]) | sort_by(.[0][0] != "model")
+  | .[] | [.[0][1], (map(.[0]) | join(", "))] | @tsv' "$SETTINGS")"
+
+if [ -z "$PINS" ]; then
+  log "no model ids pinned in $SETTINGS (sessions run on Claude Code's own defaults); nothing to probe"
+  exit 0
 fi
 
-usage() {
-  echo "usage: model-probe.sh [--refresh | --status | --force fable|opus48 | --clear-override]"
-}
+# Only a recognizable model id is ever passed to the CLI or echoed: a value in
+# these keys that is not one may be a misplaced credential.
+ID_SHAPE='^[A-Za-z0-9][A-Za-z0-9._:@/-]*(\[1m\])?$'
 
-# Serialize mutating runs (deploy + cron + an impatient Operator can collide).
-take_lock() {
-  exec 9>"$LOCK" || return 0
-  flock -n 9 || { log "another run holds the lock — exiting"; exit 0; }
-}
+log "settings: $SETTINGS"
+if [ "$MODE" = "list" ]; then
+  while IFS=$'\t' read -r id keys; do
+    if printf '%s\n' "$id" | grep -qE "$ID_SHAPE"; then
+      log "pinned  $id  ($keys)"
+    else
+      log "pinned  <a value that is not a model id>  ($keys)"
+    fi
+  done <<< "$PINS"
+  exit 0
+fi
 
-write_state() {
-  local path="$1" content="$2" tmp="$1.tmp.$$"
-  if printf '%s\n' "$content" > "$tmp" 2>/dev/null; then
-    mv -- "$tmp" "$path" && return 0
-  fi
-  rm -f "$tmp"
-  log "could not write state file $path"
-  return 1
-}
+# cron and deploy shells carry a minimal PATH, so resolve the binary explicitly.
+BIN="${OPS_MODEL_PROBE_BIN:-$HOME/.local/bin/claude}"
+[ -x "$BIN" ] || BIN="$(command -v claude 2>/dev/null || true)"
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+  log "claude CLI not found; nothing probed"
+  exit 2
+fi
 
-record() { write_state "$RESULT" "$1 $(iso)"; }
-
-pin_for() {
-  case "$1" in
-    fable)  printf '%s\n' "$FABLE_PIN" ;;
-    opus48) printf '%s\n' "$OPUS48_PIN" ;;
-    *)      return 1 ;;
-  esac
-}
-
-# jq is the only thing standing between a sed edit and a corrupted settings.json,
-# so a missing jq is a hard stop, checked before anything is probed or written.
-require_jq() {
-  command -v jq >/dev/null 2>&1 && return 0
-  log "jq not found — cannot validate settings.json after an edit; install jq and re-run"
-  return 1
-}
-
-apply_pin() {
-  local want="$1" cur
-  if [ ! -f "$SETTINGS" ]; then
-    log "settings.json not found at $SETTINGS — pin unchanged (run the Stage 1 deploy first)"
-    return 0
+bad=0
+while IFS=$'\t' read -r id keys; do
+  if ! printf '%s\n' "$id" | grep -qE "$ID_SHAPE"; then
+    log "SKIP    <a value that is not a model id>  ($keys): fix that key by hand"
+    bad=1
+    continue
   fi
-  if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
-    log "settings.json is not valid JSON ($SETTINGS) — refusing to edit it"
-    return 1
-  fi
-  if [ "$(jq -r 'has("model")' "$SETTINGS")" != "true" ]; then
-    log "no top-level \"model\" key in $SETTINGS — left alone; this box runs on the ANTHROPIC_DEFAULT_* aliases. Add \"model\": \"$want\" by hand to pin it."
-    return 0
-  fi
-  cur="$(jq -r '.model' "$SETTINGS")"
-  if [ "$cur" = "$want" ]; then
-    log "pin already \"$want\" — no write"
-    return 0
-  fi
-  if ! cp -- "$SETTINGS" "$BACKUP" 2>/dev/null; then
-    log "could not back up $SETTINGS — refusing to edit it"
-    return 1
-  fi
-  chmod 600 "$BACKUP" 2>/dev/null || true   # it is a copy of the Operator's settings
-  # 0,/re/ bounds the substitution to the FIRST matching line; the trailing
-  # capture keeps whatever followed the value (a comma, or nothing if "model"
-  # is the last key).
-  sed -E -i "0,/^([[:space:]]*)\"model\"([[:space:]]*):([[:space:]]*)\"[^\"]*\"(.*)\$/s//\\1\"model\"\\2:\\3\"$want\"\\4/" "$SETTINGS"
-  # Re-read through jq rather than trusting the sed: this catches both a broken
-  # edit and a correct-looking edit that landed on a NESTED "model" key.
-  if ! jq -e . "$SETTINGS" >/dev/null 2>&1 || [ "$(jq -r '.model' "$SETTINGS")" != "$want" ]; then
-    cp -- "$BACKUP" "$SETTINGS"
-    log "pin write corrupted the file or missed the top-level key — restored $SETTINGS from $BACKUP"
-    return 1
-  fi
-  log "pin \"$cur\" -> \"$want\" in $SETTINGS"
-  return 0
-}
-
-run_probe() {
-  local bin out rc one_line
-  # cron and deploy shells carry a minimal PATH — resolve the binary explicitly.
-  bin="${OPS_MODEL_PROBE_BIN:-$HOME/.local/bin/claude}"
-  [ -x "$bin" ] || bin="$(command -v claude 2>/dev/null || true)"
-  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-    log "claude CLI not found — probe skipped, pin unchanged"
-    record "skipped"
-    return 0
-  fi
-
-  # MCP stripped and run from $HOME so the probe is a bare text round-trip: no
-  # servers spun up, no project context loaded, minimal tokens off the cap.
-  out="$(cd "$HOME" && timeout "$PROBE_TIMEOUT" "$bin" -p "Reply with exactly: ok" \
-          --model "$PROBE_MODEL" \
+  # Disable tools, user customizations and transcript persistence: a model
+  # check must not run the user's startup hooks or plugin sync. Use safe-mode,
+  # not bare: bare ignores subscription OAuth credentials. Managed hooks still
+  # apply, and the CLI can update its own cache/auth state.
+  out="$(cd "$HOME" && timeout "$PROBE_TIMEOUT" "$BIN" -p "Reply with exactly: ok" \
+          --model "$id" \
+          --safe-mode --no-session-persistence --tools '' \
           --mcp-config '{"mcpServers":{}}' --strict-mcp-config 2>&1 </dev/null)"
   rc=$?
   one_line="$(printf '%s' "$out" | tr '\n\t' '  ' | cut -c1-300)"
-
   if [ "$rc" -eq 0 ]; then
-    write_state "$STICKY" "probed-fable-capable $(iso)"
-    record "fable"
-    log "probe of $PROBE_MODEL succeeded — Fable available on this box"
-    apply_pin "$FABLE_PIN"
-    return $?
-  fi
-
-  # rc 124 is `timeout` giving up; a quota-shaped rejection is the other
-  # failure that says nothing about entitlement. Neither demotes a proven box.
-  if [ -f "$STICKY" ] && { [ "$rc" -eq 124 ] || printf '%s' "$out" \
-      | grep -qiE 'rate|limit|usage|quota|overloaded|exceeded|capacity'; }; then
-    log "fable-capable box, transient/quota failure — pin unchanged (rc=$rc): $one_line"
-    record "unchanged"
-    return 0
-  fi
-
-  log "probe of $PROBE_MODEL failed (rc=$rc) — pinning the fallback foreman: $one_line"
-  record "opus48"
-  apply_pin "$OPUS48_PIN"
-  return $?
-}
-
-refresh() {
-  local verdict pin
-  require_jq || return 1
-  if [ -f "$OVERRIDE" ]; then
-    read -r verdict _ < "$OVERRIDE"
-    if ! pin="$(pin_for "${verdict:-}")"; then
-      log "override file holds an unknown verdict ('${verdict:-}') — fix $OVERRIDE or run --clear-override"
-      return 2
-    fi
-    log "override active ($verdict) — enforcing its pin, not probing"
-    apply_pin "$pin"
-    return $?
-  fi
-  run_probe
-}
-
-status() {
-  local pin verdict ov st
-  if [ ! -f "$SETTINGS" ]; then
-    pin="none ($SETTINGS missing)"
-  elif command -v jq >/dev/null 2>&1; then
-    pin="$(jq -r 'if has("model") then .model else "none (alias fallback)" end' "$SETTINGS" 2>/dev/null)"
-    [ -n "$pin" ] || pin="unreadable (invalid JSON?)"
+    log "ok      $id  ($keys)"
+  elif [ "$rc" -eq 124 ] || printf '%s' "$out" | grep -qiE 'rate|limit|usage|quota|overloaded|exceeded|capacity'; then
+    # A timeout or a quota-shaped refusal says nothing about entitlement.
+    log "UNSURE  $id  ($keys): rc=$rc, timeout or usage limit; re-run later: $one_line"
+    bad=1
   else
-    pin="unknown (jq not installed)"
+    log "FAIL    $id  ($keys): rc=$rc: $one_line"
+    bad=1
   fi
-  verdict="never probed"; [ -f "$RESULT" ] && verdict="$(cat "$RESULT")"
-  ov="none";              [ -f "$OVERRIDE" ] && ov="$(cat "$OVERRIDE")"
-  st="no";                [ -f "$STICKY" ] && st="yes ($(cat "$STICKY"))"
-  log "settings:      $SETTINGS"
-  log "pin:           $pin"
-  log "last verdict:  $verdict"
-  log "override:      $ov"
-  log "fable-capable: $st"
-}
+done <<< "$PINS"
 
-main() {
-  local verdict pin
-  case "${1:---refresh}" in
-    --refresh)
-      take_lock
-      refresh
-      exit $?
-      ;;
-    --status)
-      status
-      exit 0
-      ;;
-    --force)
-      verdict="${2:-}"
-      if ! pin="$(pin_for "$verdict")"; then
-        log "--force takes fable or opus48 (got '${verdict}')"
-        usage >&2
-        exit 2
-      fi
-      take_lock
-      require_jq || exit 1
-      write_state "$OVERRIDE" "$verdict $(iso)" || exit 2
-      record "$verdict"
-      log "override set to $verdict — probing is off until --clear-override"
-      apply_pin "$pin"
-      exit $?
-      ;;
-    --clear-override)
-      take_lock
-      rm -f "$OVERRIDE"
-      log "override cleared — the next --refresh will probe again"
-      exit 0
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      log "unknown argument: $1"
-      usage >&2
-      exit 2
-      ;;
-  esac
-}
-main "$@"
+if [ "$bad" -ne 0 ]; then
+  log "nothing was changed. To pin a different tier, see CONTEXT/model-roles.md (Settings, pins, and the shared Stage-1 file)."
+  exit 1
+fi
+log "every pinned id answered"
+exit 0

@@ -63,7 +63,7 @@ foreman, not a solo engineer; no separate read needed.
 
    `CONTEXT/projects/<project>-lessons.md` stays a direct read when you work directly on that project.
 
-3. **Plan before you execute.** For any task beyond simple conversation, put the shaping questions to me in prose and wait for my go before you build. This is where we make the decisions together, so plan deep and in-depth up front; that is the point, not overhead. Work through:
+3. **Plan before you execute.** For any task beyond simple conversation, put the shaping questions to me (the structured question tool where one exists, otherwise numbered prose with the choices spelled out) and wait for my go before you build. This is where we make the decisions together, so plan deep and in-depth up front; that is the point, not overhead. Work through:
    - What: what exactly am I trying to produce or accomplish?
    - Who: who is the audience? (client-facing, internal team, leadership, marketing, personal)
    - How: what format, tone, and depth? (default: .docx, professional)

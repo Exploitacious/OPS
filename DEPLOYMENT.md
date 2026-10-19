@@ -13,11 +13,19 @@ Stage 2 automatically — no manual step between them.
 
 | Stage | Owner | Repo | What it does |
 |-------|-------|------|--------------|
-| **1 — Host setup** | `shellSetup.sh` / `winSetup.ps1` | `linuxploitacious` (public) | OS packages, dotfiles via Stow, AI CLI install, `gh` auth, Level 1 Claude files (`CLAUDE.md`, `settings.json`, `statusline.sh`), clone your private OPS copy, **then invoke Stage 2**. |
-| **2 — OPS setup** | `.claude-config/deploy.sh` (Linux/macOS) / `deploy.ps1` (Windows) | your private OPS copy | Symlink `~/.claude/{skills,commands,agents,workflows}`. Wire `WORKFORCE/bin` onto PATH. Wire the `claude-wrapper` shim. Initialize auto-memory git-sync. Schedule daily backup. Install Claude Code plugins. Seed the trust anchor. |
+| **1. Host setup** | `shellSetup.sh` / `winSetup.ps1` | `linuxploitacious` (public) | OS packages, dotfiles via Stow, AI CLI install, `gh` auth, Level 1 Claude files (`CLAUDE.md`, `settings.json`, `statusline.sh`), clone your private OPS copy, **then invoke Stage 2**. |
+| **2. OPS setup** | `.claude-config/deploy.sh` (Linux/macOS) / `deploy.ps1` (Windows) | your private OPS copy | Symlink `~/.claude/{skills,commands,agents,workflows}`. Wire `WORKFORCE/bin` onto PATH. Wire the `claude-wrapper` shim. Initialize auto-memory git-sync. Schedule daily backup. Retire the caveman and ponytail plugins. Seed the trust anchor. |
 
 Rule: **anything OPS-specific lives in Stage 2.** linuxploitacious clones the
 repo and hands off — it does not configure OPS itself.
+
+Stage 2 never writes `settings.json`. On Linux and macOS,
+`~/.claude/settings.json` is a symlink into your linuxploitacious checkout, so
+a write there would dirty that tracked public repo, and its next
+`git pull --ff-only` fails whenever upstream changed the same file. The model pins, the permission mode, and the other
+defaults that file sets are Stage 1's; README "Opinionated by design" lists
+them, and BOOTSTRAP's permission step shows how to change the permission
+defaults without editing that file.
 
 On Linux, Stage 1's OPS routine ends with `bash ~/OPS/.claude-config/deploy.sh`.
 The operator does nothing extra.
@@ -137,10 +145,25 @@ In order:
    (`0 9 * * * ~/OPS/.claude-config/backup/daily-sync.sh`). The sync script
    commits + pushes any uncommitted changes to the OPS origin (no-op if clean).
 
-7. **Install Claude Code plugins.** Adds the `JuliusBrussee/caveman` marketplace
-   and installs the `caveman` plugin. A bare `bash deploy.sh` doesn't source a
-   login profile, so it probes known install locations (`~/.local/bin`, pnpm,
-   npm-global, `/usr/local/bin`, `/opt/homebrew/bin`) to find `claude`.
+7. **Retire the caveman and ponytail plugins.** Runs
+   `claude plugin uninstall <name>@<name>` and
+   `claude plugin marketplace remove <name>` for both, so a host provisioned by
+   an earlier OPS release loses them; a no-op once they are gone. Stage 1
+   retires them too: their modes are now part of the harness's own operating
+   rules, and an earlier Stage 2 reinstalled caveman, unpinned, from its
+   third-party marketplace right after Stage 1 removed it. Removal goes through
+   the CLI only; no plugins directory is deleted by hand. A bare
+   `bash deploy.sh` doesn't source a login profile, so it probes known install
+   locations (`~/.local/bin`, pnpm, npm-global, `/usr/local/bin`,
+   `/opt/homebrew/bin`) to find `claude`.
+
+   Retirement first reads the CLI inventories. If a retired plugin or
+   marketplace is still declared in the user's settings, it warns and skips
+   that item: CLI removal would also rewrite `settings.json`, following its
+   Stage-1 symlink. Update Stage 1 before re-running deploy. Removals use
+   `--scope user` so they cannot alter the caller's project settings; a
+   marketplace registered outside that scope stays put with a warning.
+   Inventory and removal failures are visible warnings, never a silent success.
 
 8. **Seed the trust anchor.** Marks `$HOME` trusted in `~/.claude/.claude.json`
    (`hasTrustDialogAccepted: true`) so Claude Code's parent-dir trust walk
@@ -159,7 +182,8 @@ under `Documents/PowerShell` and `Documents/WindowsPowerShell`) — never
 `$PROFILE` itself, since `$PROFILE` is a shim/symlink tied to the public
 linuxploitacious repo and `deploy.ps1` refuses to append there — initialize
 auto-memory git-sync (`ac-memory-init.ps1`), register a `OPS Daily Backup`
-scheduled task, and install the caveman plugin.
+scheduled task, and retire the caveman and ponytail plugins (same CLI calls
+as step 7).
 
 **Windows parity gap:** the `claude-wrapper` remains Linux-only (a root/user
 flock is meaningless on single-user Windows). The ultracode shim and the
@@ -178,8 +202,14 @@ diff <(ls ~/.claude/skills/) <(ls ~/OPS/SKILLS/)   # empty diff == correct
 which ac-status        # Linux/macOS
 Get-Command ac-status  # Windows PowerShell
 
-# Plugin should be registered (expect: caveman)
+# No retired plugin should remain (expect: neither caveman nor ponytail listed)
 claude plugin list
+
+# Stage 2 left the Stage-1 settings alone (expect: no output)
+git -C ~/linuxploitacious status --short -- claude/.claude/settings.json
+
+# The drift gate passes (expect: "0 fail" on the last line)
+bash ~/OPS/.claude-config/bin/verify-ops.sh
 
 # Backup scheduler
 crontab -l | grep OPS                       # Linux
@@ -243,12 +273,16 @@ symlinked into every profile). `verify-ops.sh` WARNs until they land.
    re-paying the full boot. Replace the single `".*"` SessionStart group with
    two: a `"startup|clear"` group that runs the full remaining set, and a
    `"resume|compact"` group that runs only the light continuity/orientation hooks
-   (post-compact-resume, handoff-check, session-briefing, remote-session-register,
-   plus `WORKFORCE/bin/ac-reorient` if you run the fleet). Claude Code matches the
-   SessionStart matcher against the `source` field. If a build is ever found NOT
-   to filter by source, add an in-hook `source` early-exit to the heavy
-   startup-only hooks (`memory-index.sh`, `session-work-init.sh`) — the pattern
-   `post-compact-resume.sh` already uses.
+   (post-compact-resume, handoff-check, session-briefing, session-work-init,
+   plus `WORKFORCE/bin/ac-reorient` if you run the fleet). The current Stage-1
+   settings already ship this split. `session-work-init.sh` belongs in both
+   groups: it stamps only when no stamp exists, and a revived session fires
+   `source=resume` for its whole life, so leaving it off resume would never
+   stamp that session. Claude Code matches the SessionStart matcher against the
+   `source` field. If a build is ever found NOT to filter by source, add an
+   in-hook `source` early-exit to the heavy startup-only hooks
+   (`memory-index.sh`, and `vault-inbox-check.sh` where a host has it), the
+   pattern `post-compact-resume.sh` already uses.
 
 3. **Register the context-watch readout on UserPromptSubmit.** Add a
    UserPromptSubmit hook (matcher `.*`) that runs
@@ -305,6 +339,34 @@ bash ~/OPS/.claude-config/deploy.sh   # or deploy.ps1 on Windows
 ```
 
 Stage 2 is idempotent — it no-ops where state is already correct.
+
+### Upgrading from a copy older than 2026-10-18
+
+Copies from before the 2026-10-18 release pinned retired models, ran a deploy
+step that rewrote the model pin inside your Stage-1 settings, and reinstalled
+the caveman plugin. After you sync the template (the `harness-update` skill)
+and re-run Stage 2:
+
+1. **Restore the Stage-1 settings file if an earlier deploy edited it.** Check
+   `git -C ~/linuxploitacious diff -- claude/.claude/settings.json`. If the only
+   change is the `"model"` line, restore it with
+   `git -C ~/linuxploitacious checkout -- claude/.claude/settings.json`, then
+   `git -C ~/linuxploitacious pull --ff-only`. If the diff holds edits of your
+   own, keep them and fix only the `"model"` line by hand: `checkout` discards
+   every local change to that file.
+2. **Run the gate.** `bash ~/OPS/.claude-config/bin/verify-ops.sh` should end
+   with `0 fail`. A FAIL from check 15 or 15b names the file and the id to
+   change; on the Stage-1 file, pull linuxploitacious rather than editing it.
+3. **Optional cleanup.** The old probe's state files are inert:
+   `rm -f ~/.local/state/ops/model-probe-*`.
+4. **Re-apply two fixes to `CONTEXT/working-preferences.md` by hand.** The
+   template sync never touches that file, because it holds your own knobs. Copy
+   two passages from the template version: "How to Ask Me Questions" (ask with
+   the structured question tool where one exists) and the compaction standing
+   order under "Standing Orders" (auto-compaction is on as a backstop).
+5. **Decide on the permission defaults.** README "Opinionated by design" now
+   discloses what Stage 1 sets; `BOOTSTRAP.md` Round F shows how to keep them
+   or switch to normal permission prompts without editing the Stage-1 file.
 
 ## What stays out of these scripts
 

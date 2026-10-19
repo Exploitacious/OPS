@@ -179,56 +179,242 @@ check_ship_gate() {
   [ -z "$bad" ] && ok "ship gate: README present, no build markers" || fail "ship gate:$bad"
 }
 
-# 14. Model policy. Two rules, two severities. FAIL: no real haiku model id may
-# be the VALUE of a model key — haiku is banned harness-wide, and one haiku
-# value silently downgrades every lane that resolves through that key. Only
-# values are inspected, never key names: ANTHROPIC_DEFAULT_HAIKU_MODEL is a
-# deliberate tripwire that must keep pointing at a non-haiku model, so the key
-# existing is the healthy state. WARN: the session pin should be one of the two
-# foreman tiers model-probe.sh manages, but an Operator may pin something else
-# on purpose, so a different pin is a nudge and not a gate. Same deployed-then-
+# 14. Session pin (CONTEXT/model-roles.md: Opus 5.5 is the foreman). The
+# top-level "model" key is what boots. WARN, never FAIL: an Operator may pin
+# another tier on purpose, and the pin lives in the Stage-1 file OPS never
+# writes, so a different pin is a nudge, not a gate. The Haiku pin and every
+# banned or retired id are FAILs in checks 15 and 15b. Same deployed-then-
 # stage-1 settings fallback as check_autonomy_settings.
+OPS_FOREMAN_PIN="claude-opus-5-5[1m]"
 check_model_policy() {
-  local settings="$HOME/.claude/settings.json" haiku pin
+  local settings="$HOME/.claude/settings.json" pin
   [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
   [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
-  haiku="$(grep -oE '"(ANTHROPIC_DEFAULT_[A-Z0-9_]+_MODEL|model)"[[:space:]]*:[[:space:]]*"[^"]*"' "$settings" \
-    | sed -E 's/^"[^"]*"[[:space:]]*:[[:space:]]*"(.*)"$/\1/' | grep -i haiku | tr '\n' ' ')"
-  # Anchored at top-level indentation so a nested "model" in someone's custom
-  # config cannot be mistaken for the session pin. No match = no WARN: a file
-  # formatted differently is not evidence of a bad pin.
-  pin="$(grep -oE '^  "model"[[:space:]]*:[[:space:]]*"[^"]*"' "$settings" | head -1 \
-    | sed -E 's/^.*"([^"]*)"$/\1/')"
-  if [ -n "$haiku" ]; then
-    fail "haiku model id(s) in settings.json (haiku is banned harness-wide): $haiku"
-  elif [ -n "$pin" ] && [ "$pin" != "claude-fable-5[1m]" ] && [ "$pin" != "claude-opus-4-8[1m]" ]; then
-    warn "session pin \"$pin\" is not a managed foreman tier (model-probe.sh sets claude-fable-5[1m] or claude-opus-4-8[1m])"
+  if command -v jq >/dev/null 2>&1 && jq -e . "$settings" >/dev/null 2>&1; then
+    pin="$(jq -r 'if type == "object" and (.model | type) == "string" then .model else "" end' "$settings" 2>/dev/null)"
   else
-    ok "model policy: pin + haiku tripwire sane"
+    # Anchored at top-level indentation so a nested "model" in someone's custom
+    # config cannot be mistaken for the session pin.
+    pin="$(grep -oE '^  "model"[[:space:]]*:[[:space:]]*"[^"]*"' "$settings" | head -1 \
+      | sed -E 's/^.*"([^"]*)"$/\1/')"
+  fi
+  if [ -z "$pin" ]; then
+    ok "no top-level model pin (sessions boot on the ANTHROPIC_DEFAULT_* aliases)"
+  elif [ "$pin" = "$OPS_FOREMAN_PIN" ]; then
+    ok "session pin is the foreman tier ($OPS_FOREMAN_PIN)"
+  else
+    warn "session pin \"${pin:0:80}\" is not the foreman tier $OPS_FOREMAN_PIN (fine if deliberate; see CONTEXT/model-roles.md)"
   fi
 }
 
-# 15. Opus 5 ban (Operator directive 2026-08-20). Opus 4.8 is the default
-# build/review/audit worker; claude-opus-5 is banned harness-wide the same way
-# haiku is, because as a fan-out worker it burned disproportionate cache-write
-# and round-trips for no quality edge. Enforced here rather than trusted to
-# prose: a stale pin is invisible until it has already spent the budget.
-# Scoped to SPAWN PINS only — agent frontmatter, Workflow lane objects, and the
-# settings the gate already resolves — so the doctrine's own ban text (which
-# must name the banned id to be readable) never trips its own gate.
-check_opus5_ban() {
-  local hits settings="$HOME/.claude/settings.json"
-  [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
-  hits="$(grep -rnE "model:[[:space:]]*['\"]?claude-opus-5" \
-    "$OPS/.claude-config/agents" "$OPS/.claude-config/workflows" 2>/dev/null)"
-  if [ -f "$settings" ] && grep -qE 'claude-opus-5' "$settings" 2>/dev/null; then
-    hits="$hits"$'\n'"settings.json references claude-opus-5"
+# _ops_settings_files: every Claude settings file this host can boot from, one
+# per line, deduped by realpath (Stage 1 is usually the symlink target of the
+# deployed file, so the common case would otherwise report twice).
+_ops_settings_files() {
+  local f rp seen=""
+  for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" "$HOME/.claude/settings.json" \
+           "$HOME/.claude-personal/settings.json" "$HOME/linuxploitacious/claude/.claude/settings.json"; do
+    [ -f "$f" ] || continue
+    rp="$(readlink -f "$f" 2>/dev/null || echo "$f")"
+    case " $seen " in *" $rp "*) continue;; esac
+    seen="$seen $rp"
+    printf '%s\n' "$f"
+  done
+}
+
+# Share the pin surfaces across the bans: skill workflows and project agents
+# can select a model just as the top-level workflows and agents can.
+_ops_pin_files() {
+  find -L "$OPS/.claude-config/agents" "$OPS/.claude-config/workflows" \
+       "$OPS/.claude-config/commands" "$OPS/.claude/agents" -type f -print0 2>/dev/null
+  find -L "$OPS/SKILLS/" -type d -name node_modules -prune -o -type f -name '*.js' -print0 2>/dev/null
+}
+
+# JSON escapes do not change the selected model. Decode settings for every
+# model ban, rather than letting an escaped digit evade a raw grep.
+_ops_settings_text() {
+  if command -v jq >/dev/null 2>&1 && jq -e . "$1" >/dev/null 2>&1; then
+    jq -r '.. | if type == "object" then keys[] elif type == "string" then . else empty end' "$1" 2>/dev/null
+  else
+    cat "$1"
   fi
+}
+
+# YAML and JavaScript accept quoted keys and spaces before the colon;
+# JavaScript also accepts template literals. These are real pin spellings.
+OPS_MODEL_KEY="(^|[^[:alnum:]_])[\"'\`]?model[\"'\`]?[[:space:]]*:[[:space:]]*[\"'\`]?"
+
+# 15. Opus 5 ban (Operator directive 2026-08-20). As a fan-out worker it burned
+# disproportionate cache-write and round-trips for no quality edge. Enforced
+# here rather than trusted to prose: a stale pin is invisible until it has
+# already spent the budget. Scoped to PINS only (agent frontmatter, Workflow
+# lane objects, the settings files), so the doctrine's own ban text, which must
+# name the id to be readable, never trips its own gate. The id must END at
+# `claude-opus-5` (then `[1m]`, a quote, whitespace, or EOL): Opus 5.5
+# (`claude-opus-5-5[1m]`) is the foreman and allowed, and the earlier bare
+# prefix match failed every fresh install against the current Stage-1 settings.
+check_opus5_ban() {
+  local hits="" f found
+  while IFS= read -r -d '' f; do
+    found="$(grep -nE "${OPS_MODEL_KEY}claude-opus-5(\[|[^A-Za-z0-9-]|$)" "$f" 2>/dev/null)"
+    [ -n "$found" ] && hits="$hits"$'\n'"$f:$found"
+  done < <(_ops_pin_files)
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    _ops_settings_text "$f" | grep -E 'claude-opus-5(\[|[^A-Za-z0-9-]|$)' >/dev/null && hits="$hits"$'\n'"$f references claude-opus-5"
+  done < <(_ops_settings_files)
   hits="$(printf '%s' "$hits" | sed '/^$/d')"
   if [ -z "$hits" ]; then
-    ok "no claude-opus-5 spawn pins (Opus 5 ban intact)"
+    ok "no claude-opus-5 pins (Opus 5 ban intact)"
   else
-    fail "claude-opus-5 is BANNED but still pinned (repin to claude-opus-4-8[1m]):"$'\n'"$hits"
+    fail "claude-opus-5 is BANNED but still pinned (repin a foreman or high-criticality pin to $OPS_FOREMAN_PIN, a lane pin to claude-sonnet-5-5[1m]):"$'\n'"$hits"
+  fi
+}
+
+# 15b. Retired ids stay unpinned, and Haiku 5.5 is the only Haiku a pin may
+# name (CONTEXT/model-roles.md, Bans).
+#
+# Retired: Sonnet 5 and Opus 4.8. A retired id left in a pin does not fail
+# loudly: lanes quietly keep running the retired model. Scope is live pins
+# ONLY: `model:` lines in agent definitions, workflow scripts and the workflow
+# scripts skills ship (SKILLS/**/*.js), and the Claude settings files (whole
+# file). Not prose. The id must END at its last digit (then `[1m]`, a quote,
+# whitespace, `}`, or EOL): `claude-sonnet-5` is a bare prefix of the live
+# `claude-sonnet-5-5`, so a prefix match would ban the new default.
+#
+# Haiku: exactly `claude-haiku-5-5` is allowed; every other Haiku id is banned
+# wherever a pin can live. The scan matches WHOLE TOKENS case-insensitively,
+# not `model:` lines, because a pin can sit behind a constant, a JSON key, or a
+# provider prefix. A token is claude-<...>haiku<...> or haiku-<digit><...>, with
+# trailing punctuation trimmed; a token of letters and underscores only is an
+# env var name (ANTHROPIC_DEFAULT_HAIKU_MODEL), not an id, and is skipped.
+# `claude-haiku-5` is a bare prefix of the allowed id, so it and a dated 5.5
+# stay banned. The bare `haiku` alias is refused as a value too: it resolves to
+# Haiku 5.5 only while the Stage-1 pin is live on a recent Claude Code, and to
+# Haiku 4.5 elsewhere.
+#
+# The pin: ANTHROPIC_DEFAULT_HAIKU_MODEL in the settings must be EXACTLY
+# `claude-haiku-5-5`. The haiku alias and Claude Code's background requests
+# resolve through it, and without it they fall back to Haiku 4.5. Read with jq
+# from `.env`; a host without settings or jq cannot prove it, so that is a
+# WARN, not a silent pass. Before this check, the gate FAILed on any Haiku id,
+# the allowed one included, which failed every fresh install.
+HAIKU_OK="claude-haiku-5-5"
+
+# _haiku_banned: text on stdin -> "<line>:<token>" for each Haiku token other
+# than HAIKU_OK. Detect case-insensitively but compare the exception exactly: a
+# mixed-case look-alike is not the allowed API id.
+_haiku_banned() {
+  # Keep provider prefixes and context suffixes: neither a Bedrock spelling
+  # nor claude-haiku-5-5[1m] is the one allowed exact id.
+  grep -inoE '[a-z0-9][a-z0-9._:@/-]*(\[[^]]*\])?' \
+    | grep -iE 'claude[-_][a-z0-9._@:-]*haiku|haiku[-_][0-9]' \
+    | sed -E 's/[._@:-]+$//' \
+    | grep -viE '^[0-9]+:[a-z_]+$' \
+    | grep -vE "^[0-9]+:${HAIKU_OK}\$"
+}
+
+# _haiku_alias_lines: text on stdin -> the line number of each line whose value
+# is the bare haiku alias: a quoted literal ('haiku', "haiku[1m]", `haiku`), an
+# unquoted YAML `model: haiku`, a shell assignment, or a parameter fallback.
+_haiku_alias_lines() {
+  grep -niE "[\"'\`]haiku(\[1m\])?[\"'\`]|^[[:space:]]*model[[:space:]]*:[[:space:]]*haiku(\[1m\])?([[:space:]]+#.*)?[[:space:]]*\$|(^|[;[:space:]])[a-z_][a-z0-9_]*=haiku(\[1m\])?([;[:space:]]|\$)|\{[^}]*:-haiku(\[1m\])?\}" | cut -d: -f1
+}
+
+# Settings are decoded with jq before the Haiku scan (JSON escapes do not change
+# the model Claude Code selects); the raw file is scanned when jq cannot read it.
+_settings_haiku_banned() {
+  _ops_settings_text "$1" | _haiku_banned
+}
+
+# 0 when a JSON string VALUE in settings file $1 is the bare haiku alias. Not
+# grep -q: an early exit can SIGPIPE jq, and pipefail then reads a match as a miss.
+_settings_alias() {
+  if command -v jq >/dev/null 2>&1 && jq -e . "$1" >/dev/null 2>&1; then
+    jq -r '.. | strings | @json' "$1" 2>/dev/null | grep -ixE '"haiku(\[1m\])?"' >/dev/null
+  else
+    grep -qiE '"haiku(\[1m\])?"[[:space:]]*($|[],}])' "$1" 2>/dev/null
+  fi
+}
+
+check_retired_model_pins() {
+  local retired="claude-sonnet-5 claude-opus-4-8" end='(\[|[^A-Za-z0-9-]|$)'
+  local id found hits="" f line settings
+  local -a surf=()
+
+  # Pin surfaces: agent definitions, workflow scripts, commands, project agents,
+  # and the workflow scripts skills ship.
+  while IFS= read -r -d '' f; do surf+=("$f"); done < <(_ops_pin_files)
+
+  for f in ${surf[@]+"${surf[@]}"}; do
+    for id in $retired; do
+      found="$(grep -nE "${OPS_MODEL_KEY}${id}${end}" "$f" 2>/dev/null)"
+      [ -n "$found" ] && hits="$hits"$'\n'"$(printf '%s\n' "$found" | while IFS= read -r line; do printf '%s:%s\n' "$f" "$line"; done)"
+    done
+    while IFS= read -r line; do
+      [ -n "$line" ] && hits="$hits"$'\n'"$f:${line%%:*}: banned Haiku ${line#*:}"
+    done < <(_haiku_banned < "$f")
+    while IFS= read -r line; do
+      [ -n "$line" ] && hits="$hits"$'\n'"$f:$line: bare haiku alias (name $HAIKU_OK in full)"
+    done < <(_haiku_alias_lines < "$f")
+  done
+
+  # Settings files, whole file, id only (a settings line can carry other values).
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    for id in $retired; do
+      _ops_settings_text "$f" | grep -E "${id}${end}" >/dev/null && hits="$hits"$'\n'"$f pins $id"
+    done
+    for id in $(_settings_haiku_banned "$f" | cut -d: -f2- | awk '!s[$0]++'); do
+      hits="$hits"$'\n'"$f pins banned Haiku $id"
+    done
+    _settings_alias "$f" && hits="$hits"$'\n'"$f pins the bare haiku alias (name $HAIKU_OK in full)"
+  done < <(_ops_settings_files)
+
+  hits="$(printf '%s' "$hits" | sed '/^$/d')"
+  if [ -z "$hits" ]; then
+    ok "no live pin of a retired id (claude-sonnet-5, claude-opus-4-8) or of a Haiku other than $HAIKU_OK"
+  else
+    fail "retired or banned id still pinned (repin a retired lane id to claude-sonnet-5-5[1m] and a retired foreman id to $OPS_FOREMAN_PIN; the one allowed Haiku is $HAIKU_OK, named in full; for a Stage-1 settings file, pull linuxploitacious rather than editing it):"$'\n'"$hits"
+  fi
+
+  settings="$(_ops_settings_files)"
+  if [ -z "$settings" ]; then
+    warn "settings.json not found: the Haiku pin (ANTHROPIC_DEFAULT_HAIKU_MODEL = $HAIKU_OK) cannot be verified on this host"
+    return
+  fi
+  # A healthy default profile cannot cover a missing pin in another profile:
+  # CLAUDE_CONFIG_DIR selects that profile's settings independently.
+  while IFS= read -r f; do _check_haiku_pin "$f"; done <<< "$settings"
+}
+
+_check_haiku_pin() {
+  local settings="$1" pin shown
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "jq not installed: the Haiku pin (ANTHROPIC_DEFAULT_HAIKU_MODEL = $HAIKU_OK) in $settings cannot be verified on this host"
+  elif ! pin="$(jq -r '((.env // {}) | if type == "object" then (.ANTHROPIC_DEFAULT_HAIKU_MODEL // "" | tostring) else "" end) | @json' "$settings" 2>/dev/null)"; then
+    fail "$settings does not parse as a JSON settings object: the Haiku pin (ANTHROPIC_DEFAULT_HAIKU_MODEL = $HAIKU_OK) cannot be read"
+  else
+    # Keep JSON escapes, drop the surrounding quotes: plain command substitution
+    # strips trailing newlines and would accept a pin that merely starts with
+    # the allowed id.
+    pin="${pin#\"}"; pin="${pin%\"}"
+    # Echo only a recognizable public Claude model slug, never an unknown value:
+    # an arbitrary string in that key may be a misplaced credential.
+    if printf '%s\n' "$pin" | grep -qiE '^(claude[-_][a-z0-9._@:-]*|haiku)(\[1m\])?$'; then
+      shown="'${pin:0:80}'"
+    else
+      shown="a non-id value"
+    fi
+    if [ -z "$pin" ]; then
+      fail "ANTHROPIC_DEFAULT_HAIKU_MODEL is missing or empty in $settings: it must be $HAIKU_OK; without it the haiku alias and background requests resolve to Haiku 4.5 (banned)"
+    elif [ "$pin" = "$HAIKU_OK" ]; then
+      ok "Haiku pin set (ANTHROPIC_DEFAULT_HAIKU_MODEL = $HAIKU_OK)"
+    elif [ "${pin%%\[*}" = "$HAIKU_OK" ]; then
+      fail "ANTHROPIC_DEFAULT_HAIKU_MODEL in $settings is $shown: drop the suffix; the pin must be exactly $HAIKU_OK (Haiku lanes stay under 100K tokens)"
+    else
+      fail "ANTHROPIC_DEFAULT_HAIKU_MODEL in $settings is $shown, not $HAIKU_OK (an older Stage-1 copy pointed it elsewhere; pull linuxploitacious)"
+    fi
   fi
 }
 
@@ -274,8 +460,12 @@ check_charter_hook_retired() {
 
 # 18. Source-scoped SessionStart matchers. A resume/compact must stop re-paying
 # the full boot: the split adds a "resume|compact" matcher whose command list
-# excludes the heavy startup-only hooks (memory-index, session-work-init). Tests
-# the semantics — collects the command list of every group whose matcher fires on
+# excludes the heavy startup-only hooks (memory-index, vault-inbox-check).
+# session-work-init is NOT on that list: it stamps only when no stamp exists,
+# and a revived session fires source=resume for its whole life, so keeping it
+# off resume would never stamp that session (see its header). The current
+# Stage-1 settings run it on resume|compact, and counting it as heavy WARNed on
+# every fresh install. Tests the semantics: it collects the command list of every group whose matcher fires on
 # source=compact and confirms none reference a heavy hook, and that a dedicated
 # resume/compact matcher exists. Config-dependent: WARNs until the split lands.
 check_sessionstart_matchers() {
@@ -283,7 +473,7 @@ check_sessionstart_matchers() {
   [ -f "$settings" ] || settings="$HOME/linuxploitacious/claude/.claude/settings.json"
   [ -f "$settings" ] || { warn "settings.json not found (run Stage 1 deploy first)"; return; }
   command -v jq >/dev/null 2>&1 || { warn "jq unavailable — cannot check SessionStart matchers"; return; }
-  local heavy='memory-index\.sh|session-work-init\.sh'
+  local heavy='memory-index\.sh|vault-inbox-check\.sh'
   local n i matcher cmds m dedicated=0 heavy_on_compact=0
   n="$(jq '.hooks.SessionStart | length' "$settings" 2>/dev/null)" || n=""
   [ -n "$n" ] || { warn "could not parse SessionStart from settings.json"; return; }
@@ -448,6 +638,7 @@ main() {
   check_ship_gate
   check_model_policy
   check_opus5_ban
+  check_retired_model_pins
   check_boot_shim
   check_charter_hook_retired
   check_sessionstart_matchers
@@ -459,4 +650,9 @@ main() {
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
 }
-main
+
+# Run only when executed, so verify-ops-selftest.sh can source the checks and
+# drive them one at a time against a throwaway HOME.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main
+fi
