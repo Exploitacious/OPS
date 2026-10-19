@@ -8,7 +8,8 @@
 #     Each stage is a function that logs and returns; both stages always run.
 #   - OPS stage order: stash -> pull -> unstash -> commit -> push. The old
 #     `git pull --rebase` before staging aborted on a dirty tree, i.e. the
-#     backup failed precisely when there was work to back up.
+#     backup failed precisely when there was work to back up. A failed pull
+#     unstashes at once, so the tree is never left without the Operator's work.
 #   - Project stage delegates to PROJECTS/sync-check.sh --auto: it walks every
 #     repo, fast-forwards / rebases the clean ones, and SKIPS dirty repos
 #     (never touches uncommitted work). Pull-only: it never pushes projects.
@@ -120,9 +121,27 @@ backup_ops() {
         return 1
     fi
 
-    if ! git pull --rebase origin "$branch" >/dev/null 2>&1; then
-        log "OPS: ERROR pull --rebase failed; local changes preserved in stash '$stash_label'"
-        log "     recover with: cd $OPS_DIR && git stash list && git stash pop"
+    # A failed pull (offline, no credentials under cron) used to return here
+    # with the work still in the stash, so the Operator's uncommitted and
+    # untracked files vanished from the tree, and later runs saw a clean tree
+    # and never brought them back. Put the tree back exactly as it was (abort a
+    # rebase the pull left half-done, then pop with the index) and report the
+    # failure; nothing is committed or pushed on this run.
+    local pull_err pull_why
+    if ! pull_err="$(git pull --rebase origin "$branch" 2>&1 >/dev/null)"; then
+        # git's first fatal/error line names the cause; its last line is often a hint.
+        pull_why="$(printf '%s\n' "$pull_err" | grep -m1 -E '^(fatal|error|ERROR):')" \
+            || pull_why="$(printf '%s\n' "$pull_err" | tail -1)"
+        log "OPS: ERROR pull --rebase failed; nothing committed or pushed: $pull_why"
+        if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+            git rebase --abort >/dev/null 2>&1 || log "OPS: ERROR could not abort the half-done rebase; resolve with: cd $OPS_DIR && git status"
+        fi
+        if git stash pop --index >/dev/null 2>&1; then
+            log "     local changes restored to the working tree; the next run retries"
+        else
+            log "OPS: ERROR restoring the stash conflicted; local changes preserved in stash '$stash_label'"
+            log "     recover with: cd $OPS_DIR && git stash list && git stash pop"
+        fi
         return 1
     fi
 

@@ -181,6 +181,15 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   failure. The `BACKUP` line is printed as soon as a folder is moved aside,
   so a later failure still says where it went. New cases in
   `skills-vendor-test.sh`.
+- **A failed backup pull puts the work back.** When `git pull --rebase`
+  failed (offline, no credentials under cron), `daily-sync.sh` returned with
+  the Operator's uncommitted and untracked work still in its stash, so the
+  files vanished from the tree, the mounted skills went missing, and later
+  runs saw a clean tree and never restored them. It now aborts a rebase the
+  pull left half-done, pops the stash with its index so the tree is exactly
+  as before, logs the failure as an ERROR with git's reason, and commits and
+  pushes nothing that run; a pop that conflicts still names the stash. New
+  cases in `daily-sync-test.sh`.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

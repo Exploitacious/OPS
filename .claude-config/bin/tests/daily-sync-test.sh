@@ -13,6 +13,9 @@
 #   - private origin, new changes: committed and pushed
 #   - unverifiable origin: skipped with the opt-in fix in the log
 #   - an empty or truncated gate (both exit 0) is not a verdict: nothing pushed
+#   - a failed pull (unreachable origin, or a rebase that conflicts) leaves the
+#     tree exactly as it was: tracked edits, staged changes, untracked files,
+#     HEAD, and no leftover stash or rebase
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/daily-sync-test.sh
 set -uo pipefail
@@ -152,5 +155,48 @@ for kind in empty truncated; do
 done
 cp "$CHECK" "$GATE_COPY"
 pass "an empty or truncated gate exits 0 but is not a verdict: commit kept locally, nothing pushed"
+
+# --- A failed pull leaves the tree exactly as it was ----------------------------
+# (2026-10-19: a failed `git pull --rebase` returned with the work still in the
+# stash, so uncommitted and untracked files vanished from the tree, and later
+# runs saw a clean tree and never restored them.)
+tree_state() {
+    (cd "$OPS" && git rev-parse HEAD && git status --porcelain=v1 -uall && git diff && git diff --cached \
+      && git stash list && find . -path ./.git -prune -o -path ./.claude-config/backup/sync.log -prune -o -type f -print0 \
+      | LC_ALL=C sort -z | xargs -0 sha256sum)
+}
+dirty_tree() {
+    printf 'edited %s\n' "$1" >> "$OPS/note.md"
+    printf 'untracked %s\n' "$1" > "$OPS/untracked-$1.md"
+    printf 'staged %s\n' "$1" > "$OPS/staged-$1.md"; git -C "$OPS" add "staged-$1.md"
+    printf 'staged then edited %s\n' "$1" >> "$OPS/note2.md"; git -C "$OPS" add note2.md
+    printf 'unstaged on top %s\n' "$1" >> "$OPS/note2.md"
+}
+dirty_tree offline
+before_state="$(tree_state)"; before="$(remote_head)"
+FAKE_REMOTE="$WORK/unreachable.git" GH_ANSWER=true run_sync
+grep -q 'OPS: ERROR pull --rebase failed; nothing committed or pushed' "$LOG" || fail "unreachable origin: the failed pull was not logged as an error"
+grep -q 'local changes restored to the working tree' "$LOG" || fail "unreachable origin: the restore was not logged"
+[ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "unreachable origin: the tree changed"; }
+[ "$(remote_head)" = "$before" ] || fail "unreachable origin: something was pushed"
+grep -q 'projects stage ran (--auto)' "$LOG" || fail "unreachable origin: the project stage did not run"
+pass "unreachable origin: the tree is exactly as before (edits, index, untracked), no stash left, nothing committed"
+
+# A pull whose rebase conflicts (a held local commit and a remote commit add the
+# same file) is aborted, so HEAD and the tree come back too.
+git -C "$OPS" stash push -q -u -m park || fail "fixture: could not park the dirty tree"
+printf 'local side\n' > "$OPS/clash.md"; git -C "$OPS" add clash.md; git -C "$OPS" commit -q -m "local clash" || fail "fixture: local commit"
+git -C "$OPS" stash pop -q --index || fail "fixture: could not unpark the dirty tree"
+git clone -q "$FAKE_REMOTE" "$WORK/other" || fail "fixture: second clone"
+printf 'remote side\n' > "$WORK/other/clash.md"
+git -C "$WORK/other" add clash.md && git -C "$WORK/other" commit -q -m "remote clash" && git -C "$WORK/other" push -q origin HEAD:main \
+  || fail "fixture: could not advance the remote"
+before_state="$(tree_state)"; before="$(remote_head)"
+GH_ANSWER=true run_sync
+grep -q 'OPS: ERROR pull --rebase failed; nothing committed or pushed' "$LOG" || fail "conflicting rebase: the failed pull was not logged"
+[ ! -d "$OPS/.git/rebase-merge" ] && [ ! -d "$OPS/.git/rebase-apply" ] || fail "conflicting rebase: a rebase was left in progress"
+[ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "conflicting rebase: the tree or HEAD changed"; }
+[ "$(remote_head)" = "$before" ] || fail "conflicting rebase: something was pushed"
+pass "conflicting rebase: aborted, and the tree and HEAD are exactly as before"
 
 echo "ALL PASS"
