@@ -11,7 +11,8 @@
 # credentials. Normalized forms (percent-encoded, quoted or padded, repeated
 # slashes, dot segments, a trailing-dot host or ssh HostName) still reach the
 # template verdict with the opt-in set, and a push URL list with no usable
-# entry (a lone CR) exits 2 with or without the opt-in.
+# entry (a lone CR) exits 2 with or without the opt-in. A hung gh times out in
+# about 10 s, inside git-guard's 30 s hook budget.
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/origin-private-check-test.sh
 set -uo pipefail
@@ -37,6 +38,7 @@ case "${GH_STUB:-}" in
   true|false|False) printf '%s\n' "$GH_STUB" ;;
   error) echo 'HTTP 404: Not Found (https://api.github.com/repos/x/y)' >&2; exit 1 ;;
   odd) echo 'null' ;;
+  hang) exec sleep 60 ;;
   *) exit 4 ;;
 esac
 STUB
@@ -101,6 +103,19 @@ grep -qx 'api --hostname github.com repos/acme/ops-copy --jq .private' "$GH_LOG"
 GH_STUB=false
 run_check; expect 1 "public repo" "github.com/acme/ops-copy is public"
 pass "GitHub private exits 0, public exits 1, asked through gh api --hostname github.com"
+
+# --- A hung gh times out inside the hook's budget ------------------------------
+# git-guard runs this gate in a PreToolUse hook the harness kills at 30 s; with
+# gh's own 30 s limit the hook timed out first and the agent never saw why
+# (2026-10-19). The gate now gives gh 10 s and answers with its own reason.
+if command -v timeout >/dev/null 2>&1; then
+  GH_STUB=hang; start=$SECONDS
+  run_check; expect 2 "hung gh" "gh could not read github.com/acme/ops-copy"
+  [ $((SECONDS - start)) -lt 20 ] || fail "a hung gh held the gate for $((SECONDS - start)) s (want under 20)"
+  pass "a hung gh times out in about 10 s with the gate's own reason"
+else
+  echo "SKIP: hung gh timeout (no timeout command)"
+fi
 
 # --- The public template, in every URL form ------------------------------------
 GH_STUB=true

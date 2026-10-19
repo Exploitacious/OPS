@@ -208,8 +208,17 @@ In order:
    opt-in is per repo, covers only what cannot be verified, and never
    overrides a public answer. `memory-init.ps1` applies the same rule on
    Windows, and the Windows backup task runs this same script in Git Bash.
-   Agent pushes meet the same gate: the git-guard hook runs it on every
-   `git push` an agent makes from this copy and blocks one it cannot verify.
+   Agent pushes meet the same gate: the git-guard hook runs it on the pushes
+   an agent makes from this copy (through `cd`, `git -C`, `--git-dir`,
+   `bash -c`, pipes, `$(...)` and aliases) and blocks one it cannot verify,
+   one to a remote other than origin, and one carrying a `-c` setting that
+   could move it. Where it cannot follow a command (no Python 3, an
+   unparseable line, a directory held in a loop variable) it falls back to
+   checking every OPS copy the command names. It is a seatbelt for normal
+   agent pushes, not a sandbox: exotic wrappers (`setsid`, `find -exec`,
+   `ssh`, `python -c` and the like) and scripts run from a file are not
+   parsed. The real protection is a private origin. The hook header in
+   `.claude-config/hooks/git-guard.sh` lists what it covers and its limits.
 
 9. **Retire the caveman and ponytail plugins.** Runs
    `claude plugin uninstall <name>@<name>` and

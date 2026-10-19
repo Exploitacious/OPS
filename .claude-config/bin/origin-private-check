@@ -200,9 +200,12 @@ check_url() {
     U_RC=2; GH_BLOCKED=1; U_WHY="gh (GitHub CLI) is not installed, so github.com/$P_PATH cannot be checked"; return
   fi
   # --hostname pins github.com: a GH_HOST pointing at an Enterprise server
-  # must not answer for a github.com URL.
+  # must not answer for a github.com URL. 10 s, not more: git-guard runs this
+  # gate inside a PreToolUse hook the harness kills at 30 s, so a hung gh must
+  # time out here first and the agent must see this gate's own reason (an ssh
+  # alias lookup above can take another 10 s).
   rc=0
-  out="$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 with_timeout 30 \
+  out="$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 with_timeout 10 \
     gh api --hostname github.com "repos/$P_PATH" --jq .private 2>/dev/null)" || rc=$?
   # Trimmed and lowercased like the PowerShell twin, so "False" or "true "
   # get the same verdict on both shells; real gh prints true or false.

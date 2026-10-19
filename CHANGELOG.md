@@ -200,6 +200,54 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   git's own stderr for a failed commit instead of hiding it behind a
   "(hook/signing?)" guess. New cases in `memory-init-test.sh` and
   `memory-init-windows-test.ps1`.
+- **A redirect after a push is not its remote.** The push gate read the
+  first word after `git push` as the remote, so `git push 2>&1`, `1>&2`,
+  `>&2`, `&>/dev/null` and the like were blocked on a verified-private copy
+  ("goes to '2', not origin"). Redirections and their fd numbers are now
+  dropped before the arguments are read. New `guard-selftest.sh` cases run
+  each form against a private copy (allowed) and the template (blocked).
+- **The push gate refuses settings that move a push.** `git -c
+  remote.origin.pushurl=...` (or `remote.pushDefault`, `url.*.pushInsteadOf`,
+  `push.*`, `branch.<b>.remote` or `.pushRemote`, the same through
+  `--config-env` or `GIT_CONFIG_*`) sent a push elsewhere while the gate
+  checked only the configured origin. On an OPS copy such a push is now
+  blocked with the setting named, as is a push in the same command as a
+  change to where pushes go (`git remote set-url`, `git config remote.*`,
+  `git config ops.pushVerified`), whose verdict would be stale.
+- **The hook never runs code the command chose.** Its alias lookup ran `git`
+  with the command's own environment, so `PATH=<dir>:$PATH git <word>` or an
+  `LD_PRELOAD` made the hook execute a binary or library before the command
+  was allowed. The lookup now uses the `git` on the hook's own PATH, with the
+  hook's environment, and reads only `git config --get`.
+- **More push forms reach the gate.** `--git-dir`, `GIT_DIR` (also exported
+  earlier in the command) and `--work-tree` resolve to the repo git acts on,
+  not the cwd; here-strings, `... | bash` and `cat <<EOF | bash` are parsed
+  as scripts; `$(...)` and backticks are parsed inside double quotes too;
+  `git send-pack`, `http-push`, `subtree push` and `lfs push` on an OPS copy
+  are blocked; `rtk run|err|summary|test|bypass|proxy` are unwrapped;
+  `bash --norc -c` and `--rcfile` no longer hide the `-c` body; `cd -`, `cd`
+  chains and variables assigned in the command resolve; `git -C` resolves
+  symlinks physically, as git does; a linked worktree whose checkout lacks
+  the gate uses its main copy's gate.
+- **The fallback fails safe.** Without Python 3, on a command that cannot
+  be tokenized, or when a directory cannot be resolved (a loop variable, an
+  `xargs -I{}` placeholder), the hook now reads the raw command with its
+  quotes: a push or send-pack word, or one of the copy's push aliases, runs
+  the gate of every OPS copy the command touches. It used to match only
+  `git` at a command position in the quote-stripped text, so `bash -c`,
+  `eval`, `timeout`, `xargs`, `{ }` and `if` forms pushed unchecked.
+- **The push gate's limits are written down.** The hook header and
+  `DEPLOYMENT.md` say what it is: a seatbelt for normal agent pushes, not a
+  sandbox. Exotic wrappers (`setsid`, `find -exec`, `ssh`, `python -c`) and
+  scripts run from a file are not parsed; the real protection is a private
+  origin. `CONTRIBUTING.md` explains that the template's own checkout is an
+  OPS copy with a public origin, so a contributor pushes a PR branch with
+  `GIT_GUARD=off git push origin <branch>` after checking it carries no
+  private content.
+- **The gate answers inside the hook's time.** `origin-private-check` gave
+  `gh` 30 s, the same 30 s the harness gives the git-guard hook, so a hung
+  `gh` timed the hook out before the agent saw why. `gh` now gets 10 s. New
+  case in `origin-private-check-test.sh`.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

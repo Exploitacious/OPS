@@ -64,6 +64,13 @@ to be synthetic will get questioned; that's the review working as intended.
 
 - `main` is protected: contributions land by PR with review, no direct
   pushes, no force pushes.
+- Your clone of this repo is itself an OPS copy (it holds
+  `.claude-config/bin/origin-private-check`) whose origin is public, so the
+  git-guard hook blocks an agent's push of your PR branch, by design: that is
+  the push it exists to stop in a private copy. Check that the branch carries
+  no private content (the denylist grep above, at zero hits), then push it
+  with the documented one-command override:
+  `GIT_GUARD=off git push origin <branch>`.
 - Conventional Commits (`<type>(<scope>): <imperative summary>`, subject
   ≤ 72 chars). Body explains *why* when it isn't obvious.
 - One mechanic per PR beats a best-of-both-worlds mega-merge. Big merges
