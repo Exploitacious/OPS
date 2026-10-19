@@ -9,6 +9,7 @@
 #   - read only the LAST run: an earlier run's problem that a later clean run
 #     resolved stays quiet
 #   - stay quiet on a clean run and when there is no log at all
+# It also pins the memory flush-queue count beside it (same hook, same boot).
 # HOME and the OPS copy are fixtures in this test's own temp dir.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -60,6 +61,17 @@ case "$line" in
   *) bad "failed stage: $line" ;;
 esac
 case "$line" in *"push skipped"*) bad "failed stage: an older run's line leaked in" ;; *) ok "failed stage: no older run's line" ;; esac
+
+# The memory flush queue (secrets-guard's write-time nudges) is counted at boot.
+mkdir -p "$HOME/.claude-compact-cycle"
+printf '2026-10-18T10:00:00-04:00\t/x/memory/a.md\tproject:alpha\n2026-10-19T11:00:00-04:00\t/x/memory/b.md\tproject:beta\n' \
+  > "$HOME/.claude-compact-cycle/memory-flush-queue"
+out="$(briefing)"
+grep -q '^ Memory:  flush queue 2 line(s) pending (oldest 2026-10-18); closeout hygiene step 2 consumes them$' <<< "$out" \
+  && ok "flush queue: counted with its oldest date" || bad "flush queue: $(grep 'Memory:' <<< "$out")"
+: > "$HOME/.claude-compact-cycle/memory-flush-queue"
+out="$(briefing)"
+case "$out" in *"flush queue"*) bad "empty flush queue: still reported" ;; *) ok "empty flush queue: quiet" ;; esac
 
 echo "session-briefing-backup-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

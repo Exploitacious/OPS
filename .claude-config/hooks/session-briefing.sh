@@ -121,6 +121,17 @@ if [ -f "$MEM" ]; then
   fi
 fi
 
+# Flush queue depth: pending fold-or-keep decisions the next closeout consumes
+# (the read side of secrets-guard.sh's write-time nudge, which appends one
+# "<ISO time><TAB><file><TAB><reason>" line per flagged memory entry). A queue
+# nobody reads is decisions nobody makes, so say it at boot.
+FQ="$HOME/.claude-compact-cycle/memory-flush-queue"
+if [ -s "$FQ" ]; then
+  fq_n="$(grep -c . "$FQ" 2>/dev/null)"
+  fq_oldest="$(head -1 "$FQ" 2>/dev/null | cut -f1 | cut -dT -f1)"
+  printf ' Memory:  flush queue %s line(s) pending (oldest %s); closeout hygiene step 2 consumes them\n' "${fq_n:-?}" "${fq_oldest:-?}"
+fi
+
 # --- hygiene (quiet-when-clean): dirty repos, drift-gate state, closeout age ---
 STATE_DIR="$HOME/.local/state/ops"
 hyg=""
