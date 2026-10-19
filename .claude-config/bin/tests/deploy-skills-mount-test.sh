@@ -2,6 +2,7 @@
 # Exercise deploy's real mount function without network, git writes, or a live
 # install. The git stub deliberately leaves partial clones and races publication.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97
 DEPLOY="$(cd "$(dirname "$0")/../.." && pwd)/deploy.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/deploy-mount.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT

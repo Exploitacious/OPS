@@ -2,6 +2,7 @@
 # Invoke only the real trust-seeding function and its caller under a temporary
 # HOME. Do not run deploy: it also initializes memory and installs host wiring.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97
 DEPLOY="$(cd "$(dirname "$0")/../.." && pwd)/deploy.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/deploy-trust.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT

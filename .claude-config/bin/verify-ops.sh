@@ -682,6 +682,71 @@ check_identity_exclusion() {
     || fail "harness-update-scan.sh is_excluded() does not list:$miss (a template sync could clobber a filled file, or list it as REMOVED before its content moved)"
 }
 
+# 24. Sandbox guards. A destructive tool deletes, moves or overwrites files it did
+# not create in the same run, at paths taken from HOME, the environment, its
+# arguments or a directory scan. In the harness OPS is ported from, a mutation
+# sweep of such a tool ran outside any sandbox and its real deleter wiped most
+# of a home directory (2026-10-15). So every test or self-test that names one
+# starts with the sandbox guard, refuses to run anywhere but inside
+# bin/sandbox-run (exit 97), and is started through it (bin/README.md,
+# "sandbox-run"). bin/sandbox-lint does the scan; its header states the
+# detection exactly. FAIL, not WARN: an unguarded destructive suite is that
+# wipe waiting for its next mutation run. The list, and why each is on it:
+#   branch-gc         deletes branches, moves worktrees to its trash, purges it
+#   pre-compact.sh    prunes snapshots by retention and runs branch-gc --apply
+#   memory-init       moves memory files into .claude-memory, removes old dirs
+#   deploy.sh         runs memory-init; replaces links, rc lines and units
+#   skills-vendor.sh  mirrors skill repos into SKILLS/<name> (rsync --delete)
+# Not listed, by the same rule: session-briefing.sh (reads only),
+# daily-sync.sh (commits and pulls its own checkout; its gc stage is branch-gc,
+# reached only through a stub in the suites that cover it), and tools that
+# replace only their own output or state file.
+OPS_DESTRUCTIVE_TOOLS=(branch-gc pre-compact.sh memory-init deploy.sh skills-vendor.sh)
+# Suites that reach a destructive tool without naming it (none today).
+OPS_SANDBOX_SUITES=()
+check_sandbox_guards() {
+  local b="$OPS/.claude-config/bin" f miss="" out rc summary v t py
+  local -a a=()
+  for f in sandbox-run sandbox-lint; do [ -x "$b/$f" ] || miss="$miss $f"; done
+  for f in sandbox-guard.sh sandbox_guard.py; do [ -f "$b/$f" ] || miss="$miss $f"; done
+  if [ -n "$miss" ]; then
+    fail "sandbox tooling missing or not executable in .claude-config/bin:$miss (destructive suites cannot run in the sandbox)"
+    return
+  fi
+  py="$(hook_python 2>/dev/null)" || { warn "no Python 3: cannot run sandbox-lint, so the sandbox guards are unchecked"; return; }
+  for t in "${OPS_DESTRUCTIVE_TOOLS[@]}"; do a+=(--tool "$t"); done
+  for t in "${OPS_SANDBOX_SUITES[@]}"; do a+=(--suite "$t"); done
+  out="$("$py" "$b/sandbox-lint" check --root "$OPS" "${a[@]}" 2>&1)"; rc=$?
+  summary="$(printf '%s\n' "$out" | grep "^SUMMARY"$'\t' | tail -n 1)"
+  v="$(printf '%s\n' "$out" | grep "^VIOLATION"$'\t' | cut -f2- | tr '\t' ' ')"
+  if [ "$rc" = 0 ] && [ -n "$summary" ] && [ -z "$v" ]; then
+    ok "sandbox guards: all $(printf '%s' "$summary" | cut -f2) destructive-tool suites start with the guard ($(printf '%s' "$summary" | cut -f4) files scanned)"
+  elif [ "$rc" = 1 ] && [ -n "$v" ]; then
+    fail "sandbox guard missing or misplaced ($(printf '%s\n' "$v" | grep -c .) suite(s); the guard line is in bin/sandbox-lint's header):"$'\n'"$(printf '%s\n' "$v" | head -20)"
+  else
+    fail "sandbox-lint could not check the suites (exit $rc): $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+  fi
+}
+
+# 25. Dangling memory links. memory-init replaces each
+# ~/.claude/projects/<workspace>/memory with a link into the git-synced pool
+# under .claude-memory/. A link whose pool directory no longer exists (a pool
+# pruned, renamed, or never pulled on this host) loads no memory at all and
+# saves nothing, silently. WARN, naming the fix: memory-init re-creates the
+# pool and the link. Host state, so it never FAILs the template.
+check_memory_links() {
+  local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" md dangling=""
+  for md in "$cfg"/projects/*/memory; do
+    [ -L "$md" ] || continue
+    [ -e "$md" ] || dangling="$dangling $(basename "$(dirname "$md")")"
+  done
+  if [ -n "$dangling" ]; then
+    warn "memory link(s) point at a pool that no longer exists:$dangling (run .claude-config/bin/memory-init to re-create the pool and the link)"
+  else
+    ok "every memory link under $cfg/projects resolves"
+  fi
+}
+
 main() {
   check_root
   check_root_instructions
@@ -709,6 +774,8 @@ main() {
   check_retired_context
   check_skills_vendored
   check_identity_exclusion
+  check_sandbox_guards
+  check_memory_links
   echo "verify-ops: $OKS ok · $WARNS warn · $FAILS fail ($(date -Is))"
   [ "$FAILS" -eq 0 ]
 }

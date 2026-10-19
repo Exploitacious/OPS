@@ -49,6 +49,7 @@
 # Exit: 0 = all pass; non-zero on first failure.
 set -uo pipefail
 
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97
 DEPLOY="$(cd "$(dirname "$0")/../.." && pwd)/deploy.sh"
 [ -f "$DEPLOY" ] || { echo "FAIL: deploy.sh missing at $DEPLOY" >&2; exit 1; }
 
