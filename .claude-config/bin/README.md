@@ -288,21 +288,18 @@ Runnable suites for the scripts above and for deploy's rc and core-link
 wiring (`deploy-rc-wiring-test.sh`, which extracts the real functions from
 `deploy.sh` and runs them against mktemp fixtures with a `sudo` shim, never a
 live rc). Each exits 0 when every case passes. A suite that starts with the
-sandbox guard exits 97 outside `sandbox-run`, so run every suite through it
-from the checkout root (the sandbox's own tests start `sandbox-run` and run
-bare):
+sandbox guard exits 97 outside `sandbox-run`, so every suite runs through it
+from the checkout root, except the sandbox's own tests, which start
+`sandbox-run` themselves. The command that runs them all, with the
+`*-selftest` scripts beside their subjects and the PowerShell suites, and
+exits non-zero if any fails, is step 2 of "Before you open the PR" in
+`CONTRIBUTING.md`; CI runs the same loops (`.github/workflows/gate.yml`).
+One file, one command: no second copy here to drift.
 
-```bash
-cd ~/OPS
-for t in .claude-config/bin/tests/*-test.sh .claude-config/bin/tests/*-test.py; do
-  case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
-  case "$t" in */sandbox-run-test.sh|*/sandbox-run-fd-test.py) "${run[@]}" "$t" || echo "FAILED: $t"; continue ;; esac
-  .claude-config/bin/sandbox-run --no-bind --no-net --ro-bind "$PWD" -- "${run[@]}" "$t" || echo "FAILED: $t"
-done
-```
-
-The older `*-selftest.sh` scripts beside their subjects (`verify-ops`,
-`model-probe`, `claude-window-ping`, and the hooks) work the same way.
+`tests/ci-gate-test.py` runs the gate's JavaScript check over every tracked
+`.js` and a set of fixtures. Under `sandbox-run` it skips when `node` lives in
+your HOME (nvm, fnm), which the sandbox hides, and says so; run it bare then.
+In GitHub Actions a missing `node` fails it instead.
 
 ## `grabit`: file transfer over Tailscale
 
