@@ -1,0 +1,2428 @@
+#!/usr/bin/env bash
+# branch-gc: remove local branches covered by a merged PR or origin's default,
+# and move their eligible linked worktrees into a trash purged after a week.
+# Default is --dry-run (prints the table, changes nothing).
+#
+# WHY this exists: merges here are squash merges, so `git branch --merged` and any
+# ancestry test against the default branch report landed work as unmerged. The old
+# `gh pr merge --delete-branch` cleanup was abandoned because worktrees share one
+# ref store and it rotated live checkouts, and nothing replaced it. Claude Code's
+# Agent worktrees (`<repo>/.claude/worktrees/*`, `worktree-agent-*` branches) and
+# T3 Code's per-thread worktrees are both left behind forever, so branches and
+# worktrees pile up (one project repo alone carried 170 local branches).
+#
+# The one unforgivable outcome is deleting unlanded work, so every rule below
+# fails closed:
+#   - A PR-backed branch is eligible only when a MERGED PR has that head name AND
+#     the local tip equals the PR's headRefOid or is an ancestor of it. The PR head
+#     is the only evidence that survives a squash; "tip is contained in the PR
+#     head" proves no tip commit exists that the PR did not carry. Every reflog
+#     oid must also be covered by that PR head or origin's default branch.
+#   - OPEN or CLOSED-only is report-only, forever. The default branch, the main
+#     checkout's branch, and main/master are never deleted.
+#   - A branch with NO PR is report-only unless it is fully contained in origin's
+#     default branch: the ref refs/remotes/origin/<default> exists and agrees with
+#     origin/HEAD when present, the tip and every oid in the branch's reflog are ancestors of
+#     it, and `git branch -d` (never -D) would accept it against the branch's
+#     upstream or the main checkout's HEAD. Why: Claude Code lanes leave behind
+#     worktree-agent-* branches with zero commits of their own; deleting a ref
+#     whose every commit origin already holds loses nothing, and the reflog check
+#     keeps a branch that once carried work it later reset away.
+#   - A worktree is quarantined only when its branch is eligible, it is not the
+#     main worktree, not locked, `git status --porcelain --ignored` is empty
+#     (untracked AND ignored files count as dirty: they are local research data or
+#     .env that no PR carried; the only exceptions are directories named exactly
+#     `__pycache__`, `.pytest_cache`, `node_modules` or `.astro`, and `dist` when
+#     its parent directory holds a package.json, all regenerable), it holds no
+#     submodules, no merge/rebase is in progress, no process of the invoking user
+#     has its cwd inside it, and no live T3 thread holds it. Nothing uses --force.
+#   - T3 threads (see refresh_t3): a thread mid-turn, waiting on approval or
+#     input, running a subagent or background task, snoozed into the future, or
+#     with an unparseable timestamp always holds its worktree. Otherwise a
+#     merged-PR worktree is held only while a thread's newest activity is at or
+#     after the PR's mergedAt AND within the last 72 hours; activity from before
+#     the merge is the finished review or build that produced the PR. Every other
+#     worktree keeps the plain 72h rule. T3 Code 0.1.0 (Orchestrator V2) keeps its
+#     state in statev2.sqlite; when that file sits beside the configured database
+#     only it is read. Any doubt about the T3 source (a missing table or column,
+#     zero threads, a database missing while a T3 server runtime file exists, a
+#     source older than the running server) blocks every worktree removal.
+#   - A no-PR worktree is quarantined only when its branch passes the containment
+#     rule above, it passes every worktree check above, no T3 thread touched it
+#     within 72h, and nothing in it was touched within 72h: the newest of its HEAD
+#     reflog entries, the mtime of every file in its admin dir
+#     (.git/worktrees/<name>, lock files aside), and the mtime of every tracked
+#     or untracked non-ignored file. Any read failure keeps it. (Not the admin
+#     dir's own mtime: branch-gc's HEAD.lock sweep bumps it; see idle_blocker.)
+#     Why the idle rule is mandatory: a lane that just started is clean with zero
+#     commits, and a lane working through absolute paths has no cwd inside it.
+#   - Quarantine, never delete. A worktree that passes every check is MOVED to
+#     ~/.local/state/ops/branch-gc-trash/<UTC>__<repo>__<branch>/worktree by a
+#     single rename, never a copy. The entry also holds manifest.json (repo,
+#     original path, branch, tip, PR, mergedAt, moved-at) and git-admin/, a copy of
+#     git's admin entry (per-worktree HEAD reflog). Only then is the admin entry
+#     dropped and the branch deleted. A refs/branch-gc-trash/ ref pins its tip
+#     until restore or purge, so Git GC cannot expire the objects restore needs.
+#     Why: the checks cannot lock out a non-Git
+#     writer, and `git worktree remove` deleted a file created after the last
+#     check; a moved directory keeps it, and a process still inside keeps working
+#     on the moved directory.
+#   - Quarantine is same-filesystem only. A worktree whose st_dev differs from the
+#     trash's, or whose rename still fails with EXDEV (a bind mount shares st_dev),
+#     is reported "quarantine skipped" and left in place with its branch; that is
+#     not a failure. Why: a rename keeps the directory's inode, so every byte a
+#     writer adds later through a retained cwd or open file lands in the trash. A
+#     copy-then-delete cannot: it destroyed a same-size edit made after the copy
+#     (no count or size check sees it) and a file written through a cwd after
+#     verification, and still reported success.
+#   - Purge: every --apply first deletes trash entries whose manifest parses and
+#     whose moved-at is older than BRANCH_GC_TRASH_DAYS (default 7; 0 never
+#     purges), logging each. An entry with a missing or malformed manifest is never
+#     purged; it is reported and fails the run until a human looks at it. An
+#     interrupted restore is held for recovery, regardless of its age.
+#   - Restore: `branch-gc --restore ENTRY` re-registers the worktree at its
+#     original path (`git worktree add --no-checkout`, re-creating the branch at the
+#     manifest tip if it is gone), renames the directory back and rebuilds the index
+#     from the locked tip. It refuses when the original path exists, the branch now
+#     points somewhere else, or the entry and the original path are on different
+#     filesystems (checked before anything changes; restore never copies either).
+#     ENTRY is a path or a bare entry name in the trash.
+#   - Process scope: only processes owned by the invoking user (/proc/<pid> uid
+#     == id -u) are inspected; a readable cwd inside the worktree blocks it. Other
+#     users' processes, and own-user ones whose cwd the kernel will not show
+#     (systemd --user, ssh-agent), are skipped and counted in the log. Treating
+#     them as blocking stopped every worktree on this host, and quarantine keeps
+#     their files if one did sit inside.
+#   - A worktree also waits out a grace window after its PR merged (default 2h):
+#     a lane that just landed often reuses its checkout for the next task, and
+#     the merge is the moment it is most likely to still be open in someone's
+#     editor. Two hours covers that handoff; the T3, process, dirty and idle
+#     checks carry the rest (it was 24h until 2026-09-24, when closeout and
+#     pre-compaction began running --apply and 24h kept most merged worktrees).
+#     Branches not checked out anywhere have no grace.
+#   - Any gh error, rate limit, auth failure, truncated or malformed result skips
+#     that whole repo and makes the run exit non-zero.
+#
+# Usage: branch-gc [--dry-run|--apply] [--remote] [--tsv] [REPO_PATH...]
+#        branch-gc --restore TRASH_ENTRY
+#   --tsv prints the rows tab-separated (for tests and scripts) instead of aligned.
+#   Dry-run ACTION is `remove` for a branch, `quarantine` for a worktree plus its
+#   branch, `purge` for an expired trash entry; --apply prints the past tense.
+#   Repos: args, else BRANCH_GC_REPOS (colon-separated), else ~/OPS, every git
+#   repo at ~/OPS/PROJECTS/*/*, and ~/linuxploitacious. Linked worktrees in the
+#   list are folded into their main repo. A listed path that this run itself
+#   quarantined (the default list holds every linked worktree, and the main repo
+#   is scanned first) is gone by the time its turn comes: it gets a `skip` row
+#   and a log NOTE, not an error. Any other listed path that is not a git repo,
+#   including one that vanished for another reason, still fails the run.
+# Env: BRANCH_GC_LOG (default ~/.local/state/ops/branch-gc.log),
+#   BRANCH_GC_T3_DB (default ${T3CODE_HOME:-~/.t3}/userdata/state.sqlite; a
+#   statev2.sqlite and server-runtime.json are looked for in the same directory
+#   only, so the V2 file beside it wins and a fixture never reads the live home),
+#   BRANCH_GC_PROC_ROOT (default /proc; fixture override for tests),
+#   BRANCH_GC_T3_STALE_HOURS (default 72), BRANCH_GC_PR_LIMIT (default 5000),
+#   BRANCH_GC_GH_TIMEOUT (seconds per gh call, default 180),
+#   BRANCH_GC_WORKTREE_GRACE_HOURS (hours after mergedAt before a worktree may go,
+#   default 2; 0 disables the grace),
+#   BRANCH_GC_TRASH_DIR (default ~/.local/state/ops/branch-gc-trash),
+#   BRANCH_GC_TRASH_DAYS (days a quarantined worktree is kept, default 7; 0 never
+#   purges),
+#   BRANCH_GC_SKIP_SECONDS (default 600; 0 never skips): an --apply skips a repo
+#   whose last clean local --apply finished this recently on the identical refs,
+#   worktree list and mode, and reports the skip,
+#   BRANCH_GC_DEADLINE (epoch seconds, default none): once passed, no further
+#   repo or branch is started; the branch in progress finishes first.
+# Exit: 0 clean run; 1 any repo skipped for an error or any action failed; 2 usage.
+set -euo pipefail
+
+# No optional index-lock writes: a dry run must not touch any repo, and a
+# status refresh must not contend with a live lane's own git commands.
+# Replacement objects can forge an ancestry proof without changing either oid.
+export LC_ALL=C GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1 GIT_NO_REPLACE_OBJECTS=1
+# Only github.com origins are supported; an inherited enterprise GH_HOST must
+# not supply the merge evidence for a different repository with the same name.
+export GH_HOST=github.com
+
+MODE=dry-run
+MODE_FLAG=0
+REMOTE=0
+TSV=0
+RESTORE_ENTRY=""
+ARGS_REPOS=()
+
+usage() {
+    sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) MODE=dry-run; MODE_FLAG=1 ;;
+        --apply)   MODE=apply; MODE_FLAG=1 ;;
+        --remote)  REMOTE=1 ;;
+        --tsv)     TSV=1 ;;
+        --restore) [ $# -ge 2 ] && [ -n "$2" ] || { echo "branch-gc: --restore needs a trash entry" >&2; exit 2; }
+                   RESTORE_ENTRY="$2"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; ARGS_REPOS+=("$@"); break ;;
+        -*) echo "branch-gc: unknown option: $1" >&2; exit 2 ;;
+        *)  ARGS_REPOS+=("$1") ;;
+    esac
+    shift
+done
+if [ -n "$RESTORE_ENTRY" ]; then
+    if [ "$MODE_FLAG" = 1 ] || [ "$REMOTE" = 1 ] || [ ${#ARGS_REPOS[@]} -gt 0 ]; then
+        echo "branch-gc: --restore takes one trash entry and no other mode, --remote or repo" >&2; exit 2
+    fi
+    MODE=restore
+fi
+
+LOG_FILE="${BRANCH_GC_LOG:-$HOME/.local/state/ops/branch-gc.log}"
+T3_DB="${BRANCH_GC_T3_DB:-${T3CODE_HOME:-$HOME/.t3}/userdata/state.sqlite}"
+PROC_ROOT="${BRANCH_GC_PROC_ROOT:-/proc}"
+T3_STALE_HOURS="${BRANCH_GC_T3_STALE_HOURS:-72}"
+PR_LIMIT="${BRANCH_GC_PR_LIMIT:-5000}"
+GH_TIMEOUT="${BRANCH_GC_GH_TIMEOUT:-180}"
+WT_GRACE_HOURS="${BRANCH_GC_WORKTREE_GRACE_HOURS:-2}"
+# Not configurable on purpose: a no-PR worktree has no merge evidence at all,
+# so this idle window is the only thing between a just-started lane and the trash.
+NO_PR_IDLE_HOURS=72
+TRASH_ROOT="${BRANCH_GC_TRASH_DIR:-$HOME/.local/state/ops/branch-gc-trash}"
+TRASH_DAYS="${BRANCH_GC_TRASH_DAYS:-7}"
+PYTHON="${BRANCH_GC_PYTHON:-python3}"
+# Skip window (2026-10-15). Closeout runs --apply on every repo a session
+# touched, often seconds after the PreCompact hook ran it on the cwd's repo, and
+# a large repo took minutes each time (p90 67 s, max 787 s on this host). A repo
+# whose last clean local --apply finished less than SKIP_SECONDS ago, on a
+# fingerprint identical to now (every ref, the worktree list, the mode, and the
+# trash, grace, T3 and PR-limit settings above), is skipped with a row saying
+# so. A skip can only leave work for a later run, never remove anything. What it
+# can delay, by at most the window: a PR merged on GitHub with no local ref
+# change yet, a grace or idle window running out, a T3 thread going idle. Only a
+# run with no error on that repo records a fingerprint.
+SKIP_SECONDS="${BRANCH_GC_SKIP_SECONDS:-600}"
+# Soft deadline. The PreCompact hook runs branch-gc under a hard timeout whose
+# kill can land inside a quarantine (worktree moved, manifest or admin copy not
+# yet written) or a deletion (HEAD.lock held in every worktree of the repo). It
+# sets this below its timeout, so the run stops between branches instead.
+DEADLINE="${BRANCH_GC_DEADLINE:-0}"
+
+for n in "$T3_STALE_HOURS" "$PR_LIMIT" "$GH_TIMEOUT" "$WT_GRACE_HOURS" "$TRASH_DAYS" "$SKIP_SECONDS" "$DEADLINE"; do
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "branch-gc: numeric env value expected, got '$n'" >&2; exit 2; }
+done
+for bin in git gh jq awk realpath find stat "$PYTHON"; do
+    command -v "$bin" >/dev/null 2>&1 || { echo "branch-gc: required binary not found: $bin" >&2; exit 1; }
+done
+
+START_DIR="$PWD"
+LOG_FILE="$(realpath -m -- "$LOG_FILE")"
+# Keep the configured filename visible: resolving a final V1 symlink first
+# would look for the V2 sibling beside its old target and miss the live source.
+T3_DB="$(realpath -m -- "$(dirname -- "$T3_DB")")/$(basename -- "$T3_DB")"
+PROC_ROOT="$(realpath -m -- "$PROC_ROOT")"
+# Keep a final symlink visible so purge cannot silently adopt its target as trash.
+TRASH_ROOT="$(realpath -ms -- "$TRASH_ROOT")"
+mkdir -p "$(dirname "$LOG_FILE")"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+ROWS="$TMP/rows.tsv"; : > "$ROWS"
+FAILED=0
+
+# Serialize runs: the daily timer and a manual --apply must not interleave.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$(dirname "$LOG_FILE")/branch-gc.lock"
+    flock -n 9 || { echo "branch-gc: another run holds $(dirname "$LOG_FILE")/branch-gc.lock" >&2; exit 1; }
+fi
+
+# Our own cwd must never sit inside a worktree we might remove.
+cd /
+
+TIMEOUT=()
+command -v timeout >/dev/null 2>&1 && TIMEOUT=(timeout "$GH_TIMEOUT")
+
+log() { printf '[%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$MODE" "$*" >> "$LOG_FILE"; }
+row() {
+    local value sep=""
+    for value in "$1" "$2" "${3/#$HOME/\~}" "$4" "$5" "$6"; do
+        value="${value//\\/\\\\}"; value="${value//$'\t'/\\t}"; value="${value//$'\n'/\\n}"; value="${value//$'\r'/\\r}"
+        printf '%s%s' "$sep" "$value" >> "$ROWS"; sep=$'\t'
+    done
+    printf '\n' >> "$ROWS"
+}
+fail() { FAILED=1; FAIL_COUNT=$((FAIL_COUNT+1)); log "ERROR $*"; }
+FAIL_COUNT=0
+past_deadline() { [ "$DEADLINE" -gt 0 ] && [ "$(date +%s)" -ge "$DEADLINE" ]; }
+
+# repo_fingerprint MAIN: one hash over every ref, the worktree list, the mode and
+# the settings a local --apply decides from, the inputs a skip may assume unchanged.
+repo_fingerprint() {
+    { printf 'mode %s remote %s trash %s grace %s t3 %s %s proc %s prs %s\n' "$MODE" "$REMOTE" \
+        "$TRASH_ROOT" "$WT_GRACE_HOURS" "$T3_STALE_HOURS" "$T3_SOURCE:${T3_SRC_PATH:-$T3_DB}" "$PROC_ROOT" "$PR_LIMIT" \
+        && git -C "$1" for-each-ref --format='%(objectname) %(refname)' \
+        && git -C "$1" worktree list --porcelain -z; } | sha256sum | cut -c1-64
+}
+skip_state() { printf '%s/branch-gc-last/%s' "$(dirname "$LOG_FILE")" "$(printf '%s' "$1" | sha256sum | cut -c1-16)"; }
+
+log "===== start (remote=$REMOTE) ====="
+
+# --- repo list ----------------------------------------------------------------
+REPOS=()
+if [ ${#ARGS_REPOS[@]} -gt 0 ]; then
+    REPOS=("${ARGS_REPOS[@]}")
+elif [ -n "${BRANCH_GC_REPOS:-}" ]; then
+    IFS=: read -r -a REPOS <<< "$BRANCH_GC_REPOS"
+else
+    [ -e "$HOME/OPS/.git" ] && REPOS+=("$HOME/OPS")
+    for d in "$HOME"/OPS/PROJECTS/*/*; do
+        [ -e "$d/.git" ] && REPOS+=("$d")
+    done
+    [ -e "$HOME/linuxploitacious/.git" ] && REPOS+=("$HOME/linuxploitacious")
+fi
+for i in "${!REPOS[@]}"; do
+    case "${REPOS[i]}" in /*) ;; *) REPOS[i]="$START_DIR/${REPOS[i]}" ;; esac
+done
+
+# --- T3 Code thread state -------------------------------------------------------
+# T3 creates a worktree per thread and never removes it, even when the thread is
+# deleted. A thread with deleted_at NULL still owns its worktree until it has been
+# idle for T3_STALE_HOURS; archived threads count (on this host 317 of the 318
+# threads that own a worktree are archived). A HARD hold (T3_HARD=1) ignores the
+# merged-PR carve-out in worktree_blocker. T3_NEWEST is the newest activity
+# across the path's threads in epoch seconds, rounded up so an equal-second tie
+# with a PR's mergedAt counts as after the merge. Both readers below print the
+# same TSV (path, verdict, hard, newest_epoch, detail), so worktree_blocker and
+# the report read either one unchanged. Read-only by construction: mode=ro URI
+# plus PRAGMA query_only.
+#
+# Which file (2026-10-17, T3 0.1.0 = Orchestrator V2). V2 imported the V1
+# state.sqlite into statev2.sqlite and never writes the V1 file again, so a V1
+# read after the upgrade reports ok on frozen data. One directory decides: the
+# one holding BRANCH_GC_T3_DB (default ${T3CODE_HOME:-~/.t3}/userdata).
+#   - statev2.sqlite there (even a dangling link): the V2 reader; the V1 file is
+#     never opened. The upgrade's rollback moves statev2.sqlite* aside, which
+#     selects the V1 reader again.
+#   - else the configured file: the V1 reader (rollback mode). It refuses a file
+#     holding V2 tables (statev2.sqlite carries a frozen copy of the V1 tables)
+#     and a V2 sibling that appeared after this check.
+#   - neither: absent (no T3 on this host) only when that directory holds no
+#     server-runtime.json either. With one, a T3 server exists and its database is
+#     missing: unreadable. Why: "missing means no T3" made a renamed or compressed
+#     database (migration-path Phase E) read as a host with no threads at all.
+# Only that directory is consulted, never T3CODE_HOME beside an explicit
+# BRANCH_GC_T3_DB, so a test or fixture can never read the live T3 home.
+#
+# V1 reader: latest activity is the max of projection_threads.updated_at,
+# latest_user_message_at, projection_thread_sessions.updated_at and the newest
+# message/activity row; hard holds are a turn in flight (active_turn_id set or a
+# session status outside the quiescent set), pending approval or input, a future
+# snooze and an unparseable timestamp. It re-reads per candidate, as before.
+#
+# V2 reader (table and column names verified read-only against the live
+# statev2.sqlite of T3 0.1.0 on 2026-10-17; status vocabularies from the 0.1.0
+# server's schema and partial indexes). Latest activity is the max of
+# orchestration_v2_projection_threads.updated_at, legacy_imports.source_updated_at
+# (an imported thread whose transcript is not hydrated has no V2 messages), the
+# thread's newest message created_at and updated_at, and its runs' requested_at
+# and completed_at. Not lastVisitedAt: a UI visit (thread.visited) moves only that
+# field, and a glance is not work. Hard holds:
+#   - a run whose status is not terminal (completed, interrupted, failed,
+#     cancelled, rolled_back): queued, preparing, starting, running, waiting, or
+#     a status this code does not know;
+#   - a runtime request not resolved, expired or cancelled (approval, user input,
+#     dynamic tool call, auth refresh);
+#   - a node whose status is not terminal (completed, interrupted, failed,
+#     cancelled, rolled_back: the 0.1.0 server's own settledNodeStatuses): idle,
+#     pending, running, waiting, or a status this code does not know (2026-10-17;
+#     until then only the live index's four statuses held, so an unknown one such
+#     as 'paused' read as settled). Read per worktree thread; why at NODE_HOLDS;
+#   - a subagent not completed, failed, cancelled or interrupted, held on its
+#     parent thread and on its child thread;
+#   - a command, dynamic tool or subagent turn item still in flight (the server's
+#     turn_items_shell_pending_idx predicate). Not provider_threads.payload_json
+#     pendingBackgroundTasks: it read [] while the shell showed a live subagent,
+#     because the shell derives that field from turn items, nodes and subagents;
+#   - snoozedUntil in the future, and any unparseable timestamp.
+# Fail closed (unreadable, every worktree removal blocked, run fails): a required
+# table or column missing, zero thread rows, a thread payload or worktreePath that
+# does not parse, and the stale-source canary: the newest event must be a V2
+# event no older than the running server's startedAt (server-runtime.json). Why
+# the canary: a frozen copy (a backup, the V1 file, a dead statev2 beside a newer
+# store) has every table and parses cleanly. Its one false alarm is a restart
+# with no activity since; opening any thread writes an event and clears it.
+#
+# Once per run (V2). The snapshot is taken once, in one read transaction that
+# also records the event high-water. Each candidate then rechecks only events
+# written after it: a thread event other than thread.visited whose thread now
+# names that worktree, or has no projection row, holds it for this run. Why both:
+# a full read per candidate repeats the whole query on a live 4 GB database, and
+# the recheck keeps the property that T3 activity arriving during the GitHub
+# lookup still blocks the removal (branch-gc-safety-test pins it).
+T3_STATE=absent
+T3_SOURCE=none T3_SRC_PATH="" T3_HW="" T3_DEV="" T3_INO=""
+T3_DIR="$(dirname "$T3_DB")"
+T3_V2_DB="$T3_DIR/statev2.sqlite"
+T3_RUNTIME="$T3_DIR/server-runtime.json"
+if [ -e "$T3_V2_DB" ] || [ -L "$T3_V2_DB" ]; then
+    T3_SOURCE=v2; T3_SRC_PATH="$T3_V2_DB"
+elif [ -e "$T3_DB" ]; then
+    T3_SOURCE=v1; T3_SRC_PATH="$T3_DB"
+elif [ -e "$T3_RUNTIME" ] || [ -L "$T3_RUNTIME" ]; then
+    T3_SOURCE=missing
+fi
+declare -A T3_VERDICT=() T3_DETAIL=() T3_HARD=() T3_NEWEST=()
+
+t3_read_v1() {
+    "$PYTHON" - "$T3_DB" "$T3_STALE_HOURS" "$T3_V2_DB" <<'PY'
+import datetime, math, os, sqlite3, sys, urllib.parse
+db, stale_h, v2_sibling = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+# The bash side chose V1 because no statev2.sqlite was there; one that appeared
+# since means an upgrade landed mid-run, and the V1 file is frozen from now on.
+if os.path.lexists(v2_sibling):
+    raise SystemExit("T3 V2 database %s appeared beside %s; refusing the V1 read" % (v2_sibling, db))
+con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(db)), uri=True)
+con.execute("PRAGMA query_only=1")
+# statev2.sqlite also carries the V1 projection tables, frozen at the import, so
+# the V1 query below would read ok on stale data from it under any other name.
+if con.execute("select 1 from sqlite_master where type = 'table' and name = 'orchestration_v2_projection_threads'").fetchone():
+    raise SystemExit("%s is a T3 V2 database; its V1 tables are a frozen copy" % db)
+now = datetime.datetime.now(datetime.timezone.utc)
+QUIESCENT = {"idle", "ready", "interrupted", "stopped", "error"}
+def parse(ts):
+    d = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+# SQL max(TEXT) compares spellings, not instants, and can hide an invalid older
+# row. Parse every activity timestamp before selecting the newest one.
+class LatestTimestamp:
+    def __init__(self):
+        self.latest, self.invalid = None, False
+    def step(self, ts):
+        if ts is None:
+            return
+        try:
+            value = parse(ts)
+            self.latest = max(self.latest, value) if self.latest else value
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            self.invalid = True
+    def finalize(self):
+        return "invalid" if self.invalid else self.latest.isoformat() if self.latest else None
+con.create_aggregate("latest_timestamp", 1, LatestTimestamp)
+rows = con.execute("""
+  select t.thread_id, t.worktree_path, t.updated_at, t.latest_user_message_at,
+         t.pending_approval_count, t.pending_user_input_count, t.snoozed_until,
+         s.status, s.active_turn_id, s.updated_at,
+         (select latest_timestamp(created_at) from projection_thread_messages m where m.thread_id = t.thread_id),
+         (select latest_timestamp(updated_at) from projection_thread_messages m where m.thread_id = t.thread_id),
+         (select latest_timestamp(created_at) from projection_thread_activities a where a.thread_id = t.thread_id)
+  from projection_threads t
+  left join projection_thread_sessions s on s.thread_id = t.thread_id
+  where t.worktree_path is not null and t.worktree_path != '' and t.deleted_at is null
+""").fetchall()
+out = {}
+for (tid, wt, t_upd, t_msg, p_appr, p_input, snooze, s_status, s_turn, s_upd, m_c, m_u, a_c) in rows:
+    if not os.path.isabs(wt) or any(c in wt for c in "\t\r\n"):
+        raise SystemExit("ambiguous worktree_path for thread %s" % tid)
+    path = os.path.realpath(wt)
+    active, hard, why, latest = False, False, "", None
+    try:
+        latest = max(parse(x) for x in (t_upd, t_msg, s_upd, m_c, m_u, a_c) if x is not None)
+        idle_h = (now - latest).total_seconds() / 3600.0
+        why = "thread %s last active %s (%.0fh ago)" % (tid[:8], latest.strftime("%Y-%m-%dT%H:%MZ"), idle_h)
+        if idle_h < stale_h:
+            active = True
+        if snooze and parse(snooze) > now:
+            active, hard, why = True, True, why + ", snoozed"
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        active, hard, why, latest = True, True, "thread %s has an unparseable timestamp" % tid[:8], None
+    if s_turn or (s_status is not None and s_status not in QUIESCENT):
+        active, hard, why = True, True, why + ", session %s" % (s_status or "turn active")
+    if (p_appr or 0) > 0 or (p_input or 0) > 0:
+        active, hard, why = True, True, why + ", waiting on approval/input"
+    out.setdefault(path, []).append((active, latest, why, hard))
+EPOCH = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+for path, entries in sorted(out.items()):
+    # Verdict: any live thread active. Detail: the newest activity across all
+    # threads on this worktree, plus the reason of an older thread if that one
+    # (not the newest) is what keeps it active.
+    active = any(e[0] for e in entries)
+    hard = any(e[3] for e in entries)
+    newest = max(entries, key=lambda e: e[1] or EPOCH)
+    why = newest[2]
+    if active and not newest[0]:
+        why += "; " + next(e[2] for e in entries if e[0])
+    newest_epoch = "%d" % math.ceil(newest[1].timestamp()) if newest[1] else "-"
+    print("%s\t%s\t%d\t%s\t%s" % (path, "active" if active else "stale", 1 if hard else 0, newest_epoch, why))
+PY
+}
+
+t3_read_v2() {
+    "$PYTHON" - "$T3_V2_DB" "$T3_STALE_HOURS" "$T3_RUNTIME" "$TMP/t3.hw" <<'PY'
+import collections, datetime, json, math, os, sqlite3, sys, urllib.parse
+db, stale_h, runtime, hw_out = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
+UTC = datetime.timezone.utc
+now = datetime.datetime.now(UTC)
+def parse(ts):
+    if not isinstance(ts, str):
+        raise TypeError("timestamp %r is not a string" % (ts,))
+    d = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=UTC)
+def clean(s):
+    return "".join(c if c.isprintable() else "?" for c in str(s))
+def short(tid):
+    # Root thread ids are UUIDs; subagent child ids are "thread:provider:...:<id>".
+    return clean(str(tid).rsplit(":", 1)[-1][:8])
+# SQL max(TEXT) compares spellings, not instants, and can hide an invalid older
+# row. Parse every activity timestamp before selecting the newest one.
+class LatestTimestamp:
+    def __init__(self):
+        self.latest, self.invalid = None, False
+    def step(self, ts):
+        if ts is None:
+            return
+        try:
+            value = parse(ts)
+            self.latest = max(self.latest, value) if self.latest else value
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            self.invalid = True
+    def finalize(self):
+        return "invalid" if self.invalid else self.latest.isoformat() if self.latest else None
+# isolation_level=None plus an explicit BEGIN: every read below, the high-water
+# included, comes from one WAL snapshot while T3 keeps writing.
+source_stat = os.stat(db)
+source_identity = (source_stat.st_dev, source_stat.st_ino)
+con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(db)), uri=True,
+                      timeout=10, isolation_level=None)
+con.execute("PRAGMA query_only=1")
+con.create_aggregate("latest_timestamp", 1, LatestTimestamp)
+con.execute("BEGIN")
+REQUIRED = {
+    "orchestration_v2_projection_threads": {"thread_id", "updated_at", "archived_at", "deleted_at", "payload_json"},
+    "orchestration_v2_legacy_imports": {"thread_id", "source_updated_at"},
+    "orchestration_v2_projection_messages": {"thread_id", "created_at", "updated_at"},
+    "orchestration_v2_projection_runs": {"thread_id", "status", "requested_at", "completed_at"},
+    "orchestration_v2_projection_runtime_requests": {"thread_id", "status"},
+    "orchestration_v2_projection_nodes": {"thread_id", "kind", "status"},
+    "orchestration_v2_projection_subagents": {"thread_id", "child_thread_id", "status"},
+    "orchestration_v2_projection_turn_items": {"thread_id", "type", "status"},
+    "orchestration_events": {"sequence", "occurred_at", "application_event_version",
+                             "aggregate_kind", "stream_id", "event_type"},
+}
+for table, cols in sorted(REQUIRED.items()):
+    have = {r[1] for r in con.execute("select * from pragma_table_info(?)", (table,))}
+    if not have:
+        raise SystemExit("T3 V2 schema: table %s is missing" % table)
+    missing = sorted(cols - have)
+    if missing:
+        raise SystemExit("T3 V2 schema: %s has no column %s" % (table, ", ".join(missing)))
+threads = con.execute("select count(*) from orchestration_v2_projection_threads").fetchone()[0]
+if not threads:
+    raise SystemExit("T3 V2 database has zero threads, so it is not the live state")
+top = con.execute("select sequence, occurred_at, application_event_version from orchestration_events"
+                  " where sequence = (select max(sequence) from orchestration_events)").fetchone()
+if top is None:
+    raise SystemExit("T3 V2 database has no events, so it is not the live state")
+hw, newest_at, version = top
+if not isinstance(hw, int) or version != 2:
+    raise SystemExit("newest event (sequence %r) has application_event_version %r, not 2: "
+                     "T3 V2 is not writing this file" % (hw, version))
+try:
+    newest = parse(newest_at)
+except (ValueError, TypeError, OverflowError):
+    raise SystemExit("newest event timestamp %r does not parse" % (newest_at,))
+if os.path.lexists(runtime):
+    try:
+        with open(runtime, encoding="utf-8") as f:
+            started_at = json.load(f)["startedAt"]
+        started = parse(started_at)
+    except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError, OverflowError) as e:
+        raise SystemExit("T3 server runtime %s has no readable startedAt (%s: %s)" % (runtime, type(e).__name__, e))
+    if newest < started:
+        raise SystemExit("stale source: the newest event in %s (%s) predates the T3 server start (%s); either "
+                         "the server writes another file or nothing happened since its restart (opening any "
+                         "thread writes an event)" % (db, newest_at, started_at))
+holds = collections.defaultdict(set)
+for tid, status in con.execute(
+        "select thread_id, status from orchestration_v2_projection_runs where status is null"
+        " or status not in ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')"):
+    holds[tid].add("run %s" % clean(status))
+for tid, status in con.execute(
+        "select thread_id, status from orchestration_v2_projection_runtime_requests where status is null"
+        " or status not in ('resolved', 'expired', 'cancelled')"):
+    holds[tid].add("runtime request %s" % clean(status))
+# Nodes (2026-10-17): every status outside the verified terminal set holds, the
+# same rule as runs, so a status this code does not know is a hold, never a pass
+# (a review reproduced 'paused' reading as settled in another T3 reader). The
+# set is the 0.1.0 server's settledNodeStatuses (its ProjectionStore, read from
+# ~/.t3/runtime/versions/0.1.0/t3). Its node schema
+# (OrchestrationV2ExecutionNode.status) also allows idle, pending, running and
+# waiting; idle is neither settled nor in the live index, so it holds as well
+# (the live database had no idle node on 2026-10-17). 'starting' is in the live
+# index but not in the schema; it holds like any other unknown status.
+# The read is per thread that owns a worktree (in the loop below), not one query
+# over the table: NOT IN cannot use the server's partial live index, and a whole
+# table scan grows with every tool call (live, 2026-10-17, read-only: 2,695 rows
+# of about 1 KB five hours after the upgrade, a 2.5 ms SCAN; the per-thread form
+# is a SEARCH on orchestration_v2_projection_nodes_thread_run_idx (thread_id=?),
+# 1.5 ms for 318 worktree threads). Only those threads' holds are ever read, so
+# the verdicts are the ones a whole-table read gives.
+NODE_SETTLED = ("completed", "interrupted", "failed", "cancelled", "rolled_back")
+NODE_HOLDS = ("select kind, status from orchestration_v2_projection_nodes where thread_id = ?"
+              " and (status is null or status not in (%s))" % ", ".join("'%s'" % s for s in NODE_SETTLED))
+# Exactly the server's partial-index predicate, so this stays an index read as the
+# turn-item table grows by one row per tool call.
+for tid, kind, status in con.execute(
+        "select thread_id, type, status from orchestration_v2_projection_turn_items"
+        " where type in ('command_execution', 'dynamic_tool', 'subagent')"
+        " and status not in ('completed', 'interrupted', 'failed', 'cancelled')"):
+    holds[tid].add("background %s %s" % (clean(kind), clean(status)))
+for tid, child, status in con.execute(
+        "select thread_id, child_thread_id, status from orchestration_v2_projection_subagents where status is null"
+        " or status not in ('completed', 'failed', 'cancelled', 'interrupted')"):
+    holds[tid].add("subagent %s" % clean(status))
+    if child is not None:
+        holds[child].add("subagent %s" % clean(status))
+rows = con.execute("""
+  select t.thread_id, t.updated_at, t.deleted_at, t.archived_at, t.payload_json, li.source_updated_at,
+         (select latest_timestamp(m.created_at) from orchestration_v2_projection_messages m where m.thread_id = t.thread_id),
+         (select latest_timestamp(m.updated_at) from orchestration_v2_projection_messages m where m.thread_id = t.thread_id),
+         (select latest_timestamp(r.requested_at) from orchestration_v2_projection_runs r where r.thread_id = t.thread_id),
+         (select latest_timestamp(r.completed_at) from orchestration_v2_projection_runs r where r.thread_id = t.thread_id)
+  from orchestration_v2_projection_threads t
+  left join orchestration_v2_legacy_imports li on li.thread_id = t.thread_id
+""").fetchall()
+out, n_wt = {}, 0
+for (tid, t_upd, t_del, t_arch, payload, src_upd, m_c, m_u, r_req, r_done) in rows:
+    # Validate before filtering on worktreePath: json_extract returns NULL for
+    # scalar/array payloads too, silently discarding a corrupt ownership row.
+    try:
+        p = json.loads(payload)
+    except (TypeError, ValueError):
+        raise SystemExit("thread %s has a payload_json that does not parse" % short(tid))
+    if not isinstance(p, dict):
+        raise SystemExit("thread %s has a payload_json that is not an object" % short(tid))
+    wt = p.get("worktreePath")
+    if wt is None or wt == "":
+        continue
+    if not isinstance(wt, str) or not os.path.isabs(wt) or any(c in wt for c in "\t\r\n"):
+        raise SystemExit("ambiguous worktreePath for thread %s" % short(tid))
+    # Deleted only when the column and the payload agree; a disagreement keeps
+    # the thread, the side that holds its worktree.
+    if t_del is not None and p.get("deletedAt") is not None:
+        continue
+    n_wt += 1
+    path = os.path.realpath(wt)
+    for kind, status in con.execute(NODE_HOLDS, (tid,)):
+        holds[tid].add("node %s %s" % (clean(kind), clean(status)))
+    active, hard, why, latest = False, False, "", None
+    try:
+        latest = max(parse(x) for x in (t_upd, src_upd, m_c, m_u, r_req, r_done) if x is not None)
+        idle_h = (now - latest).total_seconds() / 3600.0
+        why = "thread %s last active %s (%.0fh ago)" % (
+            short(tid), latest.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"), idle_h)
+        if idle_h < stale_h:
+            active = True
+        snooze = p.get("snoozedUntil")
+        if snooze is not None and parse(snooze) > now:
+            active, hard, why = True, True, why + ", snoozed"
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        active, hard, why, latest = True, True, "thread %s has an unparseable timestamp" % short(tid), None
+    if t_arch is not None:
+        why += ", archived"
+    if holds.get(tid):
+        active, hard, why = True, True, why + ", " + ", ".join(sorted(holds[tid]))
+    out.setdefault(path, []).append((active, latest, why, hard))
+EPOCH = datetime.datetime.min.replace(tzinfo=UTC)
+n_hard = 0
+for path, entries in sorted(out.items()):
+    # Same aggregation as the V1 reader: any active thread holds the path, and
+    # the detail names the newest activity plus an older thread that holds it.
+    active = any(e[0] for e in entries)
+    hard = any(e[3] for e in entries)
+    n_hard += hard
+    newest = max(entries, key=lambda e: e[1] or EPOCH)
+    why = newest[2]
+    if active and not newest[0]:
+        why += "; " + next(e[2] for e in entries if e[0])
+    newest_epoch = "%d" % math.ceil(newest[1].timestamp()) if newest[1] else "-"
+    print("%s\t%s\t%d\t%s\t%s" % (path, "active" if active else "stale", 1 if hard else 0, newest_epoch, why))
+con.execute("COMMIT")
+source_stat = os.stat(db)
+if (source_stat.st_dev, source_stat.st_ino) != source_identity:
+    raise SystemExit("T3 V2 source changed during the snapshot")
+with open(hw_out, "w", encoding="utf-8") as f:
+    f.write("%d\t%d\t%d\t%d\t%d\t%d\t%d\n" % (hw, threads, n_wt, len(out), n_hard, *source_identity))
+PY
+}
+
+# t3_recheck_v2 REALPATH: prints why a thread on REALPATH changed after the run's
+# V2 snapshot (empty when none did); non-zero when the database cannot be read.
+t3_recheck_v2() {
+    "$PYTHON" - "$T3_V2_DB" "$T3_HW" "$1" "$T3_RUNTIME" "$T3_DEV" "$T3_INO" <<'PY'
+import datetime, json, os, sqlite3, sys, urllib.parse
+db, hw, cand, runtime = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+source_identity = (int(sys.argv[5]), int(sys.argv[6]))
+def check_source():
+    source_stat = os.stat(db)
+    if (source_stat.st_dev, source_stat.st_ino) != source_identity:
+        raise SystemExit("T3 V2 source changed after the snapshot")
+def parse(ts):
+    if not isinstance(ts, str):
+        raise TypeError("timestamp %r is not a string" % (ts,))
+    d = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+def short(tid):
+    return "".join(c if c.isprintable() else "?" for c in str(tid).rsplit(":", 1)[-1][:8])
+check_source()
+con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(db)), uri=True,
+                      timeout=10, isolation_level=None)
+con.execute("PRAGMA query_only=1")
+con.execute("BEGIN")
+# An empty event delta proves nothing if a database was replaced/restored or a
+# new server started against another source. Reapply the canary on this snapshot.
+top = con.execute("select sequence, occurred_at, application_event_version from orchestration_events"
+                  " where sequence = (select max(sequence) from orchestration_events)").fetchone()
+if top is None or not isinstance(top[0], int) or top[0] < hw:
+    raise SystemExit("T3 V2 event high-water regressed after the snapshot")
+if top[2] != 2:
+    raise SystemExit("newest event has application_event_version %r, not 2" % (top[2],))
+try:
+    newest = parse(top[1])
+except (ValueError, TypeError, OverflowError):
+    raise SystemExit("newest event timestamp %r does not parse" % (top[1],))
+if os.path.lexists(runtime):
+    try:
+        with open(runtime, encoding="utf-8") as f:
+            started = parse(json.load(f)["startedAt"])
+    except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError, OverflowError) as e:
+        raise SystemExit("T3 server runtime %s has no readable startedAt (%s: %s)" % (runtime, type(e).__name__, e))
+    if newest < started:
+        raise SystemExit("stale source: newest event predates the T3 server start during recheck")
+# The unary + keeps SQLite off idx_orch_events_stream_sequence (aggregate_kind
+# first), which walks every thread event ever written; the rowid range on
+# sequence reads only the events written after the snapshot.
+streams = [r[0] for r in con.execute(
+    "select distinct stream_id from orchestration_events where sequence > ?"
+    " and +application_event_version = 2 and +aggregate_kind = 'thread'"
+    " and +event_type != 'thread.visited'", (hw,))]
+# A parent's event can start a subagent without changing the child's projection
+# or emitting a child event. Carry the same child hold as the initial snapshot.
+affected = set(streams)
+for tid in streams:
+    affected.update(r[0] for r in con.execute(
+        "select child_thread_id from orchestration_v2_projection_subagents where thread_id = ?"
+        " and child_thread_id is not null and (status is null"
+        " or status not in ('completed', 'failed', 'cancelled', 'interrupted'))", (tid,)))
+reasons = []
+for tid in sorted(affected):
+    row = con.execute("select payload_json from orchestration_v2_projection_threads where thread_id = ?",
+                      (tid,)).fetchone()
+    if row is None:
+        reasons.append("thread %s changed during this run and has no projection row" % short(tid))
+        continue
+    p = json.loads(row[0])
+    if not isinstance(p, dict):
+        raise SystemExit("thread %s has a payload_json that is not an object" % short(tid))
+    wt = p.get("worktreePath")
+    if wt is None or wt == "":
+        continue
+    if not isinstance(wt, str) or not os.path.isabs(wt) or any(c in wt for c in "\t\r\n"):
+        raise SystemExit("ambiguous worktreePath for thread %s" % short(tid))
+    if os.path.realpath(wt) == cand:
+        reasons.append("thread %s changed after this run's T3 snapshot" % short(tid))
+con.execute("COMMIT")
+check_source()
+print("; ".join(reasons))
+PY
+}
+
+refresh_t3() {
+T3_VERDICT=(); T3_DETAIL=(); T3_HARD=(); T3_NEWEST=()
+case "$T3_SOURCE" in
+    none) T3_STATE=absent; return 0 ;;
+    missing)
+        T3_STATE=unreadable
+        fail "T3 server runtime $T3_RUNTIME exists but neither $T3_V2_DB nor $T3_DB does, all worktree removals blocked"
+        return 0 ;;
+esac
+local hw_line="" n_threads n_wt n_paths n_hard hw_re=$'^[0-9]+(\t[0-9]+){6}$'
+rm -f "$TMP/t3.hw"
+if "t3_read_$T3_SOURCE" > "$TMP/t3.tsv" 2> "$TMP/t3.err" \
+    && { [ "$T3_SOURCE" = v1 ] || { IFS= read -r hw_line < "$TMP/t3.hw" && [[ "$hw_line" =~ $hw_re ]]; }; }; then
+    T3_STATE=ok
+    while IFS=$'\t' read -r p verdict hard newest detail; do
+        T3_VERDICT["$p"]="$verdict"; T3_DETAIL["$p"]="$detail"
+        T3_HARD["$p"]="$hard"; T3_NEWEST["$p"]="$newest"
+    done < "$TMP/t3.tsv"
+    if [ "$T3_SOURCE" = v2 ]; then
+        IFS=$'\t' read -r T3_HW n_threads n_wt n_paths n_hard T3_DEV T3_INO <<< "$hw_line"
+        log "T3 v2 snapshot: event high-water $T3_HW; $n_threads threads, $n_wt own a worktree on $n_paths path(s), $n_hard path(s) hard-held"
+    fi
+else
+    T3_STATE=unreadable
+    : > "$TMP/t3recheck.failed"
+    fail "T3 state $T3_SRC_PATH unreadable, all worktree removals blocked: $(head -c 300 "$TMP/t3.err" | tr '\n' ' ')"
+fi
+}
+refresh_t3
+log "T3 state: $T3_STATE ($T3_SOURCE ${T3_SRC_PATH:-$T3_DB})"
+
+# --- processes by cwd (Linux /proc) --------------------------------------------
+# A clean, merged worktree can still be a live lane's cwd (an agent between
+# commits, a shell parked there). Read fresh cwds for each candidate, after gh.
+# PID and comm only, never argv: another
+# agent's command line can carry its prompt or a credential.
+# Scope is the invoking user's processes. The lanes this guards are the
+# Operator's own shells and agents; root and service accounts never park in their worktrees, and
+# their cwds are unreadable anyway. Own-user processes the kernel hides (on this
+# host systemd --user, (sd-pam), ssh-agent, tailscaled: setgid or capability
+# holders fail the ptrace check) are skipped too, because they exist permanently
+# and blocking on them blocked every worktree. Both are counted and logged, and a
+# worktree is moved, not deleted, so a hidden cwd inside it loses nothing.
+in_use_by() {  # line 1: "pid N (comm)" for an own-user cwd at or under $1, else empty; line 2: scan counts
+    "$PYTHON" - "$1" "$PROC_ROOT" <<'PY'
+import glob, os, sys
+w = os.path.realpath(sys.argv[1])
+root = sys.argv[2]
+me = os.getuid()
+if not os.path.isdir(root + "/self"):
+    print("no %s/self" % root)
+    raise SystemExit(1)
+def comm(p):
+    try:
+        with open(p + "/comm") as f:
+            return repr(f.read().rstrip("\n"))
+    except OSError:
+        return "?"
+checked, other, hidden, hit = 0, 0, [], ""
+for p in sorted(glob.glob(root + "/[0-9]*")):
+    pid = p.rsplit("/", 1)[1]
+    try:
+        if os.stat(p).st_uid != me:
+            other += 1
+            continue
+        cwd = os.path.realpath(os.readlink(p + "/cwd"))
+    except FileNotFoundError:
+        continue
+    except OSError:
+        hidden.append("%s %s" % (pid, comm(p)))
+        continue
+    checked += 1
+    if cwd == w or cwd.startswith(w + "/"):
+        hit = "pid %s (%s)" % (pid, comm(p))
+        break
+print(hit)
+print("%d own-user cwds checked%s; skipped %d own-user unreadable%s and %d other-user"
+      % (checked, " (stopped at first match)" if hit else "", len(hidden),
+         " (" + ", ".join(hidden) + ")" if hidden else "", other))
+PY
+}
+
+# --- GitHub (one pr list per repo, matched locally) -----------------------------
+# Sets NWO, DEFAULT_BRANCH, fills $PRS. Returns 0 ok, 2 not a GitHub origin
+# (informational skip), 1 any doubt (error skip). SKIP_WHY says why.
+NWO=""; DEFAULT_BRANCH=""; SKIP_WHY=""
+PRS="$TMP/prs.tsv"
+fetch_github() {
+    local main="$1" url path out
+    NWO=""; DEFAULT_BRANCH=""; SKIP_WHY=""; : > "$PRS"
+    # Raw config value, not `git remote get-url`: insteadOf rewrites are transport
+    # detail; the configured URL names the GitHub repo.
+    if ! url="$(git -C "$main" config --get-all remote.origin.url)"; then
+        SKIP_WHY="no origin remote"; return 2
+    fi
+    if [[ "$url" = *$'\n'* ]]; then
+        SKIP_WHY="origin has multiple URLs; repository identity is ambiguous"; return 1
+    fi
+    case "$url" in
+        git@github.com:*)       path="${url#git@github.com:}" ;;
+        ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+        https://github.com/*)   path="${url#https://github.com/}" ;;
+        *) SKIP_WHY="origin is not a github.com remote"; return 2 ;;
+    esac
+    path="${path%/}"; path="${path%.git}"
+    if ! [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        SKIP_WHY="cannot parse owner/repo from origin"; return 1
+    fi
+
+    if ! out="$("${TIMEOUT[@]}" gh repo view "$path" --json nameWithOwner,defaultBranchRef 2> "$TMP/gh.err")"; then
+        SKIP_WHY="gh repo view failed: $(head -n 1 "$TMP/gh.err")"; return 1
+    fi
+    if ! NWO="$(jq -er '.nameWithOwner | select(type == "string" and length > 0)' <<< "$out" 2>/dev/null)" \
+        || ! DEFAULT_BRANCH="$(jq -er '.defaultBranchRef.name | select(type == "string" and length > 0)' <<< "$out" 2>/dev/null)"; then
+        SKIP_WHY="gh repo view returned no nameWithOwner/defaultBranchRef"; return 1
+    fi
+    if ! jq -se 'length == 1 and (.[0] | type == "object")' <<< "$out" >/dev/null 2>&1 \
+        || ! [[ "$NWO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+        || ! git check-ref-format "refs/heads/$DEFAULT_BRANCH" >/dev/null 2>&1; then
+        SKIP_WHY="gh repo view returned ambiguous repo/default branch"; return 1
+    fi
+
+    # The PR total is read BEFORE the list: GitHub PRs cannot be deleted, so a list
+    # shorter than an earlier total can only mean truncation (a silent gh cap would
+    # drop the oldest PRs, and an old OPEN PR is exactly the evidence that must not
+    # go missing), while PRs opened between the two calls only lengthen the list.
+    local total
+    if ! total="$("${TIMEOUT[@]}" gh api graphql \
+            -f query='query($o:String!,$n:String!){repository(owner:$o,name:$n){pullRequests{totalCount}}}' \
+            -f o="${NWO%%/*}" -f n="${NWO#*/}" --jq '.data.repository.pullRequests.totalCount' 2> "$TMP/gh.err")" \
+        || ! [[ "$total" =~ ^[0-9]+$ ]]; then
+        SKIP_WHY="gh PR totalCount query failed: $(head -n 1 "$TMP/gh.err")"; return 1
+    fi
+
+    if ! out="$("${TIMEOUT[@]}" gh pr list --repo "$NWO" --state all --limit "$PR_LIMIT" \
+        --json number,state,headRefName,headRefOid,baseRefName,mergedAt 2> "$TMP/gh.err")"; then
+        SKIP_WHY="gh pr list failed: $(head -n 1 "$TMP/gh.err")"; return 1
+    fi
+    # Validate the whole payload before trusting any of it. Empty fields become "-"
+    # so tab-split reads can never shift a column (an empty headRefOid must not let
+    # baseRefName slide into the oid slot).
+    if ! jq -se 'length == 1 and (.[0] | type == "array" and
+        (length == (unique_by(.number) | length)) and all(.[];
+            (.number | type == "number" and . > 0 and . == floor)
+            and (.state | IN("OPEN", "CLOSED", "MERGED"))
+            and (.headRefName | type == "string" and length > 0 and (explode | all(. > 32 and . != 127 and . != 92)))
+            and (.baseRefName | type == "string" and length > 0 and (explode | all(. > 32 and . != 127 and . != 92)))
+            and (.headRefOid == null or (.headRefOid | type == "string" and test("^([0-9a-f]{40})?$")))
+            and (.mergedAt == null or (.mergedAt | type == "string" and (test("[\\t\\r\\n]") | not)))
+            and (if .state == "MERGED" then
+                (.headRefOid | type == "string" and test("^[0-9a-f]{40}$"))
+                and (.mergedAt | type == "string")
+                and (try (.mergedAt as $d | ($d | fromdateiso8601) as $t |
+                    ($t >= 0 and $t <= now and ($t | todateiso8601) == $d)) catch false)
+            else true end)))' <<< "$out" >/dev/null 2>&1; then
+        SKIP_WHY="gh pr list returned malformed JSON"; return 1
+    fi
+    local count; count="$(jq 'length' <<< "$out")"
+    # A full page means the list may be truncated; a missing OPEN PR or stacked
+    # child could then be invisible, so the repo is ambiguous.
+    if [ "$count" -ge "$PR_LIMIT" ]; then
+        SKIP_WHY="gh pr list returned $count PRs (limit $PR_LIMIT); result may be truncated"; return 1
+    fi
+    if [ "$count" -lt "$total" ]; then
+        SKIP_WHY="gh pr list returned $count of $total PRs; result truncated"; return 1
+    fi
+    if ! jq -r 'sort_by(-.number)[] | [(.number | tostring), .state, .headRefName,
+            ((.headRefOid // "") | if . == "" then "-" else . end),
+            .baseRefName, ((.mergedAt // "") | if . == "" then "-" else . end)] | @tsv' <<< "$out" > "$PRS"; then
+        SKIP_WHY="gh pr list could not be decoded completely"; return 1
+    fi
+    if [ "$REMOTE" = 1 ]; then
+        local fetch_url push_url
+        # A lease against the fetch remote says nothing about a different push
+        # destination, even when that fork happens to have the same commit.
+        if ! fetch_url="$(git -C "$main" remote get-url --all origin)" \
+            || ! push_url="$(git -C "$main" remote get-url --push --all origin)" \
+            || [[ "$fetch_url" = *$'\n'* || "$push_url" != "$fetch_url" ]]; then
+            SKIP_WHY="origin fetch/push destinations differ or are ambiguous"; return 1
+        fi
+    fi
+    return 0
+}
+
+# --- eligibility --------------------------------------------------------------
+# The entire GitHub payload has already passed timestamp validation. Keep the
+# per-row guard too, because grace and remote deletion both depend on this proof.
+merged_epoch() {  # $1 PR number, $2 mergedAt; demotes E_ELIG on failure
+    local e
+    if e="$(jq -rn --arg d "$2" '$d | fromdateiso8601' 2>/dev/null)" && [[ "$e" =~ ^[0-9]+$ ]]; then
+        E_MERGED="$e"; E_NUM="$1"; E_MAT="$2"
+    else
+        E_ELIG=0; E_MERGED=""
+        E_WHY="merged PR #$1 has no valid mergedAt ('$2'); cannot verify"
+    fi
+}
+
+# Sets E_ELIG (1 = every local commit is inside a merged PR head), E_PR, E_WHY,
+# E_OID, E_MERGED (epoch seconds of the covering PR's mergedAt), and E_NUM/E_MAT
+# (that PR's number and raw mergedAt, for the trash manifest).
+E_ELIG=0; E_PR="-"; E_WHY=""; E_OID=""; E_MERGED=""; E_NUM=""; E_MAT=""
+CONTAIN_OID=""; CONTAIN_REF=""; CONTAIN_WHY=""   # set per repo in gc_repo
+eval_head() {
+    local main="$1" b="$2" tip="$3" rows open closed merged num state oid first_num="" first_oid=""
+    E_ELIG=0; E_PR="-"; E_WHY=""; E_OID=""; E_MERGED=""; E_NUM=""; E_MAT=""
+    rows="$(B="$b" awk -F'\t' '$3 == ENVIRON["B"]' "$PRS")"
+    if [ -z "$rows" ]; then E_WHY="no PR"; return 0; fi
+    open="$(awk -F'\t' '$2 == "OPEN" {print $1; exit}' <<< "$rows")"
+    if [ -n "$open" ]; then E_PR="#$open OPEN"; E_WHY="open PR"; return 0; fi
+    merged="$(awk -F'\t' '$2 == "MERGED"' <<< "$rows")"
+    if [ -z "$merged" ]; then
+        closed="$(awk -F'\t' 'NR == 1 {print $1}' <<< "$rows")"
+        E_PR="#$closed CLOSED"; E_WHY="PR closed without merge"; return 0
+    fi
+    local mat
+    while IFS=$'\t' read -r num state _ oid _ mat; do
+        [ -z "$first_num" ] && { first_num="$num"; first_oid="$oid"; }
+        [[ "$oid" =~ ^[0-9a-f]{40}$ ]] || continue
+        if [ "$tip" = "$oid" ]; then
+            E_ELIG=1; E_PR="#$num MERGED"; E_OID="$oid"; E_WHY="merged PR #$num, tip == PR head"
+            merged_epoch "$num" "$mat"; return 0
+        fi
+        # --is-ancestor exits 1 (not ancestor) or 128 (object missing); both deny.
+        if git -C "$main" cat-file -e "$oid^{commit}" 2>/dev/null \
+            && git -C "$main" merge-base --is-ancestor "$tip" "$oid" 2>/dev/null; then
+            E_ELIG=1; E_PR="#$num MERGED"; E_OID="$oid"; E_WHY="merged PR #$num, tip is an ancestor of PR head"
+            merged_epoch "$num" "$mat"; return 0
+        fi
+    done <<< "$merged"
+    E_PR="#$first_num MERGED"
+    if ! [[ "$first_oid" =~ ^[0-9a-f]{40}$ ]]; then
+        E_WHY="merged PR #$first_num has no head oid; cannot verify"
+    elif ! git -C "$main" cat-file -e "$first_oid^{commit}" 2>/dev/null; then
+        E_WHY="merged PR head ${first_oid:0:9} not in local objects; cannot verify"
+    else
+        E_WHY="local has commits not in merged PR #$first_num"
+    fi
+    return 0
+}
+
+# Regenerable caches that may sit in a removable worktree (an operator ruling,
+# 2026-09-22). Every merged-branch worktree on the source box carried nothing ignored
+# but these, so without the allowance the worktree half never fires. Matched on
+# the exact basename of an ignored DIRECTORY entry (git prints `dir/`), never by
+# substring: `my__pycache__/`, a FILE named `__pycache__`, `.env`, build output,
+# or data still block, because `git worktree remove` deletes ignored paths
+# without asking. node_modules/ and .astro/ joined on 2026-09-24: the three
+# merged worktrees of one web project still blocked carried nothing ignored but
+# ui/node_modules/, ui/.astro/ and ui/dist/. `dist` is a common name for a
+# hand-made directory, so it counts only beside a package.json, where it is the
+# output of that package's build.
+CACHE_DIRS=(__pycache__ .pytest_cache node_modules .astro)
+is_cache_dir() {  # $1 = ignored path from status -z, $2 = worktree root
+    local p="$1" w="${2:-}" base parent c
+    case "$p" in */) ;; *) return 1 ;; esac
+    base="${p%/}"; parent="${base%/*}"; [ "$parent" = "$base" ] && parent=""
+    base="${base##*/}"
+    for c in "${CACHE_DIRS[@]}"; do [ "$base" = "$c" ] && return 0; done
+    if [ "$base" = dist ] && [ -n "$w" ]; then
+        [ -f "$w/${parent:+$parent/}package.json" ] && [ ! -L "$w/${parent:+$parent/}package.json" ] && return 0
+    fi
+    return 1
+}
+
+# idle_blocker W GITDIR: prints a reason when anything in worktree W was
+# touched within NO_PR_IDLE_HOURS, or when that cannot be established; prints
+# nothing when W is idle. Sources: every HEAD reflog entry (the newest by value,
+# not file order), every regular file in the admin dir GITDIR except *.lock
+# (index, HEAD, ORIG_HEAD, logs/...), and every tracked or untracked non-ignored
+# file in W (lstat; ignored caches do not count). Any read failure is a reason.
+# The admin dir's OWN mtime is deliberately not a source: delete_branch_locked
+# creates and removes a HEAD.lock in every admin dir on each branch deletion, so
+# on a repo that loses any branch within 72h no worktree would ever read idle.
+# The files it would otherwise see written (index, HEAD, logs) are all counted.
+idle_blocker() {
+    "$PYTHON" - "$1" "$2" "$NO_PR_IDLE_HOURS" <<'PY' 2>&1
+import os, re, stat, subprocess, sys, time
+w, gd, hours = sys.argv[1], sys.argv[2], float(sys.argv[3])
+now = time.time()
+newest, what = None, ""
+def seen(t, label):
+    global newest, what
+    if newest is None or t > newest:
+        newest, what = t, label
+def walk_errors(error):
+    raise error
+try:
+    with open(os.path.join(gd, "logs", "HEAD"), "rb") as f:
+        entries = [line for line in f.read().split(b"\n") if line.strip()]
+    if not entries:
+        raise ValueError("HEAD reflog is empty")
+    for line in entries:
+        # "<old> <new> <ident> <epoch> <tz>[\t<message>]"; the ident never holds a tab.
+        m = re.search(rb"> (\d+) [+-]\d{4}$", line.split(b"\t", 1)[0])
+        if not m:
+            raise ValueError("unparseable HEAD reflog entry")
+        seen(int(m.group(1)), "HEAD reflog")
+    for root, dirs, files in os.walk(gd, onerror=walk_errors):
+        for name in files:
+            if name.endswith(".lock"):
+                continue
+            path = os.path.join(root, name)
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode):
+                seen(st.st_mtime, "admin " + os.path.relpath(path, gd))
+    out = subprocess.run(["git", "-C", w, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                          "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                         capture_output=True, check=True).stdout
+    for rel in out.split(b"\0"):
+        if rel:
+            seen(os.lstat(os.path.join(os.fsencode(w), rel)).st_mtime, "file " + os.fsdecode(rel))
+except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    # A kept worktree, not a failed run: a missing reflog is a state to report.
+    print("idle time unknown (%s)" % str(error).splitlines()[0][:200] if str(error) else "idle time unknown")
+    raise SystemExit(0)
+age_h = (now - newest) / 3600.0
+if age_h < hours:
+    print("touched %.1fh ago (%s); no-PR worktrees wait %gh idle" % (max(age_h, 0.0), what, hours))
+PY
+}
+
+# Prints a reason when worktree $1 must stay; prints nothing when removable.
+# $6 is the covering PR's mergedAt in epoch seconds (empty when there is no
+# merged PR); $7=1 marks a no-PR worktree, which must also pass idle_blocker.
+worktree_blocker() {
+    local w="$1" locked="$2" b="$3" tip="$4" guarded="${5:-0}" merged="${6:-}" nopr="${7:-0}"
+    local gd f who e xy p now_branch now_tip xd idle
+    local -a dirty=() ign_block=()
+    [ "$locked" = 1 ] && { echo "worktree locked"; return 0; }
+    if ! now_branch="$(git -C "$w" symbolic-ref -q HEAD 2>/dev/null)" \
+        || ! now_tip="$(git -C "$w" rev-parse --verify HEAD 2>/dev/null)" \
+        || [ "$now_branch" != "refs/heads/$b" ] || [ "$now_tip" != "$tip" ]; then
+        echo "worktree HEAD changed since eligibility check"; return 0
+    fi
+    # status deliberately trusts these index flags, including with --no-force
+    # removal. A hidden edit is still user data, so never remove such a checkout.
+    # Entries read "<tag> <mode> <oid> <stage>\t<path>".
+    if ! git -C "$w" ls-files -v -s -z > "$TMP/index.z" 2>/dev/null; then
+        echo "cannot inspect worktree index"; return 0
+    fi
+    while IFS= read -r -d '' e; do
+        case "${e:0:1}" in S|[a-z]) echo "index has assume-unchanged or skip-worktree entries"; return 0 ;; esac
+        # `git worktree remove` refuses submodules without --force, and dropping the
+        # admin entry would delete <admin>/modules, the submodules' own repositories.
+        [ "${e:2:6}" = 160000 ] && { echo "worktree contains submodules"; return 0; }
+    done < "$TMP/index.z"
+    # -z: exact paths with no C-quoting, so a basename test cannot be fooled by
+    # an escaped name.
+    if ! git -C "$w" -c core.fsmonitor=false -c core.untrackedCache=false \
+        status --porcelain -z --ignored --untracked-files=normal > "$TMP/wtstatus.z" 2>/dev/null; then
+        echo "cannot read worktree status"; return 0
+    fi
+    while IFS= read -r -d '' e; do
+        xy="${e:0:2}"; p="${e:3}"
+        if [ "$xy" = "!!" ]; then
+            is_cache_dir "$p" "$w" || ign_block+=("$p")
+        else
+            dirty+=("$p")
+            # A rename/copy entry carries its source path as the next NUL field.
+            case "$xy" in R*|C*|?R|?C) IFS= read -r -d '' _ || true ;; esac
+        fi
+    done < "$TMP/wtstatus.z"
+    if [ "${#dirty[@]}" -gt 0 ]; then
+        echo "worktree dirty (${#dirty[@]} changed/untracked: ${dirty[0]}$([ "${#dirty[@]}" -gt 1 ] && echo " +$(( ${#dirty[@]} - 1 )) more"))"
+        return 0
+    fi
+    if [ "${#ign_block[@]}" -gt 0 ]; then
+        echo "worktree has ignored files (${ign_block[0]}$([ "${#ign_block[@]}" -gt 1 ] && echo " +$(( ${#ign_block[@]} - 1 )) more"))"
+        return 0
+    fi
+    if ! gd="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)"; then
+        echo "cannot resolve worktree git dir"; return 0
+    fi
+    for f in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG sequencer locked; do
+        [ -e "$gd/$f" ] && { echo "operation in progress ($f)"; return 0; }
+    done
+    [ -e "$gd/modules" ] && { echo "worktree contains submodules ($gd/modules)"; return 0; }
+    if [ "$guarded" != 1 ]; then
+        for f in index.lock HEAD.lock; do
+            [ -e "$gd/$f" ] && { echo "operation in progress ($f)"; return 0; }
+        done
+    fi
+    if ! who="$(in_use_by "$w")"; then echo "cannot check processes${who:+ ($who)}"; return 0; fi
+    log "process scan for $w: ${who#*$'\n'}"
+    who="${who%%$'\n'*}"
+    [ -n "$who" ] && { echo "in use by $who"; return 0; }
+    [ -e "$TMP/t3recheck.failed" ] && { echo "T3 state unreadable"; return 0; }
+    # "Absent" is a snapshot too. A server or database appearing while GitHub
+    # was queried invalidates it; the next run can read the newly chosen source.
+    if [ "$T3_SOURCE" = none ] && { [ -e "$T3_V2_DB" ] || [ -L "$T3_V2_DB" ] \
+        || [ -e "$T3_DB" ] || [ -L "$T3_DB" ] || [ -e "$T3_RUNTIME" ] || [ -L "$T3_RUNTIME" ]; }; then
+        : > "$TMP/t3recheck.failed"
+        fail "T3 source appeared after the absent snapshot, all worktree removals blocked"
+        echo "T3 state unreadable"; return 0
+    fi
+    # V1 (rollback mode) re-reads the whole state for every candidate, as it
+    # always has; V2 keeps the run's one snapshot and rechecks newer events only.
+    if [ "$T3_SOURCE" = v1 ]; then refresh_t3; fi
+    case "$T3_STATE" in
+        unreadable) echo "T3 state unreadable"; return 0 ;;
+        ok)
+            local rp newest changed; rp="$(realpath -e "$w" 2>/dev/null || printf '%s' "$w")"
+            if [ "$T3_SOURCE" = v2 ]; then
+                # This runs in a subshell, so a failed recheck leaves a marker:
+                # once the source is in doubt, no later candidate in the run goes,
+                # and the summary header says unreadable.
+                if ! changed="$(t3_recheck_v2 "$rp" 2> "$TMP/t3recheck.err")"; then
+                    : > "$TMP/t3recheck.failed"
+                    fail "T3 recheck of $w against $T3_V2_DB failed, worktree kept: $(head -c 300 "$TMP/t3recheck.err" | tr '\n' ' ')"
+                    echo "T3 state unreadable"; return 0
+                fi
+                [ -n "$changed" ] && { echo "T3 thread still active ($changed)"; return 0; }
+            fi
+            if [ "${T3_VERDICT[$rp]:-}" = active ]; then
+                newest="${T3_NEWEST[$rp]:-}"
+                if [ -z "$merged" ] || [ "${T3_HARD[$rp]:-1}" != 0 ] || ! [[ "$newest" =~ ^[0-9]+$ ]] \
+                    || [ "$newest" -ge "$merged" ]; then
+                    echo "T3 thread still active (${T3_DETAIL[$rp]})"; return 0
+                fi
+                # Idle, not mid-turn, and last touched before the PR merged: the
+                # thread finished the work the PR carried.
+                log "T3 thread on $w is within ${T3_STALE_HOURS}h but its newest activity predates the merge; not holding (${T3_DETAIL[$rp]})"
+            fi ;;
+    esac
+    if [ "$nopr" = 1 ]; then
+        if ! idle="$(idle_blocker "$w" "$gd")"; then
+            echo "cannot establish idle time${idle:+ ($idle)}"; return 0
+        fi
+        [ -n "$idle" ] && { echo "$idle"; return 0; }
+    fi
+    # Quarantine is a rename or nothing (see the header): report, do not fail.
+    if ! xd="$(xdev "$w" "$TRASH_ROOT")"; then
+        echo "cannot compare worktree and trash filesystems"; return 0
+    fi
+    [ -z "$xd" ] || { echo "quarantine skipped: worktree on a different filesystem than the trash ($xd)"; return 0; }
+    return 0
+}
+
+# Deletes local branch $3 atomically only if it still points at $4. Restoring a
+# mismatched tip AFTER branch -D is too late: recreation can fail or be interrupted.
+# With $5 (the pinned origin/<default> oid) the branch has no PR. A command-local
+# reference-transaction hook rechecks its tip and reflog while Git holds the ref
+# lock. HEAD locks alone cannot stop update-ref, and branch -d's own upstream/HEAD
+# check can accept a concurrent unpushed commit. Existing hooks still run.
+contained_delete_hooks() {
+    local main="$1" hooks original f version
+    version="$(git version)" || return 1
+    version="${version#git version }"
+    # reference-transaction first shipped in 2.29. An older Git would silently
+    # ignore the guard, so do not attempt a deletion on it.
+    [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    (( BASH_REMATCH[1] > 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] >= 29) )) || return 1
+    original="$(git -C "$main" rev-parse --path-format=absolute --git-path hooks)" || return 1
+    hooks="$(mktemp -d "$TMP/contained-delete-hooks.XXXXXX")" || return 1
+    # Preserve every installed hook, including a configured core.hooksPath. The
+    # reference hook below chains the original with the same argv and stdin.
+    for f in "$original"/* "$original"/.[!.]* "$original"/..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        [ "${f##*/}" = reference-transaction ] && continue
+        ln -sfn -- "$f" "$hooks/${f##*/}" || return 1
+    done
+    {
+        printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+        declare -f reflog_uncontained
+        cat <<'HOOK'
+input="$(cat)"
+if [ -x "$BGC_ORIGINAL_REF_HOOK" ]; then
+    printf '%s\n' "$input" | "$BGC_ORIGINAL_REF_HOOK" "$@" || exit $?
+fi
+[ "${1:-}" = prepared ] || exit 0
+while read -r old new ref; do
+    [ "$ref" = "refs/heads/$BGC_DELETE_BRANCH" ] && [[ "$new" =~ ^0+$ ]] || {
+        echo "branch-gc: unexpected ref transaction; kept" >&2; exit 1;
+    }
+done <<< "$input"
+cur="$(git rev-parse --verify "refs/heads/$BGC_DELETE_BRANCH")"
+[ "$cur" = "$BGC_DELETE_TIP" ] && git merge-base --is-ancestor "$cur" "$BGC_DELETE_BASE" || {
+    echo "branch-gc: tip changed before the deletion lock; kept" >&2; exit 1;
+}
+bad="$(reflog_uncontained "$BGC_DELETE_REFLOG" "$BGC_DELETE_BASE" "$PWD" "$BGC_DELETE_ALT")"
+[ -z "$bad" ] || {
+    echo "branch-gc: branch reflog changed or is uncontained ($bad); kept" >&2; exit 1;
+}
+# HEAD locks cover existing registrations only. A new worktree may have been
+# registered during the earlier checks, even without changing the branch tip.
+occupied="$(git for-each-ref --format="%(worktreepath)" "refs/heads/$BGC_DELETE_BRANCH")"
+[ -z "$occupied" ] || {
+    echo "branch-gc: branch is now checked out at $occupied; kept" >&2; exit 1;
+}
+HOOK
+    } > "$hooks/reference-transaction" || return 1
+    chmod +x "$hooks/reference-transaction" || return 1
+    BGC_DELETE_HOOKS="$hooks"
+    BGC_ORIGINAL_REF_HOOK="$original/reference-transaction"
+}
+
+# restore_if_reoccupied MAIN COMMON BRANCH TIP LABEL: after a successful delete,
+# re-read every worktree HEAD and put the branch back at its proven tip when one
+# points at it. `git worktree add` takes no ref lock, so a registration can land
+# between the transaction hook's occupancy read and the ref commit; no check
+# made before the commit can see it. Once the ref is gone a new `worktree add`
+# of the branch fails loudly, so only a registration that resolved the branch
+# before the commit reaches this point. A second read after a short pause
+# catches one still writing its HEAD. The recreated branch loses its config
+# section when `git branch -d` removed it; the commits were never at risk.
+restore_if_reoccupied() {
+    local main="$1" common="$2" b="$3" tip="$4" label="$5" f hit="" pass
+    for pass in 1 2; do
+        for f in "$common/HEAD" "$common"/worktrees/*/HEAD; do
+            [ -f "$f" ] || continue
+            if [ "$(head -c 512 -- "$f" 2>/dev/null)" = "ref: refs/heads/$b" ]; then hit="$f"; break; fi
+        done
+        [ -n "$hit" ] && break
+        [ "$pass" = 1 ] && sleep 0.2
+    done
+    [ -z "$hit" ] && return 0
+    if git -C "$main" update-ref "refs/heads/$b" "$tip" "" 2>/dev/null; then
+        fail "$label $b: a worktree registered during the deletion checks it out ($hit); branch re-created at ${tip:0:12}"
+    else
+        fail "$label $b: a worktree registered during the deletion checks it out ($hit) and the branch could NOT be re-created; run: git -C $main branch $b $tip"
+    fi
+    return 1
+}
+
+delete_branch_locked() (
+    local main="$1" label="$2" b="$3" expect="$4" base="${5:-}" out e cur
+    local common gd f held
+    local -a head_locks=()
+    common="$(git -C "$main" rev-parse --path-format=absolute --git-common-dir)" || return 1
+    cleanup_heads() { for f in "${head_locks[@]}"; do rm -f -- "$f"; done; }
+    trap cleanup_heads EXIT
+    trap 'exit 1' HUP INT TERM
+    # A main checkout can switch to the candidate without changing its oid.
+    # Hold every existing HEAD while refreshing occupancy and deleting the ref.
+    for gd in "$common" "$common"/worktrees/*; do
+        [ -d "$gd" ] || continue
+        (set -o noclobber; : > "$gd/HEAD.lock") 2>/dev/null \
+            || { fail "$label $b: checkout HEAD locked at $gd"; return 1; }
+        head_locks+=("$gd/HEAD.lock")
+    done
+    # update-ref does not have porcelain branch's checked-out guard. Refresh both
+    # ordinary occupancy and the original branch held by a detached rebase/bisect.
+    if ! git -C "$main" for-each-ref --format='%(refname)%00%(worktreepath)%00' \
+        refs/heads/ > "$TMP/occupancy.z"; then
+        fail "$label $b: cannot refresh branch occupancy"; return 1
+    fi
+    while IFS= read -r -d '' e; do
+        e="${e#$'\n'}"
+        local w
+        IFS= read -r -d '' w || { fail "$label $b: incomplete branch occupancy"; return 1; }
+        if [ "$e" = "refs/heads/$b" ] && [ -n "$w" ]; then
+            fail "$label $b: branch is now checked out at $w; kept"; return 1
+        fi
+    done < "$TMP/occupancy.z"
+    for gd in "$common" "$common"/worktrees/*; do
+        [ -d "$gd" ] || continue
+        for f in rebase-merge/head-name rebase-apply/head-name BISECT_START; do
+            [ -f "$gd/$f" ] || continue
+            if ! IFS= read -r held < "$gd/$f"; then
+                fail "$label $b: cannot read in-progress operation $gd/$f"; return 1
+            fi
+            if [ "$held" = "refs/heads/$b" ] || [ "$held" = "$b" ]; then
+                fail "$label $b: branch held by in-progress operation $gd/$f"; return 1
+            fi
+        done
+    done
+    local proof="${base:-${6:-$expect}}" alternate=""
+    [ -n "$base" ] || alternate="$CONTAIN_OID"
+    contained_delete_hooks "$main" || { fail "$label $b: cannot install the deletion guard; kept"; return 1; }
+    export BGC_DELETE_BRANCH="$b" BGC_DELETE_TIP="$expect" BGC_DELETE_BASE="$proof" BGC_DELETE_ALT="$alternate"
+    export BGC_DELETE_REFLOG="$common/logs/refs/heads/$b" BGC_ORIGINAL_REF_HOOK
+    if [ -n "$base" ]; then
+        # Cheap precheck; the transaction hook repeats the proof under Git's
+        # actual deletion lock, including work reset away since the first scan.
+        if ! cur="$(git -C "$main" rev-parse -q --verify "refs/heads/$b")" || [ "$cur" != "$expect" ]; then
+            fail "$label $b: tip moved since the check; kept"; return 1
+        fi
+        if ! git -C "$main" merge-base --is-ancestor "$expect" "$base" 2>/dev/null; then
+            fail "$label $b: tip is no longer contained in the default branch; kept"; return 1
+        fi
+        if ! out="$(git -C "$main" -c "core.hooksPath=$BGC_DELETE_HOOKS" branch -d -- "$b" 2>&1)"; then
+            fail "$label $b: git branch -d refused: $(printf '%s' "$out" | tr '\n' ' ' | head -c 300)"; return 1
+        fi
+        restore_if_reoccupied "$main" "$common" "$b" "$expect" "$label" || return 1
+        return 0
+    fi
+    if ! out="$(git -C "$main" -c "core.hooksPath=$BGC_DELETE_HOOKS" update-ref --no-deref -d "refs/heads/$b" "$expect" 2>&1)"; then
+        fail "$label $b: branch delete refused (tip moved or locked): $out"; return 1
+    fi
+    restore_if_reoccupied "$main" "$common" "$b" "$expect" "$label" || return 1
+    # Keep branch config: deleting it separately could erase a concurrent branch
+    # recreation's upstream settings. A harmless orphan config is preferable.
+    # (`git branch -d` above removes its own config section; that is git's call.)
+)
+
+delete_branch() {
+    if ! delete_branch_locked "$@"; then
+        fail "$2 $3: branch deletion refused; details above"; return 1
+    fi
+    if [ -n "${5:-}" ]; then
+        log "$2 $3: deleted branch with git branch -d (was $4, contained in ${5:0:12})"
+    else
+        log "$2 $3: deleted branch (was $4)"
+    fi
+}
+
+# --- no-PR containment ---------------------------------------------------------
+# reflog_uncontained FILE BASE MAIN [ALTERNATE]: prints the first oid FILE records
+# (old or new side) that is not an ancestor of BASE, "unreadable" when FILE
+# exists but cannot be read or parsed, and nothing when every recorded oid is
+# contained in BASE or ALTERNATE. An absent reflog records nothing to lose.
+reflog_uncontained() {
+    local f="$1" base="$2" main="$3" alternate="${4:-}" old new o rest
+    local -A seen=()
+    [ -e "$f" ] || [ -L "$f" ] || return 0
+    if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then echo unreadable; return 0; fi
+    while IFS=' ' read -r old new rest || [ -n "$old" ]; do
+        [ -n "$old$new" ] || continue
+        for o in "$old" "$new"; do
+            if ! [[ "$o" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then echo unreadable; return 0; fi
+            [[ "$o" =~ ^0+$ ]] && continue
+            [ -n "${seen[$o]:-}" ] && continue
+            seen["$o"]=1
+            if ! git -C "$main" merge-base --is-ancestor "$o" "$base" 2>/dev/null </dev/null \
+                && { [ -z "$alternate" ] || ! git -C "$main" merge-base --is-ancestor "$o" "$alternate" 2>/dev/null </dev/null; }; then
+                echo "$o"; return 0
+            fi
+        done
+        old=""; new=""
+    done < "$f" || { echo unreadable; return 0; }
+    return 0
+}
+
+# Squash-merged tips are not ancestors of origin/default. A merged candidate's
+# reflogs may contain either PR-carried history or commits already on default,
+# but reset-away private work must keep both the branch and its worktree.
+merged_reflog_blocker() {
+    local main="$1" common="$2" b="$3" proof="$4" w="${5:-}" gd bad f
+    local -a logs=("$common/logs/refs/heads/$b")
+    if [ -n "$w" ]; then
+        gd="$(git -C "$w" rev-parse --absolute-git-dir)" || { echo "cannot resolve worktree git dir"; return 0; }
+        logs+=("$gd/logs/HEAD")
+    fi
+    for f in "${logs[@]}"; do
+        bad="$(reflog_uncontained "$f" "$proof" "$main" "$CONTAIN_OID")" || { echo "cannot inspect reflog"; return 0; }
+        [ -z "$bad" ] || { echo "reflog contains work not covered by the merged PR or default branch ($bad)"; return 0; }
+    done
+}
+
+# contain_blocker MAIN COMMON BRANCH TIP [WORKTREE]: prints why a no-PR branch
+# (and its worktree, if given) is not provably contained in origin's default
+# branch; prints nothing when it is. Uses CONTAIN_OID/CONTAIN_REF/CONTAIN_WHY
+# resolved once per repo in gc_repo.
+contain_blocker() {
+    local main="$1" common="$2" b="$3" tip="$4" w="${5:-}" rc n bad gd up ref short
+    [ -n "$CONTAIN_OID" ] || { echo "$CONTAIN_WHY"; return 0; }
+    short="${CONTAIN_REF#refs/remotes/}"
+    rc=0; git -C "$main" merge-base --is-ancestor "$tip" "$CONTAIN_OID" 2>/dev/null || rc=$?
+    if [ "$rc" = 1 ]; then
+        n="$(git -C "$main" rev-list --count "$CONTAIN_OID..$tip" 2>/dev/null || echo some)"
+        echo "tip has $n commit(s) not in $short"; return 0
+    elif [ "$rc" != 0 ]; then
+        echo "cannot test ancestry against $short"; return 0
+    fi
+    bad="$(reflog_uncontained "$common/logs/refs/heads/$b" "$CONTAIN_OID" "$main")"
+    case "$bad" in
+        "") ;;
+        unreadable) echo "branch reflog unreadable; cannot prove nothing was reset away"; return 0 ;;
+        *) echo "branch reflog records ${bad:0:12}, which is not in $short"; return 0 ;;
+    esac
+    if [ -n "$w" ]; then
+        if ! gd="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)"; then
+            echo "cannot resolve worktree git dir"; return 0
+        fi
+        bad="$(reflog_uncontained "$gd/logs/HEAD" "$CONTAIN_OID" "$main")"
+        case "$bad" in
+            "") ;;
+            unreadable) echo "worktree HEAD reflog unreadable; cannot prove nothing was reset away"; return 0 ;;
+            *) echo "worktree HEAD reflog records ${bad:0:12}, which is not in $short"; return 0 ;;
+        esac
+    fi
+    # Mirror git's own `branch -d` reference: the upstream when it resolves,
+    # else the main checkout's HEAD. A refusal would only fail later.
+    if ! up="$(git -C "$main" for-each-ref --format='%(upstream)' "refs/heads/$b" 2>/dev/null)"; then
+        echo "cannot read the upstream of $b"; return 0
+    fi
+    ref=HEAD
+    [ -n "$up" ] && git -C "$main" rev-parse -q --verify "$up^{commit}" >/dev/null 2>&1 && ref="$up"
+    if ! git -C "$main" merge-base --is-ancestor "$tip" "$ref" 2>/dev/null; then
+        echo "git branch -d would refuse: tip not merged into ${ref#refs/remotes/} (the main checkout's HEAD or the upstream)"
+        return 0
+    fi
+    return 0
+}
+
+# --- trash (quarantine, purge, restore) -------------------------------------------
+slug() { local s="${1//[^A-Za-z0-9._-]/-}"; s="${s:0:80}"; printf '%s' "${s:-x}"; }
+
+tree_stats() {  # prints "<entries> <bytes in regular files>" for everything under $1
+    find -P "$1" -mindepth 1 -printf '%y %s\n' \
+        | awk '{ n++; if ($1 == "f") s += $2 } END { printf "%d %.0f\n", n, s }'
+}
+
+# xdev A B: prints "device X vs Y" when path A and the filesystem holding path B
+# differ, nothing when they match; fails when either cannot be stat'ed. A missing
+# B is judged by its nearest existing ancestor, where mkdir -p would create it.
+xdev() {
+    local a="$1" b="$2" adev bdev
+    while [ ! -e "$b" ] && [ ! -L "$b" ]; do b="${b%/*}"; b="${b:-/}"; done
+    # An existing ancestor may be a symlink onto another filesystem. Compare its
+    # target, where mkdir would write, rather than the device holding the link.
+    adev="$(stat -c %d -L -- "$a")" && bdev="$(stat -c %d -L -- "$b")" || return 1
+    [ "$adev" = "$bdev" ] || printf 'device %s vs %s' "$adev" "$bdev"
+}
+
+# move_tree SRC DST: DST must not exist; its parent must. 0 moved; 1 failed with
+# SRC untouched; 3 rename(2) refused with EXDEV, SRC untouched. Rename only:
+# `mv --no-copy` fails where GNU mv would fall back to copy-then-delete, and there
+# is deliberately no fallback here either. A rename keeps the inode, so a writer
+# holding a cwd or open file inside keeps writing into the moved tree; a copy
+# loses whatever lands in the source after it was read (see the header).
+move_tree() {
+    local src="$1" dst="$2"
+    [ -d "$src" ] && [ ! -L "$src" ] || { echo "$src is not a directory" >&2; return 1; }
+    # A restore destination can appear after validation. Refuse it atomically,
+    # including an empty directory; a skipped move must not count as success.
+    mv --no-copy --update=none-fail -T -- "$src" "$dst" 2> "$TMP/mv.err" && return 0
+    cat "$TMP/mv.err" >&2
+    # Equal st_dev across a bind-mount boundary still fails with EXDEV; LC_ALL=C
+    # (exported above) fixes the strerror text.
+    grep -q 'Invalid cross-device link' "$TMP/mv.err" && return 3
+    return 1
+}
+
+make_trash_entry() {  # $1 repo label, $2 branch; prints a new, empty, 0700 entry path
+    local base name n=0
+    [ ! -L "$TRASH_ROOT" ] || { echo "trash root is a symlink: $TRASH_ROOT" >&2; return 1; }
+    mkdir -p -- "$TRASH_ROOT" && chmod 700 -- "$TRASH_ROOT" || return 1
+    base="$(date -u +%Y%m%dT%H%M%SZ)__$(slug "$1")__$(slug "$2")"
+    name="$base"
+    until mkdir -m 700 -- "$TRASH_ROOT/$name" 2>/dev/null; do
+        [ -e "$TRASH_ROOT/$name" ] && [ "$n" -lt 99 ] || return 1
+        n=$((n+1)); name="$base.$n"
+    done
+    printf '%s\n' "$TRASH_ROOT/$name"
+}
+
+MANIFEST_FORMAT=branch-gc-trash/1
+# A merged-PR entry records pr and merged_at. A no-PR entry (pr null) records
+# merged_at null, basis "contained" and the ref that held its tip instead; the
+# format string stays /1 because every existing entry still reads the same.
+write_manifest() {  # entry repo common worktree branch tip pr mergedAt movedAt method entries bytes admin_id contained_in retention_ref
+    jq -n --arg f "$MANIFEST_FORMAT" --arg repo "$2" --arg common "$3" --arg wt "$4" --arg branch "$5" \
+        --arg tip "$6" --argjson pr "$7" --arg mat "$8" --arg moved "$9" --arg method "${10}" \
+        --argjson files "${11}" --argjson bytes "${12}" --arg admin "${13}" --arg cref "${14:-}" --arg pin "${15}" \
+        '{format: $f, repo: $repo, common_dir: $common, worktree: $wt, branch: $branch, tip: $tip,
+          pr: $pr, merged_at: (if $pr == null then null else $mat end), moved_at: $moved, method: $method,
+          entries: $files, bytes: $bytes, admin_id: $admin, retention_ref: $pin}
+         + (if $pr == null then {basis: "contained", contained_in: $cref} else {} end)' > "$1/manifest.json.new" \
+        && mv --no-copy -f -T -- "$1/manifest.json.new" "$1/manifest.json"
+}
+
+# Sets M_REPO M_COMMON M_WT M_BRANCH M_TIP M_PR M_PRCOL M_MAT M_MOVED M_MOVED_EPOCH
+# from $1 (M_PR "-" and M_MAT "" for a no-PR entry; M_PRCOL is the row's PR cell).
+# Returns 1 unless it is one JSON object carrying every field in the written
+# shape: purge and restore act only on a manifest they fully understand.
+mget() {  # mget VAR json key: exact string value (a sentinel keeps trailing newlines)
+    local v
+    v="$(jq -j --arg k "$3" '.[$k] | if type == "string" then . + "." else error("not a string") end' <<< "$2" 2>/dev/null)" \
+        || return 1
+    printf -v "$1" '%s' "${v%.}"
+}
+manifest_load() {
+    local m="$1" data
+    [ -f "$m" ] && [ ! -L "$m" ] || return 1
+    data="$(cat -- "$m")" || return 1
+    jq -se --arg f "$MANIFEST_FORMAT" '
+        def timestamp: type == "string" and
+            (try (. as $d | fromdateiso8601 as $t | $t > 0 and ($t | todateiso8601) == $d) catch false);
+        def total: . == null or (type == "number" and . >= 0 and . == floor);
+        def text: type == "string" and length > 0 and (contains("\u0000") | not);
+        length == 1 and (.[0] | type == "object" and .format == $f
+        and all(.repo, .common_dir, .worktree, .branch, .tip, .moved_at, .admin_id; text)
+        and (.repo | startswith("/")) and (.common_dir | startswith("/")) and (.worktree | startswith("/"))
+        and (.tip | test("^[0-9a-f]{40}$"))
+        and has("pr") and has("merged_at")
+        and ((.pr | type == "number" and . > 0 and . == floor) and (.merged_at | timestamp)
+                 and (has("basis") | not) and (has("contained_in") | not)
+             or .pr == null and .merged_at == null and .basis == "contained"
+                 and (.contained_in | text and startswith("refs/remotes/")))
+        and (.admin_id | . != "." and . != ".." and (contains("/") | not))
+        and .method == "rename" and has("entries") and has("bytes")
+        and all(.entries, .bytes; total)
+        and (.moved_at | timestamp)
+        and (if has("retention_ref") then (.retention_ref | text and startswith("refs/branch-gc-trash/")) else true end)
+        and (if has("restored_at") then (.restored_at | timestamp) else true end))' <<< "$data" > /dev/null 2>&1 || return 1
+    mget M_REPO "$data" repo && mget M_COMMON "$data" common_dir && mget M_WT "$data" worktree \
+        && mget M_BRANCH "$data" branch && mget M_TIP "$data" tip \
+        && mget M_MOVED "$data" moved_at || return 1
+    M_MAT=""
+    if jq -e '.merged_at | type == "string"' <<< "$data" > /dev/null 2>&1; then
+        mget M_MAT "$data" merged_at || return 1
+    fi
+    git check-ref-format "refs/heads/$M_BRANCH" >/dev/null 2>&1 || return 1
+    M_RETENTION=""
+    if jq -e 'has("retention_ref")' <<< "$data" >/dev/null 2>&1; then
+        mget M_RETENTION "$data" retention_ref || return 1
+        git check-ref-format "$M_RETENTION" >/dev/null 2>&1 || return 1
+    fi
+    M_PR="$(jq -r '.pr // "-"' <<< "$data")" && M_MOVED_EPOCH="$(jq -r '.moved_at | fromdateiso8601' <<< "$data")" || return 1
+    M_PRCOL="-"; [ "$M_PR" = "-" ] || M_PRCOL="#$M_PR"
+    M_MANIFEST="$data"
+}
+
+# Only release our dedicated GC root, and only at the manifest's exact tip.
+# Older manifests lack this field; an already restored entry has no pin left.
+release_retention() {
+    local common cur
+    [ -n "$M_RETENTION" ] || return 0
+    common="$(git -C "$M_REPO" rev-parse --path-format=absolute --git-common-dir)" || return 1
+    [ "$common" = "$M_COMMON" ] || return 1
+    cur="$(git -C "$M_REPO" for-each-ref --format='%(objectname)' "$M_RETENTION")" || return 1
+    [ -n "$cur" ] || return 0
+    [ "$cur" = "$M_TIP" ] || return 1
+    git -C "$M_REPO" update-ref --no-deref -d "$M_RETENTION" "$M_TIP"
+}
+
+# Drop only this admin entry after proving it points at the moved checkout.
+# Even a list with just one prunable entry is not permission to run prune: another
+# worktree can become unavailable between that snapshot and prune's own scan.
+drop_admin_entry() {  # $1 main, $2 original worktree path, $3 its admin dir
+    local main="$1" w="$2" gd="$3" line gitdir common
+    common="$(git -C "$main" rev-parse --path-format=absolute --git-common-dir)" || return 1
+    if [ "$gd" != "$common/worktrees/${gd##*/}" ] || [ -L "$gd" ] || [ ! -d "$gd" ]; then
+        echo "unexpected admin entry $gd" >&2; return 1
+    fi
+    gitdir="$(cat -- "$gd/gitdir")" || return 1
+    case "$gitdir" in /*) ;; *) gitdir="$(realpath -m -- "$gd/$gitdir")" ;; esac
+    if [ "$gitdir" != "$w/.git" ] || [ -e "$w" ] || [ -L "$w" ]; then
+        echo "admin entry $gd does not point at the moved $w" >&2; return 1
+    fi
+    rm -rf -- "$gd" || return 1
+    git -C "$main" worktree list --porcelain -z > "$TMP/wt-drop.z" || return 1
+    while IFS= read -r -d '' line; do
+        [ "$line" = "worktree $w" ] && { echo "$w is still registered after dropping $gd" >&2; return 1; }
+    done < "$TMP/wt-drop.z"
+    return 0
+}
+
+# Hold the branch ref, HEAD and index stable until the worktree has left its path.
+# A final re-read alone still lets a clean detached commit disappear between the
+# check and the move. Git's own writers respect these locks; failure leaves the
+# checkout and its ref in place. The ref transaction only verifies, then aborts,
+# because the quarantine must succeed before the caller can delete the branch.
+# On success the trash entry path is written to $TMP/quarantine.entry. Returns 3,
+# the reason in $TMP/quarantine.skip, when the worktree cannot be renamed into the
+# trash; nothing was moved and the caller reports it rather than failing.
+# Args: main worktree branch tip label pr mergedAt merged_epoch nopr contained_in pr_head.
+# A no-PR candidate (nopr=1) passes pr=null and mergedAt="" and names the
+# containment ref instead; the blocker re-check under the locks repeats its idle
+# rule (our own *.lock files are not idle evidence).
+quarantine_worktree() (
+    local main="$1" w="$2" b="$3" tip="$4" label="$5" pr="$6" mat="$7" merged="${8:-}" nopr="${9:-0}" cref="${10:-}" proof="${11:-}"
+    local gd common actual_common blk ack
+    local lock_pid="" lock_in="" lock_out="" head_lock=0 index_lock=0 entry rc moved_at stats files bytes pin
+    gd="$(git -C "$w" rev-parse --absolute-git-dir)" || return 1
+    common="$(git -C "$main" rev-parse --path-format=absolute --git-common-dir)" || return 1
+    actual_common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir)" || return 1
+    [ "$common" = "$actual_common" ] && [ "$gd" != "$common" ] \
+        || { echo "worktree repository changed" >&2; return 1; }
+    cleanup_removal() {
+        [ "$index_lock" = 0 ] || rm -f -- "$gd/index.lock"
+        [ "$head_lock" = 0 ] || rm -f -- "$gd/HEAD.lock"
+        if [ -n "$lock_pid" ]; then
+            printf 'abort\n' >&"$lock_in" 2>/dev/null || true
+            exec {lock_in}>&-
+            wait "$lock_pid" || true
+        fi
+    }
+    trap cleanup_removal EXIT
+    trap 'exit 1' HUP INT TERM
+    # noclobber is O_EXCL, so a pre-existing writer's lock is never overwritten.
+    (set -o noclobber; : > "$gd/HEAD.lock") 2>/dev/null || { echo "HEAD locked" >&2; return 1; }
+    head_lock=1
+    (set -o noclobber; : > "$gd/index.lock") 2>/dev/null || { echo "index locked" >&2; return 1; }
+    index_lock=1
+    coproc REF_GUARD { git -C "$main" update-ref --no-deref --stdin; }
+    lock_pid="$REF_GUARD_PID"
+    local guard_in="${REF_GUARD[1]}" guard_out="${REF_GUARD[0]}"
+    exec {lock_in}>&"${REF_GUARD[1]}" {lock_out}<&"${REF_GUARD[0]}"
+    exec {guard_in}>&- {guard_out}<&-
+    printf 'start\nverify refs/heads/%s %s\nprepare\n' "$b" "$tip" >&"$lock_in" || return 1
+    IFS= read -r ack <&"$lock_out" && [ "$ack" = 'start: ok' ] || return 1
+    IFS= read -r ack <&"$lock_out" && [ "$ack" = 'prepare: ok' ] || return 1
+    if [ "$nopr" = 1 ]; then
+        blk="$(contain_blocker "$main" "$common" "$b" "$tip" "$w")" || return 1
+    else
+        blk="$(merged_reflog_blocker "$main" "$common" "$b" "$proof" "$w")" || return 1
+    fi
+    [ -z "$blk" ] || { printf '%s\n' "$blk" >&2; return 1; }
+    blk="$(worktree_blocker "$w" 0 "$b" "$tip" 1 "$merged" "$nopr")" || return 1
+    case "$blk" in
+        "") ;;
+        "quarantine skipped: "*) printf '%s\n' "$blk" > "$TMP/quarantine.skip"; return 3 ;;
+        *) printf '%s\n' "$blk" >&2; return 1 ;;
+    esac
+    # These locks serialize Git writers only. Arbitrary filesystem writes and
+    # new T3/process activity are not locked, which is why the tree is moved whole.
+    entry="$(make_trash_entry "$label" "$b")" || { echo "cannot create a trash entry under $TRASH_ROOT" >&2; return 1; }
+    # A copied admin reflog is not a GC root. The original PR tip may already be
+    # months old, so even an ordinary gc could prune it during the seven-day hold.
+    pin="refs/branch-gc-trash/${entry##*/}"
+    if ! git -C "$main" update-ref "$pin" "$tip" ""; then
+        rmdir -- "$entry" || true
+        echo "cannot retain quarantined commit objects; nothing moved" >&2; return 1
+    fi
+    move_tree "$w" "$entry/worktree" 2> "$TMP/move.err"; rc=$?
+    if [ "$rc" != 0 ]; then
+        git -C "$main" update-ref --no-deref -d "$pin" "$tip" \
+            || { echo "move failed; retention ref $pin kept" >&2; return 1; }
+        rmdir -- "$entry" || { echo "left empty trash entry $entry" >&2; cat "$TMP/move.err" >&2; return 1; }
+        if [ "$rc" = 3 ]; then
+            echo "quarantine skipped: worktree on a different filesystem than the trash (rename: Invalid cross-device link)" \
+                > "$TMP/quarantine.skip"
+            return 3
+        fi
+        cat "$TMP/move.err" >&2
+        return 1
+    fi
+    moved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # Recovery metadata first, totals after (second-vendor review, 2026-10-15). Counting a
+    # large tree can take minutes, and a hard kill landing between the move and
+    # the manifest stranded the checkout in trash with nothing to restore from.
+    # The manifest now follows the rename at once; with the admin entry still
+    # registered, --restore reuses it. The rewrite with totals is atomic, so a
+    # kill during it leaves the first manifest whole.
+    if ! write_manifest "$entry" "$main" "$common" "$w" "$b" "$tip" "$pr" "$mat" "$moved_at" \
+        rename null null "${gd##*/}" "$cref" "$pin"; then
+        echo "worktree moved to $entry but its manifest could not be written; admin entry and branch kept" >&2
+        return 1
+    fi
+    if stats="$(tree_stats "$entry/worktree")"; then
+        files="${stats% *}"; bytes="${stats#* }"
+        write_manifest "$entry" "$main" "$common" "$w" "$b" "$tip" "$pr" "$mat" "$moved_at" \
+            rename "$files" "$bytes" "${gd##*/}" "$cref" "$pin" \
+            || log "WARN $label $b: manifest totals not written for $entry; the manifest has no totals"
+    else
+        log "WARN $label $b: cannot count $entry/worktree; manifest has no totals"
+    fi
+    if ! cp -a -T -- "$gd" "$entry/git-admin" || ! rm -f -- "$entry/git-admin/HEAD.lock" "$entry/git-admin/index.lock"; then
+        echo "worktree moved to $entry but copying admin entry $gd failed; admin entry and branch kept" >&2
+        return 1
+    fi
+    drop_admin_entry "$main" "$w" "$gd" || { echo "worktree moved to $entry; admin entry $gd not dropped, branch kept" >&2; return 1; }
+    # The admin dir and our locks in it are gone. Do not unlink a new worktree's
+    # locks if its admin directory happens to reuse this name before the trap runs.
+    head_lock=0; index_lock=0
+    printf '%s' "$entry" > "$TMP/quarantine.entry"
+)
+
+# Pin the root and entry with directory descriptors. Path-based chmod -R follows
+# a command-line symlink if the entry is swapped after validation, and can change
+# permissions outside trash. Every traversal below refuses links and mount points;
+# unlink removes interior symlinks themselves, never anything they point at.
+purge_entry() {
+    "$PYTHON" - "$TRASH_ROOT" "${1##*/}" "$M_MANIFEST" <<'PY'
+import json, os, stat, sys
+
+root, name, expected = sys.argv[1:]
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+def identity(s):
+    return s.st_dev, s.st_ino
+def mount_id(fd):
+    # st_dev alone misses bind mounts of another directory on the same device.
+    # fdinfo identifies the mount of the already-open directory without a path race.
+    with open("/proc/self/fdinfo/%d" % fd) as info:
+        for line in info:
+            if line.startswith("mnt_id:"):
+                return int(line.split()[1])
+    raise OSError("cannot establish mount boundary")
+def remove_contents(fd, device, mount):
+    current = os.fstat(fd)
+    if current.st_dev != device or mount_id(fd) != mount:
+        raise OSError("refusing to cross a filesystem boundary")
+    # Deleting needs directory permissions, never write permission on files.
+    os.fchmod(fd, stat.S_IMODE(current.st_mode) | stat.S_IRWXU)
+    for child in os.listdir(fd):
+        before = os.stat(child, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(before.st_mode):
+            sub = os.open(child, flags, dir_fd=fd)
+            try:
+                if identity(os.fstat(sub)) != identity(before):
+                    raise OSError("directory changed during purge: " + repr(child))
+                remove_contents(sub, device, mount)
+                if identity(os.stat(child, dir_fd=fd, follow_symlinks=False)) != identity(before):
+                    raise OSError("directory moved during purge: " + repr(child))
+                os.rmdir(child, dir_fd=fd)
+            finally:
+                os.close(sub)
+        else:
+            os.unlink(child, dir_fd=fd)
+try:
+    if name in ("", ".", "..") or "/" in name:
+        raise OSError("invalid trash entry name")
+    root_fd = os.open(root, flags)
+    try:
+        entry_fd = os.open(name, flags, dir_fd=root_fd)
+        try:
+            entry_stat = os.fstat(entry_fd)
+            mount = mount_id(root_fd)
+            if entry_stat.st_dev != os.fstat(root_fd).st_dev or mount_id(entry_fd) != mount:
+                raise OSError("trash entry is a mount point")
+            manifest_fd = os.open("manifest.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                  dir_fd=entry_fd)
+            with os.fdopen(manifest_fd) as manifest:
+                if not stat.S_ISREG(os.fstat(manifest.fileno()).st_mode):
+                    raise OSError("manifest is not a regular file")
+                if json.load(manifest) != json.loads(expected):
+                    raise OSError("manifest changed after validation")
+            try:
+                os.stat("restore-in-progress", dir_fd=entry_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError("restore in progress; retained for recovery")
+            remove_contents(entry_fd, entry_stat.st_dev, mount)
+            if identity(os.stat(name, dir_fd=root_fd, follow_symlinks=False)) != identity(entry_stat):
+                raise OSError("trash entry moved during purge")
+            os.rmdir(name, dir_fd=root_fd)
+        finally:
+            os.close(entry_fd)
+    finally:
+        os.close(root_fd)
+except (OSError, ValueError) as error:
+    print("purge refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+purge_trash() {
+    local entry name now age
+    if [ -L "$TRASH_ROOT" ]; then
+        row trash - "$TRASH_ROOT" - report "trash root is a symlink; kept"
+        fail "trash: root $TRASH_ROOT is a symlink; not purged"; return 0
+    fi
+    [ -d "$TRASH_ROOT" ] || return 0
+    if [ "$TRASH_DAYS" = 0 ]; then log "trash: purge disabled (BRANCH_GC_TRASH_DAYS=0)"; return 0; fi
+    now="$(date +%s)"
+    for entry in "$TRASH_ROOT"/*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        name="${entry##*/}"
+        if [ -L "$entry" ] || [ ! -d "$entry" ] || ! [[ "$name" =~ ^[0-9]{8}T[0-9]{6}Z__ ]]; then
+            row trash - "$entry" - report "not a branch-gc trash entry; kept"
+            fail "trash: unexpected $entry kept"; continue
+        fi
+        if ! manifest_load "$entry/manifest.json"; then
+            row trash - "$entry" - report "manifest missing or malformed; kept for manual review"
+            fail "trash: $entry: manifest missing or malformed; not purged"; continue
+        fi
+        if [ -e "$entry/restore-in-progress" ] || [ -L "$entry/restore-in-progress" ]; then
+            row trash "$M_BRANCH" "$entry" "$M_PRCOL" report "interrupted restore; kept for recovery"
+            fail "trash: $entry has an interrupted restore; rerun --restore or review manually"; continue
+        fi
+        age=$(( now - M_MOVED_EPOCH ))
+        if [ "$age" -lt $(( TRASH_DAYS * 86400 )) ]; then
+            row trash "$M_BRANCH" "$entry" "$M_PRCOL" report "moved $M_MOVED from $M_WT; purge after ${TRASH_DAYS}d"
+            continue
+        fi
+        if [ "$MODE" != apply ]; then
+            row trash "$M_BRANCH" "$entry" "$M_PRCOL" purge "moved $M_MOVED, older than ${TRASH_DAYS}d"
+            log "trash: would purge $entry (branch $M_BRANCH, tip $M_TIP, from $M_WT, moved $M_MOVED)"
+            continue
+        fi
+        if purge_entry "$entry" 2> "$TMP/rm.err"; then
+            if ! release_retention 2>> "$TMP/rm.err"; then
+                row trash "$M_BRANCH" "$entry" "$M_PRCOL" purge-failed "files purged; retention ref could not be released"
+                fail "trash: $entry purged but retention ref $M_RETENTION kept"; continue
+            fi
+            row trash "$M_BRANCH" "$entry" "$M_PRCOL" purged "moved $M_MOVED, older than ${TRASH_DAYS}d"
+            log "trash: purged $entry (repo $M_REPO, branch $M_BRANCH, tip $M_TIP, from $M_WT, moved $M_MOVED)"
+        else
+            row trash "$M_BRANCH" "$entry" "$M_PRCOL" purge-failed "$(head -n 1 "$TMP/rm.err")"
+            fail "trash: purge $entry failed: $(head -n 1 "$TMP/rm.err")"
+        fi
+    done
+}
+
+restore_refused() { echo "branch-gc: restore refused: $*" >&2; log "ERROR restore: $*"; }
+
+# Puts a quarantined worktree back. Order keeps every step recoverable: git
+# registers an empty checkout first (so HEAD, index and admin entry are git's own),
+# then the moved tree takes that .git pointer and a single rename puts it back;
+# like quarantine, restore never copies. read-tree rebuilds the index at the
+# verified tip without touching files or updating the locked ref. A failed move
+# retains a usable Git registration in the trash, which the next restore can reuse.
+restore_entry() (
+    local entry="$1" tree cur common created=0 rc gd="" reuse=0 gitdir ack xd
+    local lock_pid="" lock_in="" lock_out="" head_lock=0
+    release_restore_ref() {
+        if [ -n "$lock_pid" ]; then
+            printf 'abort\n' >&"$lock_in" 2>/dev/null || true
+            exec {lock_in}>&-
+            wait "$lock_pid" || true
+            exec {lock_out}<&-
+            lock_pid=""
+        fi
+    }
+    cleanup_restore() {
+        [ "$head_lock" = 0 ] || rm -f -- "$gd/HEAD.lock"
+        release_restore_ref
+    }
+    trap cleanup_restore EXIT
+    trap 'exit 1' HUP INT TERM
+    if [[ "$entry" != */* ]] && [ -d "$TRASH_ROOT/$entry" ]; then entry="$TRASH_ROOT/$entry"; fi
+    case "$entry" in /*) ;; *) entry="$START_DIR/$entry" ;; esac
+    entry="${entry%/}"; tree="$entry/worktree"
+    manifest_load "$entry/manifest.json" || { restore_refused "no valid manifest.json in $entry"; return 1; }
+    [ -d "$tree" ] && [ ! -L "$tree" ] || { restore_refused "$tree is missing (already restored?)"; return 1; }
+    if [ -e "$M_WT" ] || [ -L "$M_WT" ]; then restore_refused "original path $M_WT exists"; return 1; fi
+    if [ -d "$tree/.git" ]; then restore_refused "$tree/.git is a directory, not a worktree pointer"; return 1; fi
+    if ! common="$(git -C "$M_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+        || [ "$(realpath -m -- "$common")" != "$(realpath -m -- "$M_COMMON")" ]; then
+        restore_refused "$M_REPO no longer has git common dir $M_COMMON"; return 1
+    fi
+    # Checked before the branch or a registration is created, so a refusal changes
+    # nothing. The entry can sit elsewhere if the trash was moved, or the original
+    # parent may now be another mount; either way only a copy could bring it back.
+    if ! xd="$(xdev "$tree" "$M_WT")"; then
+        restore_refused "cannot compare the filesystems of $tree and $M_WT; nothing changed"; return 1
+    fi
+    if [ -n "$xd" ]; then
+        restore_refused "$tree and $M_WT are on different filesystems ($xd); branch-gc restores only by" \
+            "rename, never by copy. Nothing changed. Put the entry on the filesystem of ${M_WT%/*}, then rerun"
+        return 1
+    fi
+    cur="$(git -C "$M_REPO" rev-parse -q --verify "refs/heads/$M_BRANCH" 2>/dev/null)" || cur=""
+    if [ -z "$cur" ]; then
+        if ! git -C "$M_REPO" cat-file -e "$M_TIP^{commit}" 2>/dev/null; then
+            restore_refused "tip $M_TIP is no longer in $M_REPO's objects"; return 1
+        fi
+        # Empty old value: create only, never overwrite a branch that appeared meanwhile.
+        git -C "$M_REPO" update-ref "refs/heads/$M_BRANCH" "$M_TIP" "" \
+            || { restore_refused "cannot re-create branch $M_BRANCH at $M_TIP"; return 1; }
+        created=1
+    elif [ "$cur" != "$M_TIP" ]; then
+        restore_refused "branch $M_BRANCH now points at $cur, not the quarantined tip $M_TIP." \
+            "Compare with: git -C '$M_REPO' log --oneline $M_TIP...$cur ; rename that branch, then rerun"
+        return 1
+    fi
+    # A pre-check is not enough: worktree add otherwise accepts a concurrently
+    # advanced branch, and reset would build an index for the wrong commit.
+    coproc RESTORE_REF_GUARD { git -C "$M_REPO" update-ref --no-deref --stdin; }
+    lock_pid="$RESTORE_REF_GUARD_PID"
+    local guard_in="${RESTORE_REF_GUARD[1]}" guard_out="${RESTORE_REF_GUARD[0]}"
+    exec {lock_in}>&"${RESTORE_REF_GUARD[1]}" {lock_out}<&"${RESTORE_REF_GUARD[0]}"
+    exec {guard_in}>&- {guard_out}<&-
+    printf 'start\nverify refs/heads/%s %s\nprepare\n' "$M_BRANCH" "$M_TIP" >&"$lock_in" || return 1
+    IFS= read -r ack <&"$lock_out" && [ "$ack" = 'start: ok' ] || return 1
+    IFS= read -r ack <&"$lock_out" && [ "$ack" = 'prepare: ok' ] \
+        || { restore_refused "branch changed or is locked; nothing moved"; return 1; }
+    if [ -f "$tree/.git" ] && [ ! -L "$tree/.git" ] \
+        && gd="$(git -C "$tree" rev-parse --absolute-git-dir 2>/dev/null)" \
+        && [ "$gd" = "$common/worktrees/${gd##*/}" ] && [ ! -L "$gd" ]; then
+        gitdir="$(cat -- "$gd/gitdir")" || return 1
+        case "$gitdir" in /*) ;; *) gitdir="$(realpath -m -- "$gd/$gitdir")" ;; esac
+        [ "$gitdir" != "$M_WT/.git" ] || reuse=1
+    fi
+    mkdir -p -- "${M_WT%/*}" || { restore_refused "cannot create ${M_WT%/*}"; return 1; }
+    if [ "$reuse" = 0 ] && ! git -C "$M_REPO" worktree add --no-checkout -q -- "$M_WT" "$M_BRANCH" 2> "$TMP/git.err"; then
+        restore_refused "git worktree add: $(head -n 1 "$TMP/git.err")"
+        release_restore_ref
+        if [ "$created" = 1 ] && ! delete_branch "$M_REPO" "$M_REPO" "$M_BRANCH" "$M_TIP"; then
+            restore_refused "and the branch $M_BRANCH it re-created at $M_TIP could not be removed again"
+        fi
+        return 1
+    fi
+    if [ "$reuse" = 0 ]; then
+        gd="$(git -C "$M_WT" rev-parse --absolute-git-dir)" || return 1
+    fi
+    (set -o noclobber; : > "$gd/HEAD.lock") 2>/dev/null \
+        || { restore_refused "restored worktree HEAD is locked; nothing moved"; return 1; }
+    head_lock=1
+    local check_path="$tree"
+    [ "$reuse" = 1 ] || check_path="$M_WT"
+    if [ "$(git -C "$check_path" symbolic-ref -q HEAD)" != "refs/heads/$M_BRANCH" ] \
+        || [ "$(git -C "$check_path" rev-parse --verify HEAD)" != "$M_TIP" ]; then
+        restore_refused "restored worktree HEAD changed; nothing moved"; return 1
+    fi
+    # A failed restore is not an expired backup. Retain it until recovery succeeds.
+    : > "$entry/restore-in-progress" || { restore_refused "cannot mark restore in progress"; return 1; }
+    if [ "$reuse" = 0 ]; then
+        if [ "$(find "$M_WT" -mindepth 1 -maxdepth 1 -printf x | wc -c)" != 1 ] || [ ! -f "$M_WT/.git" ]; then
+            restore_refused "$M_WT holds more than git's new .git pointer; nothing moved, $tree untouched"; return 1
+        fi
+        # Rename replaces even a symlink at $tree/.git without following it.
+        if ! mv --no-copy -f -T -- "$M_WT/.git" "$tree/.git" || ! rmdir -- "$M_WT"; then
+            restore_refused "could not hand git's new .git pointer from $M_WT to $tree by rename; nothing else moved"
+            return 1
+        fi
+    fi
+    move_tree "$tree" "$M_WT"; rc=$?
+    if [ "$rc" = 3 ]; then
+        restore_refused "$tree and $M_WT are on different filesystems (rename: Invalid cross-device link);" \
+            "branch-gc restores only by rename, never by copy. The tree is still in the trash with a registered" \
+            ".git pointer; rerun --restore '$entry' once both are on one filesystem"
+        return 1
+    elif [ "$rc" != 0 ]; then
+        restore_refused "moving $tree to $M_WT failed; data retained; rerun --restore '$entry' after resolving the move error"
+        return 1
+    fi
+    if ! git -C "$M_WT" read-tree --reset "$M_TIP"; then
+        restore_refused "worktree is back at $M_WT but its index was not rebuilt; run: git -C '$M_WT' read-tree --reset '$M_TIP'"; return 1
+    fi
+    jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {restored_at: $t}' "$entry/manifest.json" > "$entry/manifest.json.new" \
+        && mv --no-copy -f -T -- "$entry/manifest.json.new" "$entry/manifest.json" \
+        || log "WARN restore: $entry/manifest.json not stamped restored_at"
+    rm -- "$entry/restore-in-progress" || { restore_refused "restore finished but its recovery marker remains at $entry"; return 1; }
+    release_retention || { restore_refused "worktree restored but retention ref $M_RETENTION could not be released"; return 1; }
+    log "restore: $entry -> $M_WT (branch $M_BRANCH at $M_TIP$([ "$created" = 1 ] && echo ', branch re-created'))"
+    echo "branch-gc: restored $M_WT on $M_BRANCH ($M_TIP)$([ "$created" = 1 ] && echo ', branch re-created')"
+    git -C "$M_WT" status --short --ignored
+)
+
+# --- per repo -----------------------------------------------------------------
+declare -A SEEN=()
+SUMMARY="$TMP/summary.tsv"; : > "$SUMMARY"
+
+# Worktree paths THIS run quarantined, canonical. Recorded in gc_repo itself:
+# quarantine_worktree is a subshell and could not set it. Why it exists: the
+# default repo list holds every linked worktree beside its main repo (a worktree
+# is listed by its `.git` file), and the main repo sorts first, so a worktree
+# quarantined while its main repo was scanned is a vanished directory when its own
+# list entry comes up. That logged "ERROR <path>: not a git repo" 189 times
+# (2026-09-24 to 2026-10-14, each one a worktree quarantined earlier in the same
+# run) and ended every such run "failed", burying real failures. Not the cure:
+# `git worktree prune`. Quarantine already drops the admin entry itself (the copy
+# in the trash is what --restore re-registers from), and a blanket prune would
+# also drop registrations of worktrees that are only on an unmounted volume (see
+# the unavailable-worktree rows below). Memory, not the trash manifests, on
+# purpose: this decides only whether a vanished path is noise, so it stays fail
+# closed. A path vanished for any other reason, or quarantined by an earlier run
+# and passed by hand, is still an error.
+declare -A QUARANTINED=()
+# Resolve listed directories before any move. After a containing worktree moves,
+# its symlinks disappear too: realpath -m would then mistake a link to another
+# repo for a lexical descendant and claim that unscanned repo was already scanned.
+# A path absent before the run's moves was not moved by us and cannot qualify.
+# NUL-delimited reads preserve trailing newlines, which belong to path identity.
+declare -A INPUT_PATHS=()
+for listed_path in "${REPOS[@]}"; do
+    if [ -d "$listed_path" ] && IFS= read -r -d '' listed_real < <(realpath -ez -- "$listed_path" 2>/dev/null); then
+        INPUT_PATHS["$listed_path"]="$listed_real"
+    fi
+done
+quarantined_this_run() {  # $1 path: true when it, or a directory above it, was quarantined by this run
+    local p
+    p="${INPUT_PATHS[$1]:-}"
+    [ -n "$p" ] || return 1
+    while [ -n "$p" ]; do
+        [ -n "${QUARANTINED[$p]:-}" ] && return 0
+        [ "$p" = / ] && break
+        p="${p%/*}"; [ -n "$p" ] || p=/
+    done
+    return 1
+}
+
+gc_repo() {
+    local input="$1" common main label rc
+    if ! common="$(git -C "$input" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+        # Gone, and by this run's own quarantine: its repo was already scanned
+        # through the main checkout. Say so, but it is not a failure.
+        if [ ! -e "$input" ] && quarantined_this_run "$input"; then
+            row "$input" "-" "-" "-" "skip" "worktree quarantined earlier in this run; its repo was already scanned"
+            log "NOTE $input: worktree quarantined earlier in this run; nothing left to scan"
+            printf '%s\t0\t0\t0\t0\tworktree quarantined earlier in this run\n' "$input" >> "$SUMMARY"
+            return 0
+        fi
+        row "$input" "-" "-" "-" "skip" "not a git repo"; fail "$input: not a git repo"; return 0
+    fi
+    if ! common="$(realpath -e "$common" 2>/dev/null)"; then
+        row "$input" "-" "-" "-" "skip" "cannot resolve git common dir"; fail "$input: cannot resolve git common dir"; return 0
+    fi
+    [ -n "${SEEN[$common]:-}" ] && return 0
+    SEEN["$common"]=1
+    # The HEAD/index locks below use Git's files backend. Do not pretend those
+    # files serialize HEAD updates in a reftable repository.
+    if [ "$(git -C "$input" rev-parse --show-ref-format 2>/dev/null)" != files ]; then
+        row "$input" "-" "-" "-" "skip" "cannot verify files ref backend"
+        fail "$input: unsupported or unknown ref backend"; return 0
+    fi
+    if [ -s "$common/info/grafts" ]; then
+        row "$input" "-" "-" "-" "skip" "legacy grafts can alter ancestry; cannot verify"
+        fail "$input: legacy grafts can alter ancestry"; return 0
+    fi
+
+    # Parse `git worktree list --porcelain -z`; entry 0 is the main worktree.
+    local -a wt_path=() wt_branch=() wt_head=() wt_locked=() wt_prunable=() wt_bare=()
+    local line i=-1
+    if ! git -C "$input" worktree list --porcelain -z > "$TMP/wt.z" 2> "$TMP/git.err"; then
+        row "$input" "-" "-" "-" "skip" "git worktree list failed"
+        fail "$input: git worktree list failed: $(head -n 1 "$TMP/git.err")"; return 0
+    fi
+    while IFS= read -r -d '' line; do
+        case "$line" in
+            "worktree "*) i=$((i+1)); wt_path[i]="${line#worktree }"; wt_branch[i]=""; wt_head[i]=""
+                          wt_locked[i]=0; wt_prunable[i]=0; wt_bare[i]=0 ;;
+            "HEAD "*)     wt_head[i]="${line#HEAD }" ;;
+            "branch refs/heads/"*) wt_branch[i]="${line#branch refs/heads/}" ;;
+            locked|"locked "*)     wt_locked[i]=1 ;;
+            prunable|"prunable "*) wt_prunable[i]=1 ;;
+            bare)                  wt_bare[i]=1 ;;
+        esac
+    done < "$TMP/wt.z"
+    if [ "$i" -lt 0 ] || [ "${wt_bare[0]}" = 1 ]; then
+        row "$input" "-" "-" "-" "skip" "bare or empty worktree list"; return 0
+    fi
+    main="${wt_path[0]}"
+    label="$main"
+    local main_branch="${wt_branch[0]}"
+    local fails_before="$FAIL_COUNT" stopped=0 n_late=0
+
+    if [ "$MODE" = apply ] && [ "$REMOTE" = 0 ] && [ "$SKIP_SECONDS" -gt 0 ]; then
+        local fp="" last_t="" last_fp="" age
+        fp="$(repo_fingerprint "$main" 2>/dev/null)" || fp=""
+        if [ -n "$fp" ] && read -r last_t last_fp 2>/dev/null < "$(skip_state "$common")" \
+            && [[ "$last_t" =~ ^[0-9]+$ ]] && [ "$last_fp" = "$fp" ]; then
+            age=$(( $(date +%s) - last_t ))
+            if [ "$age" -ge 0 ] && [ "$age" -lt "$SKIP_SECONDS" ]; then
+                row "$label" "-" "-" "-" "skip" "unchanged since the clean --apply ${age}s ago (same refs, worktrees and mode; BRANCH_GC_SKIP_SECONDS=0 runs it anyway)"
+                log "$label: skipped: refs, worktrees and mode unchanged since the clean --apply ${age}s ago"
+                printf '%s\t0\t0\t0\t0\tskipped: unchanged since the clean --apply %ss ago\n' "$label" "$age" >> "$SUMMARY"
+                return 0
+            fi
+        fi
+    fi
+    # This run decides afresh; only its own clean end may record a fingerprint,
+    # so a run that fails or stops early leaves the next one nothing to skip on.
+    rm -f -- "$(skip_state "$common")" 2>/dev/null || true
+
+    # Include unavailable worktrees: their HEAD/reflog may be the only recovery
+    # path for unmerged work, even if the checkout is on an unmounted volume.
+    local -A br_wt=() br_dup=()
+    local k
+    for ((k = 1; k <= i; k++)); do
+        local wb="${wt_branch[k]}"
+        [ -z "$wb" ] && continue
+        [ -n "${br_wt[$wb]:-}" ] && br_dup["$wb"]=1
+        br_wt["$wb"]=$k
+    done
+
+    local -a br_names=() br_tips=()
+    local oid ref
+    if ! git -C "$main" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/ > "$TMP/refs.tsv" 2> "$TMP/git.err"; then
+        row "$label" "-" "-" "-" "skip" "git for-each-ref failed"
+        fail "$label: git for-each-ref failed: $(head -n 1 "$TMP/git.err")"; return 0
+    fi
+    while IFS=$'\t' read -r oid ref; do
+        br_names+=("${ref#refs/heads/}"); br_tips+=("$oid")
+    done < "$TMP/refs.tsv"
+
+    # Nothing but the main checkout's branch and no linked worktrees: no candidate
+    # exists, so spend no gh call (unless that branch is not origin's default).
+    local origin_head
+    origin_head="$(git -C "$main" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    origin_head="${origin_head#origin/}"
+    if [ "$REMOTE" = 0 ] && [ "$i" -eq 0 ] && [ "${#br_names[@]}" -le 1 ] \
+        && { [ "${#br_names[@]}" -eq 0 ] || [ "${br_names[0]}" = "$main_branch" ]; } \
+        && [ -n "$origin_head" ] && [ "$main_branch" = "$origin_head" ]; then
+        printf '%s\t0\t0\t0\t0\tnothing to evaluate\n' "$label" >> "$SUMMARY"
+        return 0
+    fi
+
+    set +e; fetch_github "$main"; rc=$?; set -e
+    if [ "$rc" -ne 0 ]; then
+        row "$label" "-" "-" "-" "skip" "$SKIP_WHY"
+        if [ "$rc" -eq 1 ]; then fail "$label: repo skipped: $SKIP_WHY"; else log "$label: skipped: $SKIP_WHY"; fi
+        printf '%s\t0\t0\t0\t0\tskipped: %s\n' "$label" "$SKIP_WHY" >> "$SUMMARY"
+        return 0
+    fi
+    label="$NWO"
+
+    local n_rm=0 n_rep=0 n_q=0 n_fail=0
+    local -A protected=(["$DEFAULT_BRANCH"]=1 [main]=1 [master]=1)
+    [ -n "$origin_head" ] && protected["$origin_head"]=1
+
+    # The containment base for no-PR branches: origin's copy of GitHub's default
+    # branch, pinned to one oid for the whole repo. A local origin/HEAD naming a
+    # different branch makes the default ambiguous, so no-PR stays report-only.
+    CONTAIN_OID=""; CONTAIN_REF=""; CONTAIN_WHY=""
+    if [ -n "$origin_head" ] && [ "$origin_head" != "$DEFAULT_BRANCH" ]; then
+        CONTAIN_WHY="default branch ambiguous (origin/HEAD is $origin_head, GitHub says $DEFAULT_BRANCH)"
+    elif ! CONTAIN_OID="$(git -C "$main" rev-parse -q --verify "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" 2>/dev/null)" \
+        || ! [[ "$CONTAIN_OID" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+        CONTAIN_OID=""; CONTAIN_WHY="refs/remotes/origin/$DEFAULT_BRANCH not found; containment unprovable"
+    else
+        CONTAIN_REF="refs/remotes/origin/$DEFAULT_BRANCH"
+    fi
+
+    # Never blanket-prune: it also drops detached HEADs/reflogs unrelated to any
+    # merged PR, and "prunable" can mean a temporarily unavailable filesystem.
+    for ((k = 1; k <= i; k++)); do
+        [ "${wt_prunable[k]}" = 1 ] || continue
+        row "$label" "${wt_branch[k]:-(detached)}" "${wt_path[k]}" "-" "report" "worktree unavailable; recovery metadata retained"
+        n_rep=$((n_rep+1))
+    done
+
+    # Linked worktrees with no branch (detached) or on a branch ref that no longer
+    # exists cannot be tied to a PR.
+    local -A have_ref=()
+    for ((k = 0; k < ${#br_names[@]}; k++)); do have_ref["${br_names[k]}"]=1; done
+    for ((k = 1; k <= i; k++)); do
+        [ "${wt_prunable[k]}" = 1 ] && continue
+        if [ -z "${wt_branch[k]}" ]; then
+            row "$label" "(detached)" "${wt_path[k]}" "-" "report" "detached HEAD, no branch to verify"
+            n_rep=$((n_rep+1))
+        elif [ -z "${have_ref[${wt_branch[k]}]:-}" ]; then
+            row "$label" "${wt_branch[k]}" "${wt_path[k]}" "-" "report" "branch ref missing (unborn), nothing to verify"
+            n_rep=$((n_rep+1))
+        fi
+    done
+
+    local -A local_elig=()
+    local j b tip wk wpath blk pr_col nopr merged_at_epoch
+    for ((j = 0; j < ${#br_names[@]}; j++)); do
+        b="${br_names[j]}"; tip="${br_tips[j]}"
+        wk="${br_wt[$b]:-}"; wpath="-"; [ -n "$wk" ] && wpath="${wt_path[wk]}"
+        if [ -n "$wk" ] && [ "${wt_prunable[wk]}" = 1 ]; then continue; fi
+        # The default branch in the main checkout is the normal state, not work.
+        if [ "$b" = "$main_branch" ] && [ -n "${protected[$b]:-}" ]; then continue; fi
+        # Checked before a branch, never inside one: its quarantine and delete
+        # run to the end once started.
+        if [ "$stopped" = 1 ] || past_deadline; then
+            [ "$stopped" = 1 ] || log "$label: deadline passed; no further branch is evaluated"
+            stopped=1; n_late=$((n_late+1))
+            row "$label" "$b" "$wpath" "-" "report" "not evaluated: the run's deadline passed (BRANCH_GC_DEADLINE)"
+            continue
+        fi
+
+        if [ "$b" = "$main_branch" ]; then
+            [ -n "${protected[$b]:-}" ] && continue   # the normal state: default branch in main checkout
+            eval_head "$main" "$b" "$tip"
+            if [ "$E_ELIG" = 1 ]; then
+                row "$label" "$b" "$main" "$E_PR" "report" "main checkout sits on merged branch $b"
+            else
+                row "$label" "$b" "$main" "$E_PR" "report" "main checkout branch ($E_WHY)"
+            fi
+            n_rep=$((n_rep+1)); continue
+        fi
+        if [ -n "${protected[$b]:-}" ]; then
+            row "$label" "$b" "$wpath" "-" "report" "default branch, never touched"
+            n_rep=$((n_rep+1)); continue
+        fi
+
+        eval_head "$main" "$b" "$tip"
+        nopr=0; merged_at_epoch=""
+        if [ "$E_ELIG" != 1 ]; then
+            if [ "$E_WHY" != "no PR" ] || [ "$E_PR" != "-" ]; then
+                row "$label" "$b" "$wpath" "$E_PR" "report" "$E_WHY"
+                n_rep=$((n_rep+1)); continue
+            fi
+            # No PR at all: eligible only when origin's default branch already
+            # holds every commit the branch and its reflogs ever pointed at.
+            blk="$(contain_blocker "$main" "$common" "$b" "$tip" "${wk:+$wpath}")"
+            if [ -n "$blk" ]; then
+                row "$label" "$b" "$wpath" "-" "report" "no PR; $blk"
+                n_rep=$((n_rep+1))
+                case "$blk" in "cannot "*) fail "$label $b: $blk"; n_fail=$((n_fail+1)) ;; esac
+                continue
+            fi
+            nopr=1
+            E_WHY="no PR; tip and reflog contained in ${CONTAIN_REF#refs/remotes/}"
+        else
+            blk="$(merged_reflog_blocker "$main" "$common" "$b" "$E_OID" "${wk:+$wpath}")"
+            if [ -n "$blk" ]; then
+                row "$label" "$b" "$wpath" "$E_PR" report "$blk"
+                n_rep=$((n_rep+1)); continue
+            fi
+            local_elig["$b"]="$E_OID"
+            merged_at_epoch="$E_MERGED"
+        fi
+        pr_col="$E_PR"
+
+        if [ "$nopr" = 0 ] && [ -n "$wk" ] && [ "$WT_GRACE_HOURS" -gt 0 ]; then
+            local age_s; age_s=$(( $(date +%s) - E_MERGED ))
+            if [ "$age_s" -lt $(( WT_GRACE_HOURS * 3600 )) ]; then
+                row "$label" "$b" "$wpath" "$pr_col" "report" \
+                    "$E_WHY; merged $(awk -v s="$age_s" 'BEGIN{printf "%.1f", s/3600}')h ago; worktree grace ${WT_GRACE_HOURS}h"
+                n_rep=$((n_rep+1)); continue
+            fi
+        fi
+        if [ -n "${br_dup[$b]:-}" ]; then
+            row "$label" "$b" "$wpath" "$pr_col" "report" "$E_WHY; checked out in more than one worktree"
+            n_rep=$((n_rep+1)); continue
+        fi
+        if [ -n "$wk" ]; then
+            blk="$(worktree_blocker "$wpath" "${wt_locked[wk]}" "$b" "$tip" 0 "$merged_at_epoch" "$nopr")"
+            if [ -n "$blk" ]; then
+                row "$label" "$b" "$wpath" "$pr_col" "report" "$E_WHY; $blk"
+                n_rep=$((n_rep+1))
+                if [ "$blk" = "T3 state unreadable" ]; then fail "$label $b: $blk"; n_fail=$((n_fail+1)); fi
+                case "$blk" in "cannot "*) fail "$label $b: $blk ($wpath)"; n_fail=$((n_fail+1)) ;; esac
+                continue
+            fi
+        fi
+
+        if [ "$MODE" != apply ]; then
+            if [ -n "$wk" ] && [ "$nopr" = 1 ]; then
+                row "$label" "$b" "$wpath" "$pr_col" "quarantine" \
+                    "$E_WHY; worktree clean and idle ${NO_PR_IDLE_HOURS}h, would move to trash and git branch -d"
+                log "$label $b: would quarantine worktree $wpath and delete branch with git branch -d ($E_WHY)"
+                n_q=$((n_q+1))
+            elif [ -n "$wk" ]; then
+                row "$label" "$b" "$wpath" "$pr_col" "quarantine" "$E_WHY; worktree clean, would move to trash"
+                log "$label $b: would quarantine worktree $wpath and remove branch ($E_WHY)"
+                n_q=$((n_q+1))
+            elif [ "$nopr" = 1 ]; then
+                row "$label" "$b" "$wpath" "$pr_col" "remove" "$E_WHY; would git branch -d"
+                log "$label $b: would delete branch with git branch -d ($E_WHY)"
+            else
+                row "$label" "$b" "$wpath" "$pr_col" "remove" "$E_WHY"
+                log "$label $b: would remove branch ($E_WHY)"
+            fi
+            n_rm=$((n_rm+1)); continue
+        fi
+        local act=removed qnote=""
+        if [ -n "$wk" ]; then
+            : > "$TMP/quarantine.entry"; : > "$TMP/quarantine.skip"
+            local qrc=0 qkey=""
+            IFS= read -r -d '' qkey < <(realpath -ez -- "$wpath" 2>/dev/null) || qkey=""
+            if [ "$nopr" = 1 ]; then
+                quarantine_worktree "$main" "$wpath" "$b" "$tip" "$label" null "" "" 1 "$CONTAIN_REF" 2> "$TMP/git.err" || qrc=$?
+            else
+                quarantine_worktree "$main" "$wpath" "$b" "$tip" "$label" "$E_NUM" "$E_MAT" "$E_MERGED" 0 "" "$E_OID" 2> "$TMP/git.err" || qrc=$?
+            fi
+            if [ "$qrc" = 3 ]; then
+                local qskip; qskip="$(head -n 1 "$TMP/quarantine.skip")"
+                row "$label" "$b" "$wpath" "$pr_col" "report" "$E_WHY; ${qskip:-quarantine skipped}"
+                log "$label $b: ${qskip:-quarantine skipped}; worktree $wpath and branch kept"
+                n_rep=$((n_rep+1)); continue
+            fi
+            if [ "$qrc" != 0 ]; then
+                local qerr; qerr="$(tr '\n' ' ' < "$TMP/git.err" | head -c 400)"
+                row "$label" "$b" "$wpath" "$pr_col" "remove-failed" "quarantine: ${qerr:-no detail}"
+                fail "$label $b: quarantine of $wpath failed: ${qerr:-no detail}"
+                n_fail=$((n_fail+1)); continue
+            fi
+            local qentry; qentry="$(cat "$TMP/quarantine.entry")"
+            log "$label $b: quarantined worktree $wpath to $qentry"
+            [ -z "$qkey" ] || QUARANTINED["$qkey"]=1
+            n_q=$((n_q+1)); act=quarantined; qnote="; worktree moved to ${qentry/#$HOME/\~}"
+        fi
+        if delete_branch "$main" "$label" "$b" "$tip" "$([ "$nopr" = 1 ] && printf '%s' "$CONTAIN_OID")" "$E_OID"; then
+            row "$label" "$b" "$wpath" "$pr_col" "$act" "$E_WHY$qnote"
+            n_rm=$((n_rm+1))
+        else
+            row "$label" "$b" "$wpath" "$pr_col" "remove-failed" "branch delete refused or moved; see log$qnote"
+            n_fail=$((n_fail+1))
+        fi
+    done
+
+    # --- remote branches (opt-in) ---
+    # Deleting a remote head that an OPEN PR uses as its base auto-closes that
+    # child PR, so a stacked base is kept. The remote tip must equal the merged PR
+    # head exactly, and the push carries that oid as a lease so a branch that moves
+    # between check and push is refused by the server side of the protocol.
+    if [ "$REMOTE" = 1 ] && [ "$stopped" = 0 ]; then
+        if ! git -C "$main" ls-remote --heads origin > "$TMP/remote.tsv" 2> "$TMP/git.err"; then
+            row "$label" "origin/*" "-" "-" "skip" "git ls-remote failed; remote half skipped"
+            fail "$label: git ls-remote failed: $(head -n 1 "$TMP/git.err")"; n_fail=$((n_fail+1))
+        else
+            local roid rref rb child
+            while IFS=$'\t' read -r roid rref; do
+                rb="${rref#refs/heads/}"
+                [ -n "${protected[$rb]:-}" ] && continue
+                [ "$rb" = "$main_branch" ] && continue
+                # Only branches some merged PR names are rows; the rest are noise.
+                B="$rb" awk -F'\t' '$3 == ENVIRON["B"] && $2 == "MERGED" {f=1} END{exit !f}' "$PRS" || continue
+                # ls-remote or the previous push can use up the remaining time.
+                # Keep remote deletions within the same between-branch deadline
+                # as local quarantine, without interrupting a push in progress.
+                if [ "$stopped" = 1 ] || past_deadline; then
+                    [ "$stopped" = 1 ] || log "$label: deadline passed; no further remote branch is evaluated"
+                    stopped=1; n_late=$((n_late+1))
+                    row "$label" "origin/$rb" "-" "-" "report" "not evaluated: the run's deadline passed (BRANCH_GC_DEADLINE)"
+                    continue
+                fi
+                if B="$rb" awk -F'\t' '$3 == ENVIRON["B"] && $2 == "OPEN" {f=1} END{exit !f}' "$PRS"; then
+                    row "$label" "origin/$rb" "-" "OPEN" "report" "remote has an open PR"; n_rep=$((n_rep+1)); continue
+                fi
+                child="$(B="$rb" awk -F'\t' '$5 == ENVIRON["B"] && $2 == "OPEN" {print $1; exit}' "$PRS")"
+                if [ -n "$child" ]; then
+                    row "$label" "origin/$rb" "-" "base of #$child" "report" "open PR #$child is based on this branch (stacked)"
+                    n_rep=$((n_rep+1)); continue
+                fi
+                local rnum
+                rnum="$(B="$rb" O="$roid" awk -F'\t' '$3 == ENVIRON["B"] && $2 == "MERGED" && $4 == ENVIRON["O"] {print $1; exit}' "$PRS")"
+                if [ -z "$rnum" ]; then
+                    row "$label" "origin/$rb" "-" "MERGED" "report" "remote tip ${roid:0:9} != merged PR head"
+                    n_rep=$((n_rep+1)); continue
+                fi
+                local rmat
+                rmat="$(N="$rnum" awk -F'\t' '$1 == ENVIRON["N"] {print $6; exit}' "$PRS")"
+                E_ELIG=1; merged_epoch "$rnum" "$rmat"
+                if [ "$E_ELIG" != 1 ]; then
+                    row "$label" "origin/$rb" "-" "#$rnum MERGED" "report" "$E_WHY"
+                    n_rep=$((n_rep+1)); continue
+                fi
+                local lb_idx found=0
+                for ((lb_idx = 0; lb_idx < ${#br_names[@]}; lb_idx++)); do
+                    [ "${br_names[lb_idx]}" = "$rb" ] && found=1
+                done
+                if [ "$found" = 1 ] && [ -z "${local_elig[$rb]:-}" ]; then
+                    row "$label" "origin/$rb" "-" "#$rnum MERGED" "report" "local branch $rb is not eligible"
+                    n_rep=$((n_rep+1)); continue
+                fi
+                if [ "$MODE" != apply ]; then
+                    row "$label" "origin/$rb" "-" "#$rnum MERGED" "remove" "remote tip == merged PR #$rnum head"
+                    log "$label origin/$rb: would delete remote branch (PR #$rnum)"
+                    n_rm=$((n_rm+1)); continue
+                fi
+                if "${TIMEOUT[@]}" git -C "$main" push --force-with-lease="refs/heads/$rb:$roid" origin ":refs/heads/$rb" > /dev/null 2> "$TMP/git.err"; then
+                    row "$label" "origin/$rb" "-" "#$rnum MERGED" "removed" "remote tip == merged PR #$rnum head"
+                    log "$label origin/$rb: deleted remote branch (was $roid, PR #$rnum)"
+                    n_rm=$((n_rm+1))
+                else
+                    row "$label" "origin/$rb" "-" "#$rnum MERGED" "remove-failed" "git push --delete refused; see log"
+                    fail "$label origin/$rb: push delete failed: $(tr '\n' ' ' < "$TMP/git.err" | head -c 300)"
+                    n_fail=$((n_fail+1))
+                fi
+            done < "$TMP/remote.tsv"
+        fi
+    fi
+
+    local note="-"
+    [ "$stopped" = 0 ] || note="stopped at the deadline: $n_late branch(es) not evaluated"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$n_rm" "$n_rep" "$n_q" "$n_fail" "$note" >> "$SUMMARY"
+    log "$label: remove=$n_rm report=$n_rep quarantine=$n_q fail=$n_fail$([ "$n_late" = 0 ] || printf ' not-evaluated=%s' "$n_late")"
+    # Record the fingerprint as the clean run leaves the repo, for the skip window.
+    if [ "$MODE" = apply ] && [ "$REMOTE" = 0 ] && [ "$stopped" = 0 ] && [ "$n_fail" = 0 ] \
+        && [ "$FAIL_COUNT" = "$fails_before" ]; then
+        local st fp_after
+        st="$(skip_state "$common")"
+        if fp_after="$(repo_fingerprint "$main" 2>/dev/null)" && [ -n "$fp_after" ] && mkdir -p "${st%/*}" 2>/dev/null; then
+            printf '%s %s\n' "$(date +%s)" "$fp_after" > "$st.tmp" 2>/dev/null && mv -f -- "$st.tmp" "$st" 2>/dev/null || rm -f -- "$st.tmp"
+        fi
+    fi
+    return 0
+}
+
+if [ "$MODE" = restore ]; then
+    rc=0; restore_entry "$RESTORE_ENTRY" || rc=1
+    log "===== end (restore rc=$rc) ====="
+    exit "$rc"
+fi
+
+# Purge first: an entry is judged by its own manifest, never by this run's repos.
+purge_trash
+
+for r in "${REPOS[@]}"; do
+    [ -n "$r" ] || continue
+    if past_deadline; then
+        row "$r" "-" "-" "-" "skip" "not started: the run's deadline passed (BRANCH_GC_DEADLINE)"
+        printf '%s\t0\t0\t0\t0\tnot started: deadline passed\n' "$r" >> "$SUMMARY"
+        log "$r: not started: deadline passed"
+        continue
+    fi
+    gc_repo "$r"
+done
+
+# --- output -------------------------------------------------------------------
+T3_SHOWN="$T3_STATE"; [ -e "$TMP/t3recheck.failed" ] && T3_SHOWN=unreadable
+echo "branch-gc $MODE$([ "$REMOTE" = 1 ] && echo ' --remote') $(date '+%Y-%m-%d %H:%M:%S %Z')  T3=$T3_SHOWN${T3_SRC_PATH:+ ($T3_SOURCE ${T3_SRC_PATH/#$HOME/\~})}"
+if [ "$TSV" = 1 ]; then
+    printf 'REPO\tBRANCH\tWORKTREE\tPR\tACTION\tREASON\n'; cat "$ROWS"
+elif [ -s "$ROWS" ]; then
+    { printf 'REPO\tBRANCH\tWORKTREE\tPR\tACTION\tREASON\n'; cat "$ROWS"; } | awk -F'\t' '
+        { n = NR; for (c = 1; c <= 6; c++) { cell[n, c] = $c; if (c < 6 && length($c) > w[c]) w[c] = length($c) } }
+        END {
+            fmt = "%-" w[1] "s  %-" w[2] "s  %-" w[3] "s  %-" w[4] "s  %-" w[5] "s  %s\n"
+            for (r = 1; r <= n; r++) printf fmt, cell[r,1], cell[r,2], cell[r,3], cell[r,4], cell[r,5], cell[r,6]
+        }'
+else
+    echo "(no rows)"
+fi
+echo
+echo "Summary (remove / report / quarantine / failed):"
+awk -F'\t' '{ printf "  %-50s %4s %4s %4s %4s  %s\n", $1, $2, $3, $4, $5, ($6 == "-" ? "" : $6) }' "$SUMMARY"
+log "===== end (failed=$FAILED) ====="
+if [ "$FAILED" -ne 0 ]; then
+    echo "branch-gc: one or more repos were skipped or actions failed; see $LOG_FILE" >&2
+    exit 1
+fi
+exit 0

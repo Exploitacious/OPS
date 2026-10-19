@@ -22,6 +22,9 @@
 #   - empty directories and file modes survive a dirty-day run, including one
 #     whose rebase replays the day's commit over a remote that moved
 #   - a rebase left in progress is reported, not committed on top of
+#   - an origin with no branch of this name yet is a first push, through the
+#     gate: pushed to a private origin, held for a public one; an unreachable
+#     origin is still a failed pull, never a first push
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/daily-sync-test.sh
 set -uo pipefail
@@ -203,6 +206,7 @@ dirty_tree offline
 before_state="$(tree_state)"; before="$(remote_head)"; head_before="$(local_head)"
 FAKE_REMOTE="$WORK/unreachable.git" GH_ANSWER=true run_sync
 grep -q "OPS: ERROR pull --rebase failed; the day's commit is kept locally, nothing pushed" "$LOG" || fail "unreachable origin: the failed pull was not logged as an error"
+if grep -q 'nothing to pull, pushing it as the first backup' "$LOG"; then fail "unreachable origin: taken for a missing branch"; fi
 [ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "unreachable origin: the tree changed"; }
 [ "$(git -C "$OPS" rev-parse HEAD^)" = "$head_before" ] && [ -z "$(git -C "$OPS" status --porcelain)" ] \
   && git -C "$OPS" cat-file -e HEAD:untracked-offline.md || fail "unreachable origin: the day's work is not in the day's commit"
@@ -290,5 +294,24 @@ grep -q 'OPS: ERROR a rebase or merge is in progress; nothing committed or pushe
 [ "$(local_head)" = "$head_before" ] || fail "rebase in progress: a commit was made"
 rmdir "$OPS/.git/rebase-merge"
 pass "a rebase left in progress is reported and nothing is committed"
+
+# --- An origin with no branch yet: the first push --------------------------------
+# (2026-10-19: a copy whose origin had no branch of this name failed the pull
+# on every run; the tree was restored, but nothing was ever backed up.)
+EMPTY="$WORK/empty.git"
+git init -q --bare "$EMPTY" || fail "fixture: empty bare remote"
+printf 'first backup note\n' > "$OPS/first.md"
+FAKE_REMOTE="$EMPTY" GH_ANSWER=false run_sync
+grep -q 'OPS: origin has no branch main yet; nothing to pull, pushing it as the first backup' "$LOG" \
+  || fail "missing remote branch: not taken as a first push"
+grep -q 'OPS: WARN push skipped, commit kept locally: origin-private-check: public' "$LOG" \
+  || fail "missing remote branch, public origin: the first push skipped the gate"
+if git -C "$EMPTY" rev-parse -q --verify refs/heads/main >/dev/null; then fail "missing remote branch: pushed to a public origin"; fi
+if grep -q 'OPS: ERROR' "$LOG"; then fail "missing remote branch, public origin: logged as an error"; fi
+FAKE_REMOTE="$EMPTY" GH_ANSWER=true run_sync
+grep -q 'OPS: backup pushed successfully' "$LOG" || fail "missing remote branch, private origin: the first push was not logged"
+[ "$(git -C "$EMPTY" rev-parse refs/heads/main)" = "$(local_head)" ] || fail "missing remote branch, private origin: main was not created on origin"
+if grep -q 'OPS: ERROR' "$LOG"; then fail "missing remote branch, private origin: logged as an error"; fi
+pass "an origin with no branch yet is a first push through the gate: held for a public origin, pushed to a private one"
 
 echo "ALL PASS"

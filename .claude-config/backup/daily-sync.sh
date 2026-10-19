@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Daily sync: (1) back up the OPS repo to GitHub, (2) pull every project
-# repo under PROJECTS/ so all clones stay current across machines.
+# repo under PROJECTS/ so all clones stay current across machines, (3)
+# garbage-collect local branches and worktrees whose PRs merged (branch-gc).
 # Runs via Linux cron / Windows Task Scheduler ("OPS Daily Backup", 09:00).
 #
 # Design:
 #   - No `set -e` at top level: one repo's failure must NOT abort the rest.
-#     Each stage is a function that logs and returns; both stages always run.
+#     Each stage is a function that logs and returns; every stage always runs.
+#     The run exits 0 even when a stage failed, so the log is the record: the
+#     session briefing reads the last run's OPS-stage ERROR and push-skip lines
+#     back from sync.log (hooks/session-briefing.sh, "Backup:").
 #   - OPS stage order: commit -> pull --rebase -> push. The day's work is
 #     committed where it stands, so the tree is never moved: a pull that fails
 #     (offline, a conflict) is aborted and leaves the local commit and the
@@ -23,6 +27,11 @@
 #     a copy made public by mistake, a public fork) or one it cannot verify
 #     keeps the day's commit local and logs the reason and the fix. The next
 #     run that passes the gate pushes every held commit, even on a clean day.
+#   - First push: an origin with no branch of this name yet (a new private
+#     repo, a default branch renamed on one side) has nothing to pull, and the
+#     pull failed on every run, so nothing was ever backed up. When the pull
+#     fails and `git ls-remote --exit-code` says the branch is absent (exit 2,
+#     not a network or auth error), the run pushes through the gate instead.
 
 set -uo pipefail
 
@@ -172,6 +181,16 @@ backup_ops() {
             git rebase --abort >/dev/null 2>&1 || log "OPS: ERROR could not abort the half-done rebase; resolve with: cd $OPS_DIR && git status"
         fi
         restore_modes
+        # Exit 2 is "origin answered and has no such branch"; 0 (the branch is
+        # there) and any other code (offline, no credentials) keep the pull's
+        # error below. A missing branch is a first push, not a failure.
+        local ls_rc=0
+        git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1 || ls_rc=$?
+        if [ "$ls_rc" = 2 ]; then
+            log "OPS: origin has no branch $branch yet; nothing to pull, pushing it as the first backup"
+            push_ops "$branch"
+            return
+        fi
         if [ "$committed" = 1 ]; then
             log "OPS: ERROR pull --rebase failed; the day's commit is kept locally, nothing pushed: $pull_why"
         else
@@ -207,7 +226,33 @@ sync_projects() {
     fi
 }
 
+# --- Stage 3: garbage-collect merged branches and worktrees ------------------
+# Squash merges leave every landed branch (and any Claude Code or T3 worktree on
+# it) behind, and nothing else removes them: `gh pr merge --delete-branch` is
+# never used because worktrees share one ref store and it rotated live
+# checkouts. branch-gc deletes only what a merged PR provably carried, or a
+# no-PR branch the default branch already holds, fails closed on any doubt, and
+# moves worktrees to a 7-day trash rather than deleting them. It runs after the
+# project pull so the PR heads that pull fetched are in the local object store
+# for its ancestry proof. Local half only, never --remote: remote branches are
+# GitHub's delete_branch_on_merge. Non-fatal, like the stages before it; its own
+# per-action log is ~/.local/state/ops/branch-gc.log.
+gc_branches() {
+    local script="$OPS_DIR/.claude-config/bin/branch-gc"
+    if [ ! -x "$script" ]; then
+        log "BRANCH-GC: WARN branch-gc not executable at $script; skipping"
+        return 0
+    fi
+    log "BRANCH-GC: running branch-gc --apply"
+    if "$script" --apply >> "$LOG_FILE" 2>&1; then
+        log "BRANCH-GC: branch-gc --apply completed"
+    else
+        log "BRANCH-GC: WARN branch-gc --apply exited non-zero (see output above)"
+    fi
+}
+
 log "===== daily-sync start ====="
 backup_ops
 sync_projects
+gc_branches
 log "===== daily-sync complete ====="
