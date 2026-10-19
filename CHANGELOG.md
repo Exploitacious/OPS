@@ -4,84 +4,23 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
-## 2026-10-19: lane-aware hooks, branch cleanup, the sandbox, and the review split
-
-The hooks assumed one 1M window for every caller and still told sessions to
-self-compact through a tmux typer that cannot exist under T3 Code. OPS also had
-no rule on where destructive tests run and no landing tooling. This release
-ports those pieces from the maintainer's private harness.
-
-- **Lanes are sized by their own model.** `context-watch.sh` treats a hook call
-  carrying `agent_id` as a sub-agent lane: it reads the lane's own transcript,
-  sizes the window from the lane's model (1M for the current Opus, Sonnet and
-  Fable ids, 200K for the 4.6 and Haiku 4.5 ids, one 95K backstop under Haiku
-  5.5's 100K ceiling), and speaks only mid-turn, a reminder at 60% and a
-  wrap-up at 80%. Before, every lane got the main session's ladder read from
-  the main transcript, so a lane of a busy foreman was told to compact at once.
-  The agent definitions carry the lane return contract.
-- **No session self-compacts.** `bin/compact-cycle.sh` is deleted: it typed
-  `/compact` into a tmux pane and could not tell a finished compaction from a
-  failed one. Every nag now routes to `pre-compact-synthesis` and then the
-  Operator's `/compact`; sessions in tmux or herdr are run by hand.
-- **`branch-gc`** removes local branches a merged PR provably carried and
-  parks their worktrees in a 7-day trash it can restore from; it fails closed
-  on any doubt. It runs nightly from `daily-sync.sh`, from the PreCompact hook
-  for the cwd repo (detached; skipped when the payload names a sub-agent),
-  and at closeout.
-- **Destructive tests run in a sandbox.** `bin/sandbox-run` (bubblewrap: a
-  read-only root, a fresh home and `/tmp`, nothing writable by default) plus
-  a guard every suite that runs branch-gc, pre-compact, memory-init, deploy or
-  skills-vendor now starts with; outside the sandbox those suites exit 97.
-  `verify-ops.sh` check 24 fails an unguarded one. Why: in the private harness
-  an unsandboxed mutation sweep wiped most of a home directory.
-- **The review split.** The open-ended `ops-reviewer` lane is retired. Code
-  where a miss is expensive goes to a second vendor's model
-  (`bin/second-vendor-review` is the optional hand-off), or with none to an
-  Opus 5.5 refutation lane plus the Operator's own read; other code gets a
-  Sonnet 5.5 refutation lane; docs and decisions land on verification.
-  `how-i-work.md` carries the refutation brief shape.
-- **Backups that fail are visible.** The session briefing's `Backup:` line
-  repeats the last nightly run's OPS-stage errors and skipped pushes, since
-  `daily-sync.sh` exits 0 and nothing read its log. An origin with no branch
-  of that name yet is now a first push; before, its pull failed every night
-  and nothing was ever backed up.
-- **Fixes:** every git-guard check now sees through an `rtk` prefix (from a
-  project repo, `rtk git push --force`, `rtk git branch -D` and the other
-  rtk forms of a blocked command all passed); `harness-update-scan.sh` exits 7
-  when git cannot list the delta, instead of reporting a clean empty one;
-  deploy's failure summary mentions the core only when the core rule failed;
-  the pre-compact-synthesis skill states the push gate's verdict rule;
-  `verify-ops.sh` check 25 warns on a memory link whose pool is gone.
-- **`guard-selftest.sh` counts every failure.** Its rtk probes read their
-  JSON through a pipe, which ran each probe in a subshell: a failing rtk guard
-  printed FAIL and the selftest still exited 0 with "ALL GUARDS ENFORCE", the
-  exit code `deploy.ps1` acts on. They read a here-string now, and
-  `tests/guard-selftest-test.sh` inverts one guard verdict per probe site and
-  checks the exit code and the count.
-- **`second-vendor-review` never runs a reviewer without its cap.** With no
-  `timeout` or `gtimeout` on PATH (stock macOS) it skipped `--timeout` in
-  silence, so a hung reviewer blocked forever and a slow one was written up as
-  a review. It now exits 3 before any git work and names the fix
-  (`brew install coreutils`); `gtimeout` alone is enough.
-- **Ported:** `bin/transcript-usage.py` (token profile from transcripts) with
-  a test.
-- **Review hardening.** `sandbox-run` passes only an allowlisted set of open
-  file descriptors into bubblewrap: an inherited descriptor (fd 255 included)
-  let a suite write to the host behind the read-only mounts. `second-vendor-review`
-  writes its packet and result to private, unique paths published atomically,
-  stops when the digest cannot be read, and no longer records the reviewer
-  command, whose inline assignments could carry a credential. New
-  `sandbox-run-fd-test.py`, which runs outside the sandbox like `sandbox-run-test.sh`.
-
-## 2026-10-19: one always-loaded core, and the fleet retired
+## 2026-10-19: one always-loaded core, private-only pushes, lane-aware hooks, the sandbox, and a CI gate
 
 OPS booted through a foreman charter and an identity digest that a `claude()`
 shell function appended to the system prompt. Only launches typed into an
 interactive shell ran that function, so a T3 Code thread, an IDE session, or
-`claude -p` started with none of the doctrine. This release replaces that boot
+`claude -p` started with none of the doctrine. The hooks assumed one 1M window
+for every caller and still told sessions to self-compact through a tmux typer
+that cannot exist under T3 Code. OPS also had no rule on where destructive
+tests run, no landing tooling, and no CI. This release replaces the boot
 with one always-loaded file, moves the identity layer to files the template
-sync never touches, and retires the multi-agent fleet. Existing copies migrate
-by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
+sync never touches, retires the multi-agent fleet, keeps every automatic push
+on a private origin, ports the lane-aware hooks, branch cleanup, sandbox and
+review split from the maintainer's private harness, and closes with a docs
+pass, third-party notices and a CI gate. Existing copies migrate by hand once:
+`DEPLOYMENT.md` § "Migrating to the core boot".
+
+### Boot and doctrine
 
 - **`CONTEXT/core.md` loads on every launch path.** One generic file, under
   15,360 bytes, with the rules every session and lane needs on every turn:
@@ -109,10 +48,6 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `start-remote-claude.sh`, and the `ops-memory-gc` timer. The `claude()` shim
   is ultracode-only, and a re-deploy heals the old boot shim while keeping a
   Round F permission edit.
-- **Template sync.** `harness-update-scan.sh` excludes `USER.md`, `voice.md`,
-  `standing-orders.md`, the `work-tracking`, `team`, and `tools` slots, and the
-  marker, plus the retired identity names, so a delta scan never lists an
-  unmigrated identity file as REMOVED. This landed first, ahead of the renames.
 - **BOOTSTRAP** writes the new set: `USER.md`, a `voice.md` starter, and a
   dated standing order for every Operator choice. Round F keeps its text and
   records into `standing-orders.md`; the new Round G sets up T3 Code's headless
@@ -126,31 +61,26 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `claude-root-wrapper.sh`, which deploy wires for root only. The wrapper's
   conflict hint uses `pgrep -l`, because `pgrep -af` prints other sessions'
   full command lines.
-- **Mounted skills arrive on a fresh install.** Deploy clones the public skill
-  source once and runs `skills-vendor.sh sync`; it never pulls an existing
-  clone. `skills-vendor.sh` honors `OPS_DIR`, compares file content, and falls
-  back to tar where rsync is missing, as on a stock Debian container.
-- **Deploy** strips the fleet's PATH and wrapper lines, takes `--no-system`
-  (`-NoSystem` on Windows) to skip writes outside `$HOME` for test installs,
-  and exits non-zero when a step fails.
-- **The drift gate** checks the new boot: 16 fails when the core is missing,
-  over budget, or not linked; 1b fails on a root `CLAUDE.md`; 5 counts the
-  principles in `how-i-work.md`; 17 and 21b warn on retired hooks and files;
-  21 is the `USER.md` canary; 23 requires every identity exclusion.
-  `verify-ops.sh` checks another checkout through `OPS_DIR`. New tests:
-  `.claude-config/bin/tests/` (memory-index, root wrapper, deploy rc and core
-  wiring, skills-vendor) and new `verify-ops-selftest.sh` cases.
-- **Skills refreshed.** `grill-me`, `tdd` and `diagnosing-bugs` mount from
-  the public agent-skills library alongside the six earlier mounts; deploy
-  clones it and runs `skills-vendor.sh sync`. `harness-update`,
-  `pre-compact-synthesis`, `session-close`, `session-handoff`, `memory-prune`,
-  `operator-voice` and the grabit skills follow the current rest-stop and close
-  rules: a session closes only on the Operator's word, and the close stamp is
-  now cleared (its redirect was missing, so the `rm` became a `printf`
-  argument). New `scripts/inventory` for memory-prune, which exits 1 on a
-  missing store so a wrong path cannot read as a clean pool. New generic
-  `operating-model` and `stewardship` skills. The `fleet-doctrine` skill is
-  removed with the fleet.
+
+### Hooks and compaction
+
+- **Lanes are sized by their own model.** `context-watch.sh` treats a hook call
+  carrying `agent_id` as a sub-agent lane: it reads the lane's own transcript,
+  sizes the window from the lane's model (1M for the current Opus, Sonnet and
+  Fable ids, 200K for the 4.6 and Haiku 4.5 ids, one 95K backstop under Haiku
+  5.5's 100K ceiling), and speaks only mid-turn, a reminder at 60% and a
+  wrap-up at 80%. Before, every lane got the main session's ladder read from
+  the main transcript, so a lane of a busy foreman was told to compact at once.
+  The agent definitions carry the lane return contract.
+- **No session self-compacts.** `bin/compact-cycle.sh` is deleted: it typed
+  `/compact` into a tmux pane and could not tell a finished compaction from a
+  failed one. Every nag now routes to `pre-compact-synthesis` and then the
+  Operator's `/compact`; sessions in tmux or herdr are run by hand.
+
+### Pushes stay on a private origin
+
+Your copy holds your memory and notes, so every push of it meets one gate.
+
 - **Automatic pushes go only to a private origin.** `memory-init
   --auto-commit` and the daily backup (`daily-sync.sh`, which the Windows task
   also runs) pushed to wherever origin pointed, so a tryout clone of this
@@ -165,49 +95,6 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   config ops.pushVerified true`, which never overrides a public answer. Tests:
   `origin-private-check-test.sh`, `daily-sync-test.sh`, and new memory-init
   cases in bash and PowerShell.
-- **Skill mounts never delete a folder they did not write.** A manifest row
-  replaced whatever sat at `SKILLS/<name>`, so this release's `grill-me`,
-  `tdd`, and `diagnosing-bugs` rows would have deleted an existing copy's own
-  skill of that name. `skills-vendor.sh` now records a digest of each mirror
-  it writes (`SKILLS/.vendored-state.tsv`) and moves any other destination,
-  including a hand-edited mirror, to
-  `.claude-config/backup/skills-replaced/<name>-<UTC>/` before installing,
-  with a `BACKUP` line naming the path; a failed install moves it back.
-  Mirrors already equal to their source update in place as before.
-- **Template sync for older copies.** `harness-update-scan.sh` is self-contained
-  by contract (it finds its root from the working directory and loads no helper
-  file), so a copy that predates it runs it straight from the template; the
-  harness-update skill gains "Updating a copy that predates this skill" with the
-  commands. The template's history was rewritten on 2026-10-19 to remove a
-  private name from one old commit, so a `last_synced` marker written before
-  then names a commit the template no longer has: the scan now translates it to
-  its rewritten twin (same tree) and stays in delta mode instead of falling back
-  to a first-sync compare. New `harness-update-scan-test.sh`.
-- **Agents push memory and batons only to a private origin.** The
-  pre-compact-synthesis and session-handoff skills run `origin-private-check`
-  before their additive-sync push, the same gate `memory-init` and the daily
-  backup use.
-- **Backups that cannot happen say so.** The daily backup checks its commit:
-  a failed commit (no git identity, a hook) or a failed stash is logged as an
-  ERROR with the fix, and nothing is pushed or reported as backed up; before,
-  the log claimed a backup that did not exist. A new memory pool gets a
-  `.gitkeep`, because the backup's `git stash -u` dropped the empty directory
-  and left the memory link dangling; `memory-init` also recreates a pool an
-  earlier backup removed, and commits only the pool path. A failed crontab
-  install now fails the deploy.
-- **Template sync delivers renamed and executable files.**
-  `harness-update-scan.sh` read `git diff --name-status` with git's default
-  rename detection, so a renamed file came back as one line holding two paths
-  and dropped out of the delta: never NEW, its old path never REMOVED, and the
-  next sync commit moved `last_synced` past it for good (against the public
-  main of 2026-10-19 that lost `memory-init` and four more files). The delta
-  now runs with `--no-renames`, so a rename is a REMOVED plus a NEW.
-  `--apply-safe` sets each file's mode from the upstream tree entry: NEW files
-  were written at the umask mode, so `memory-init` arrived non-executable and
-  the migration's re-deploy failed. A marker whose last line has no trailing
-  newline is read again; before, its `last_synced` was dropped and the scan
-  fell back to a first-sync compare without a warning. New cases in
-  `harness-update-scan-test.sh`.
 - **The push gate needs its own verdict, not just exit 0.** `daily-sync.sh`
   and `memory-init` counted exit 0 from `bash origin-private-check` as
   verified, and an empty file or one cut off after its function definitions
@@ -224,6 +111,10 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   case, as the PowerShell twin does. New cases in
   `origin-private-check-test.sh`, `daily-sync-test.sh`, `memory-init-test.sh`
   and `memory-init-windows-test.ps1`.
+- **Agents push memory and batons only to a private origin.** The
+  pre-compact-synthesis and session-handoff skills run `origin-private-check`
+  before their additive-sync push, the same gate `memory-init` and the daily
+  backup use.
 - **Agent pushes of the OPS copy go through the push gate.** The skills and
   `AGENTS.md` told agents to commit and push batons, the memory mirror and
   trunk work, and only prose asked them to run `origin-private-check` first,
@@ -237,38 +128,6 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   Without Python 3 it checks every directory the command names instead. The
   session-handoff, session-close and self-compact docs, the handoff README,
   `AGENTS.md` and `core.md` now say so. New `guard-selftest.sh` cases.
-- **Skill mounts keep every folder they cannot prove they wrote, and swap
-  mirrors in whole.** `skills-vendor.sh` treated an unrecorded folder under
-  one of the six names that mounted before the record existed as its own
-  mirror, so a user's own or hand-edited `meta-skill-creator` (or any of the
-  six) was overwritten in place with no backup. An unrecorded folder that
-  differs from its source is now moved aside like any other; one equal to its
-  source still updates in place. The rsync engine synced straight into the
-  mirror, so a failed or interrupted rsync left it half-updated, and the next
-  sync then moved it aside with its GUI-local files; both engines now build
-  the mirror in a temp dir and swap it in, keeping the old one on any
-  failure. The `BACKUP` line is printed as soon as a folder is moved aside,
-  so a later failure still says where it went. New cases in
-  `skills-vendor-test.sh`.
-- **A failed backup pull puts the work back.** When `git pull --rebase`
-  failed (offline, no credentials under cron), `daily-sync.sh` returned with
-  the Operator's uncommitted and untracked work still in its stash, so the
-  files vanished from the tree, the mounted skills went missing, and later
-  runs saw a clean tree and never restored them. It now aborts a rebase the
-  pull left half-done, pops the stash with its index so the tree is exactly
-  as before, logs the failure as an ERROR with git's reason, and commits and
-  pushes nothing that run; a pop that conflicts still names the stash. New
-  cases in `daily-sync-test.sh`.
-- **Deploy checks the git identity.** A fresh Debian user has no git
-  identity (an empty GECOS name, no FQDN for an email), so memory-init's
-  commit, the daily backup and every agent commit failed while `deploy.sh`
-  printed "Deploy complete." `deploy.sh` and `deploy.ps1` now ask `git var`
-  for the author and committer identity before memory-init runs and, when
-  either is missing, print the two `git config --global` commands and fail
-  the deploy (`git-identity`). `memory-init` and `memory-init.ps1` show
-  git's own stderr for a failed commit instead of hiding it behind a
-  "(hook/signing?)" guess. New cases in `memory-init-test.sh` and
-  `memory-init-windows-test.ps1`.
 - **A redirect after a push is not its remote.** The push gate read the
   first word after `git push` as the remote, so `git push 2>&1`, `1>&2`,
   `>&2`, `&>/dev/null` and the like were blocked on a verified-private copy
@@ -317,31 +176,9 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `gh` 30 s, the same 30 s the harness gives the git-guard hook, so a hung
   `gh` timed the hook out before the agent saw why. `gh` now gets 10 s. New
   case in `origin-private-check-test.sh`.
-- **Template sync writes only into an OPS copy.** `harness-update-scan.sh`
-  scans the repo of the working directory, and the harness-update skill ran
-  it by absolute path, so from a project clone it added the `ops-template`
-  remote there and `--apply-safe` copied the whole template into it. It now
-  refuses (`ERR_NOREPO`, nothing written) unless the repo has `BOOTSTRAP.md`
-  or `.claude-config/`, and prints the `cd` to run from; the skill's
-  commands run as `(cd ~/OPS && ...)`. New case in
-  `harness-update-scan-test.sh`.
-- **Template sync sees modes.** Files were compared by blob alone, so an
-  upstream `chmod +x` with the same content was never applied, and a script
-  an earlier scan wrote without its exec bit (which then failed deploy's
-  `memory-init` check) read as IDENTICAL forever. Files now compare as (mode,
-  blob): a mode-only change is an UPDATE when the local mode is still the
-  last-synced one, and any other exec-bit difference is a new MODE line, with
-  the `chmod` to run, in delta and first-sync scans alike. New cases.
-- **Template sync sets modes under any umask.** `chmod +x`/`-x` with no
-  `who` is filtered by the umask, so under 027 clearing the bit left group
-  or other bits set and the scan exited 6 after writing the file. It now
-  uses `chmod a+x`/`a-x`. New case under umask 027.
-- **Template symlinks arrive as symlinks.** A mode 120000 entry was written
-  as a regular file holding the link target. It is now created with
-  `ln -s`. Each applied file is built beside its destination and renamed
-  into place, so a local symlink is replaced rather than written through,
-  and the scan can update itself while it runs. A local path that cannot be
-  hashed is a CONFLICT, never NEW. New case.
+
+### Backups
+
 - **The daily backup never moves the Operator's work.** `daily-sync.sh`
   stashed the tree, pulled, then popped: a run killed between stash and pop
   (a cron timeout, a reboot) left the work in a stash that later runs never
@@ -356,6 +193,68 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `daily-sync-test.sh`: the tree byte for byte (modes and empty directories)
   after an unreachable origin, a conflicting rebase and a killed run, no
   stash ever created, and modes kept through a rebase.
+- **Backups that cannot happen say so.** The daily backup checks its commit:
+  a failed commit (no git identity, a hook) or a failed stash is logged as an
+  ERROR with the fix, and nothing is pushed or reported as backed up; before,
+  the log claimed a backup that did not exist. A new memory pool gets a
+  `.gitkeep`, because the backup's `git stash -u` dropped the empty directory
+  and left the memory link dangling; `memory-init` also recreates a pool an
+  earlier backup removed, and commits only the pool path. A failed crontab
+  install now fails the deploy.
+- **A failed backup pull puts the work back.** When `git pull --rebase`
+  failed (offline, no credentials under cron), `daily-sync.sh` returned with
+  the Operator's uncommitted and untracked work still in its stash, so the
+  files vanished from the tree, the mounted skills went missing, and later
+  runs saw a clean tree and never restored them. It now aborts a rebase the
+  pull left half-done, pops the stash with its index so the tree is exactly
+  as before, logs the failure as an ERROR with git's reason, and commits and
+  pushes nothing that run; a pop that conflicts still names the stash. New
+  cases in `daily-sync-test.sh`.
+- **Backups that fail are visible.** The session briefing's `Backup:` line
+  repeats the last nightly run's OPS-stage errors and skipped pushes, since
+  `daily-sync.sh` exits 0 and nothing read its log. An origin with no branch
+  of that name yet is now a first push; before, its pull failed every night
+  and nothing was ever backed up.
+
+### Skills and mounts
+
+- **Mounted skills arrive on a fresh install.** Deploy clones the public skill
+  source once and runs `skills-vendor.sh sync`; it never pulls an existing
+  clone. `skills-vendor.sh` honors `OPS_DIR`, compares file content, and falls
+  back to tar where rsync is missing, as on a stock Debian container.
+- **Skills refreshed.** `grill-me`, `tdd` and `diagnosing-bugs` mount from
+  the public agent-skills library alongside the six earlier mounts; deploy
+  clones it and runs `skills-vendor.sh sync`. `harness-update`,
+  `pre-compact-synthesis`, `session-close`, `session-handoff`, `memory-prune`,
+  `operator-voice` and the grabit skills follow the current rest-stop and close
+  rules: a session closes only on the Operator's word, and the close stamp is
+  now cleared (its redirect was missing, so the `rm` became a `printf`
+  argument). New `scripts/inventory` for memory-prune, which exits 1 on a
+  missing store so a wrong path cannot read as a clean pool. New generic
+  `operating-model` and `stewardship` skills. The `fleet-doctrine` skill is
+  removed with the fleet.
+- **Skill mounts never delete a folder they did not write.** A manifest row
+  replaced whatever sat at `SKILLS/<name>`, so this release's `grill-me`,
+  `tdd`, and `diagnosing-bugs` rows would have deleted an existing copy's own
+  skill of that name. `skills-vendor.sh` now records a digest of each mirror
+  it writes (`SKILLS/.vendored-state.tsv`) and moves any other destination,
+  including a hand-edited mirror, to
+  `.claude-config/backup/skills-replaced/<name>-<UTC>/` before installing,
+  with a `BACKUP` line naming the path; a failed install moves it back.
+  Mirrors already equal to their source update in place as before.
+- **Skill mounts keep every folder they cannot prove they wrote, and swap
+  mirrors in whole.** `skills-vendor.sh` treated an unrecorded folder under
+  one of the six names that mounted before the record existed as its own
+  mirror, so a user's own or hand-edited `meta-skill-creator` (or any of the
+  six) was overwritten in place with no backup. An unrecorded folder that
+  differs from its source is now moved aside like any other; one equal to its
+  source still updates in place. The rsync engine synced straight into the
+  mirror, so a failed or interrupted rsync left it half-updated, and the next
+  sync then moved it aside with its GUI-local files; both engines now build
+  the mirror in a temp dir and swap it in, keeping the old one on any
+  failure. The `BACKUP` line is printed as soon as a folder is moved aside,
+  so a later failure still says where it went. New cases in
+  `skills-vendor-test.sh`.
 - **Skill mounts swap on macOS.** `skills-vendor.sh` swapped each mirror in
   with `mv -T`, which only GNU mv has, so on macOS and BSD every swap failed
   and even a fresh install exited 3. Both renames now target a name that does
@@ -384,13 +283,195 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   engine ignores time-only itemize lines when deciding UNCHANGED, so a mirror
   whose directory time moved no longer flips between SYNCED and UNCHANGED; a
   mode or content change still syncs.
-- **Review hardening.** git-guard closes push bypasses through config
+
+### Template sync
+
+- **Template sync.** `harness-update-scan.sh` excludes `USER.md`, `voice.md`,
+  `standing-orders.md`, the `work-tracking`, `team`, and `tools` slots, and the
+  marker, plus the retired identity names, so a delta scan never lists an
+  unmigrated identity file as REMOVED. This landed first, ahead of the renames.
+- **Template sync for older copies.** `harness-update-scan.sh` is self-contained
+  by contract (it finds its root from the working directory and loads no helper
+  file), so a copy that predates it runs it straight from the template; the
+  harness-update skill gains "Updating a copy that predates this skill" with the
+  commands. The template's history was rewritten on 2026-10-19 to remove a
+  private name from one old commit, so a `last_synced` marker written before
+  then names a commit the template no longer has: the scan now translates it to
+  its rewritten twin (same tree) and stays in delta mode instead of falling back
+  to a first-sync compare. New `harness-update-scan-test.sh`.
+- **Template sync delivers renamed and executable files.**
+  `harness-update-scan.sh` read `git diff --name-status` with git's default
+  rename detection, so a renamed file came back as one line holding two paths
+  and dropped out of the delta: never NEW, its old path never REMOVED, and the
+  next sync commit moved `last_synced` past it for good (against the public
+  main of 2026-10-19 that lost `memory-init` and four more files). The delta
+  now runs with `--no-renames`, so a rename is a REMOVED plus a NEW.
+  `--apply-safe` sets each file's mode from the upstream tree entry: NEW files
+  were written at the umask mode, so `memory-init` arrived non-executable and
+  the migration's re-deploy failed. A marker whose last line has no trailing
+  newline is read again; before, its `last_synced` was dropped and the scan
+  fell back to a first-sync compare without a warning. New cases in
+  `harness-update-scan-test.sh`.
+- **Template sync writes only into an OPS copy.** `harness-update-scan.sh`
+  scans the repo of the working directory, and the harness-update skill ran
+  it by absolute path, so from a project clone it added the `ops-template`
+  remote there and `--apply-safe` copied the whole template into it. It now
+  refuses (`ERR_NOREPO`, nothing written) unless the repo has `BOOTSTRAP.md`
+  or `.claude-config/`, and prints the `cd` to run from; the skill's
+  commands run as `(cd ~/OPS && ...)`. New case in
+  `harness-update-scan-test.sh`.
+- **Template sync sees modes.** Files were compared by blob alone, so an
+  upstream `chmod +x` with the same content was never applied, and a script
+  an earlier scan wrote without its exec bit (which then failed deploy's
+  `memory-init` check) read as IDENTICAL forever. Files now compare as (mode,
+  blob): a mode-only change is an UPDATE when the local mode is still the
+  last-synced one, and any other exec-bit difference is a new MODE line, with
+  the `chmod` to run, in delta and first-sync scans alike. New cases.
+- **Template sync sets modes under any umask.** `chmod +x`/`-x` with no
+  `who` is filtered by the umask, so under 027 clearing the bit left group
+  or other bits set and the scan exited 6 after writing the file. It now
+  uses `chmod a+x`/`a-x`. New case under umask 027.
+- **Template symlinks arrive as symlinks.** A mode 120000 entry was written
+  as a regular file holding the link target. It is now created with
+  `ln -s`. Each applied file is built beside its destination and renamed
+  into place, so a local symlink is replaced rather than written through,
+  and the scan can update itself while it runs. A local path that cannot be
+  hashed is a CONFLICT, never NEW. New case.
+
+### Deploy and the drift gate
+
+- **Deploy** strips the fleet's PATH and wrapper lines, takes `--no-system`
+  (`-NoSystem` on Windows) to skip writes outside `$HOME` for test installs,
+  and exits non-zero when a step fails.
+- **Deploy checks the git identity.** A fresh Debian user has no git
+  identity (an empty GECOS name, no FQDN for an email), so memory-init's
+  commit, the daily backup and every agent commit failed while `deploy.sh`
+  printed "Deploy complete." `deploy.sh` and `deploy.ps1` now ask `git var`
+  for the author and committer identity before memory-init runs and, when
+  either is missing, print the two `git config --global` commands and fail
+  the deploy (`git-identity`). `memory-init` and `memory-init.ps1` show
+  git's own stderr for a failed commit instead of hiding it behind a
+  "(hook/signing?)" guess. New cases in `memory-init-test.sh` and
+  `memory-init-windows-test.ps1`.
+- **The drift gate** checks the new boot: 16 fails when the core is missing,
+  over budget, or not linked; 1b fails on a root `CLAUDE.md`; 5 counts the
+  principles in `how-i-work.md`; 17 and 21b warn on retired hooks and files;
+  21 is the `USER.md` canary; 23 requires every identity exclusion.
+  `verify-ops.sh` checks another checkout through `OPS_DIR`. New tests:
+  `.claude-config/bin/tests/` (memory-index, root wrapper, deploy rc and core
+  wiring, skills-vendor) and new `verify-ops-selftest.sh` cases.
+
+### Landing and review
+
+- **`branch-gc`** removes local branches a merged PR provably carried and
+  parks their worktrees in a 7-day trash it can restore from; it fails closed
+  on any doubt. It runs nightly from `daily-sync.sh`, from the PreCompact hook
+  for the cwd repo (detached; skipped when the payload names a sub-agent),
+  and at closeout.
+- **The review split.** The open-ended `ops-reviewer` lane is retired. Code
+  where a miss is expensive goes to a second vendor's model
+  (`bin/second-vendor-review` is the optional hand-off), or with none to an
+  Opus 5.5 refutation lane plus the Operator's own read; other code gets a
+  Sonnet 5.5 refutation lane; docs and decisions land on verification.
+  `how-i-work.md` carries the refutation brief shape.
+- **`second-vendor-review` never runs a reviewer without its cap.** With no
+  `timeout` or `gtimeout` on PATH (stock macOS) it skipped `--timeout` in
+  silence, so a hung reviewer blocked forever and a slow one was written up as
+  a review. It now exits 3 before any git work and names the fix
+  (`brew install coreutils`); `gtimeout` alone is enough.
+- **Ported:** `bin/transcript-usage.py` (token profile from transcripts) with
+  a test.
+
+### Destructive tests and the sandbox
+
+- **Destructive tests run in a sandbox.** `bin/sandbox-run` (bubblewrap: a
+  read-only root, a fresh home and `/tmp`, nothing writable by default) plus
+  a guard every suite that runs branch-gc, pre-compact, memory-init, deploy or
+  skills-vendor now starts with; outside the sandbox those suites exit 97.
+  `verify-ops.sh` check 24 fails an unguarded one. Why: in the private harness
+  an unsandboxed mutation sweep wiped most of a home directory.
+- **`guard-selftest.sh` counts every failure.** Its rtk probes read their
+  JSON through a pipe, which ran each probe in a subshell: a failing rtk guard
+  printed FAIL and the selftest still exited 0 with "ALL GUARDS ENFORCE", the
+  exit code `deploy.ps1` acts on. They read a here-string now, and
+  `tests/guard-selftest-test.sh` inverts one guard verdict per probe site and
+  checks the exit code and the count.
+
+### Fixes and hardening from review
+
+- **Fixes:** every git-guard check now sees through an `rtk` prefix (from a
+  project repo, `rtk git push --force`, `rtk git branch -D` and the other
+  rtk forms of a blocked command all passed); `harness-update-scan.sh` exits 7
+  when git cannot list the delta, instead of reporting a clean empty one;
+  deploy's failure summary mentions the core only when the core rule failed;
+  the pre-compact-synthesis skill states the push gate's verdict rule;
+  `verify-ops.sh` check 25 warns on a memory link whose pool is gone.
+- **Review hardening of the sandbox and the reviewer hand-off.** `sandbox-run` passes only an allowlisted set of open
+  file descriptors into bubblewrap: an inherited descriptor (fd 255 included)
+  let a suite write to the host behind the read-only mounts. `second-vendor-review`
+  writes its packet and result to private, unique paths published atomically,
+  stops when the digest cannot be read, and no longer records the reviewer
+  command, whose inline assignments could carry a credential. New
+  `sandbox-run-fd-test.py`, which runs outside the sandbox like `sandbox-run-test.sh`.
+- **Review hardening of the push gate, template sync, skill sync and backup.** git-guard closes push bypasses through config
   includes, inherited alias settings and alias options. The template scanner
   refuses any path whose parent is a symlink, so it cannot write outside the
   copy or onto an excluded identity file. Skill sync serializes concurrent
   runs, records the content it staged, and backs up a mirror it cannot place
   instead of deleting it. The daily backup keeps every tracked file's
   permissions across a pull.
+
+### Docs, notices and CI
+
+- **No em dashes.** The 139 em dashes still in tracked text (16 files: the
+  `CONTEXT/` templates and the project kata, comments in hooks, scripts and
+  self-tests, the design brand template, and two READMEs) are rewritten with
+  colons, commas, semicolons or parentheses; no en dashes were present. Code
+  changed only in comments and printed text (the handoff banner, the
+  self-tests' result lines, `sync-check.sh`'s messages, the `ops-verify` unit
+  description), and no test greps any of those strings.
+- **The docs match the code.** README gains the requirements (git with an
+  identity, a signed-in `gh`, `python3`, `jq`), the T3 Code path, and sections
+  on what deploy does, the push gate and its limits, the daily backup, skill
+  mounts, template sync, and how to check a copy; its list of what the git
+  guard blocks now includes a bare `tmux kill-server` and an unverified push.
+  DEPLOYMENT said the trust anchor lives in `~/.claude/.claude.json`; deploy
+  writes `~/.claude.json`, beside the directory. It also called a failed skill
+  clone a warning, though that fails the deploy (`skills-mount`). It gains the
+  exact outputs of its verification commands, a recipe for testing a deploy
+  under a throwaway `HOME`, and a corrected count of the machinery deploy does
+  not wire. CONTRIBUTING gains the private-term rule (your list of private
+  terms never goes in a file, a commit message or a PR), a section on where
+  destructive tests run and why, and the `GIT_GUARD=off` rule for a PR branch.
+  Its suite loop printed `FAILED` but always exited 0; the command now counts
+  failures and exits non-zero, and runs the self-tests and the PowerShell
+  suites too. It also no longer implies that `verify-ops.sh` on a bare checkout
+  means anything: the gate reads host state from `$HOME`, so a machine with no
+  deployed OPS needs the throwaway-`HOME` run. AGENTS carries the same caveat,
+  and BOOTSTRAP's recon gains a git-identity probe.
+- **Third-party notices.** `SKILLS/THIRD_PARTY_NOTICES.md` lists every work the
+  skills adapt, with its author, license, what OPS took and where the full
+  license text lives: the `grill-me`, `tdd` and `diagnosing-bugs` skills from
+  mattpocock/skills (MIT), the writing model `meta-skill-creator` names from
+  the same repository, the communication defaults adapted from i-have-adhd
+  (MIT), the AI-tell catalog adapted from cursor/plugins `unslop` (MIT), and
+  the design method adapted from anthropics/skills `frontend-design`
+  (Apache-2.0, whose license text OPS did not carry before and now reproduces).
+- **A CI gate.** `.github/workflows/gate.yml` runs on every push and pull
+  request, with no secrets, so a fork's pull request gets the same run. Four
+  jobs: `syntax` (`bash -n`, `node --check`, `python3 -m py_compile` and a
+  PowerShell parse over every tracked script, found by extension or `#!` line;
+  an empty list fails the job), `suites` (every suite under
+  `bin/tests/`, the `*-selftest` scripts and the two PowerShell suites, the
+  destructive ones inside `sandbox-run`), `smoke` (a fresh install in a
+  throwaway `HOME` with the current Stage-1 settings, a git identity and
+  `deploy.sh --no-system` run twice, then `verify-ops.sh`), and `secrets`
+  (gitleaks over the full history, from a binary pinned by SHA-256 because the
+  official action wants a license key for organization repositories, then
+  OPS's own `secrets-scan.sh`). Actions are pinned by commit. Every job is
+  skipped outside the template repository, so private copies made from the
+  template do not spend runner minutes on every daily backup push. Not
+  covered: Windows and macOS hosts, and the Claude Code CLI.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
