@@ -14,8 +14,9 @@
 # blank lines are ignored.
 #
 # Usage:
-#   skills-vendor.sh            sync (default): rsync each source dir into
-#                               SKILLS/<name>/ (rsync -a --delete). Prints one
+#   skills-vendor.sh            sync (default): mirror each source dir into
+#                               SKILLS/<name>/ (rsync -a --delete semantics,
+#                               built in a temp dir and swapped in). Prints one
 #                               line per skill: SYNCED / UNCHANGED / SKIP, plus
 #                               a BACKUP line naming where a folder sync did
 #                               not write was moved (see "Ownership" below).
@@ -36,7 +37,10 @@
 # else ~/OPS. rsync is preferred but not required: a host without it (a minimal
 # Debian container, Git Bash) syncs through tar with the same excludes and the
 # same delete semantics, so a missing package never leaves the mounts unsynced.
-# SKILLS_VENDOR_NO_RSYNC=1 forces that path (tests compare the two).
+# SKILLS_VENDOR_NO_RSYNC=1 forces that path (tests compare the two). Either
+# engine builds the new mirror in a temp dir beside the old one and swaps it in
+# with a rename, restoring the old mirror if the swap fails: an rsync straight
+# into the mirror left it half-updated when rsync failed or was interrupted.
 #
 # Ownership: sync never deletes a folder it did not write. A manifest row
 # claims SKILLS/<name>, but the folder already there can be the Operator's own
@@ -46,16 +50,19 @@
 # writes, and an existing destination is updated in place only when it is
 # provably a mirror:
 #   1. its digest matches the recorded one (what sync last wrote), or
-#   2. it already equals the source (the sync has nothing to remove), or
-#   3. it has no record and is one of LEGACY_MOUNTS, the rows that shipped
-#      before the record existed: sync has owned those paths since then, and
-#      their pre-record mirrors are usually behind the source.
+#   2. it already equals the source (the sync has nothing to remove).
 # Anything else, or any destination holding a .git (sync never writes one), is
 # moved to .claude-config/backup/skills-replaced/<name>-<UTC>/, outside the
-# skills index, before the install; a failed install moves it back. The digest
-# skips the GUI-local files, which sync keeps in place, so GUI authoring in a
-# mirror never reads as foreign content. A hand-edited mirror does, and is kept
-# the same way.
+# skills index, before the install, and the BACKUP line is printed at once, so
+# a later failure still tells the user where the folder went; a failed install
+# moves it back. The digest skips the GUI-local files, which sync keeps in
+# place, so GUI authoring in a mirror never reads as foreign content. A
+# hand-edited mirror does, and is kept the same way. A folder with no record
+# that differs from its source is kept the same way too, even under one of the
+# six names that mounted before the record existed: a pre-record mirror that is
+# behind its source cannot be told from the Operator's own or hand-edited copy,
+# and treating those names as owned overwrote such a copy with no backup. Its
+# GUI-local files move with it.
 
 set -uo pipefail
 
@@ -91,7 +98,6 @@ GUI_LOCAL=('00_System_Prompt.md' '05_gui_dual_track.md' 'SETUP.md')
 
 LEDGER="$SKILLS/.vendored-state.tsv"
 BACKUP_ROOT="$ROOT/.claude-config/backup/skills-replaced"
-LEGACY_MOUNTS=" delegation-sizing briefing-subagents worktree-isolation verifying-delegated-output dynamic-workflows meta-skill-creator "
 
 [ -f "$MANIFEST" ] || { echo "skills-vendor: manifest missing: $MANIFEST" >&2; exit 3; }
 
@@ -173,39 +179,65 @@ gui_parent_dirs() {
   done
 }
 
-# tar_mirror <src> <dst>: the rsync-free sync. Builds the new mirror in a temp
-# dir beside <dst> (source minus the excludes, plus <dst>'s own GUI-local files,
-# which rsync's excludes protect from --delete), then swaps it in only when it
-# differs. Prints "changed" or "same"; returns non-zero on any failure, leaving
-# <dst> as it was.
-tar_mirror() {
-  local src="$1" dst="$2" tmp rel rc
+# stage_mirror <src> <dst>: build the new mirror in a temp dir beside <dst>,
+# then swap it in only when it differs. Prints "changed" or "same"; returns
+# non-zero on any failure, leaving <dst> as it was (an rsync or tar that fails
+# midway only ever touched the temp copy).
+#   rsync: start from a copy of <dst>, so rsync's excludes keep its GUI-local
+#   files, --delete drops stale ones, and its itemized output says whether
+#   anything changed, exactly as the old in-place sync did.
+#   tar: the source minus the excludes, plus <dst>'s own GUI-local files, and
+#   a content compare against <dst>.
+stage_mirror() {
+  local src="$1" dst="$2" tmp rel rc out
   tmp="$(mktemp -d "$SKILLS/.vendor.XXXXXX")" || return 1
-  mkdir "$tmp/tree" || { rm -rf "$tmp"; return 1; }
-  if ! (cd "$src" && tar "${TAR_EXCL[@]}" -cf - .) | (cd "$tmp/tree" && tar -xf -); then
-    rm -rf "$tmp"; return 1
-  fi
-  if [ -d "$dst" ]; then
-    # Save find's status as well as its NUL-delimited results. Process
-    # substitution hides read errors and newline-delimited names lose data.
-    # Like rsync's excludes, preserve matching symlinks and whole directories;
-    # prune them so their children cannot be copied a second time.
-    (cd "$dst" && find . \( "${GUI_FIND[@]}" \) -prune -print0) > "$tmp/gui-files" || { rm -rf "$tmp"; return 1; }
-    while IFS= read -r -d '' rel; do
-      gui_parent_dirs "$tmp/tree" "$rel" && [ ! -L "$tmp/tree/$rel" ] &&
-        cp -a "$dst/$rel" "$tmp/tree/$rel" || { rm -rf "$tmp"; return 1; }
-    done < "$tmp/gui-files"
-  fi
-  if [ -d "$dst" ]; then
-    diff -rq --no-dereference "$tmp/tree" "$dst" >/dev/null 2>&1
+  if [ "$USE_RSYNC" = 1 ]; then
+    if [ -d "$dst" ]; then
+      cp -a "$dst" "$tmp/tree" || { rm -rf "$tmp"; return 1; }
+    else
+      mkdir "$tmp/tree" || { rm -rf "$tmp"; return 1; }
+    fi
+    # --checksum: rsync's default quick check skips a file whose size and mtime
+    # match, so an edit that kept the size within the same second stayed DRIFT
+    # (--check compares content) while sync said UNCHANGED. Skill dirs are
+    # small; comparing content costs nothing.
+    out="$(rsync -ai --checksum --delete "${RSYNC_EXCL[@]}" "$src"/ "$tmp/tree"/ 2>&1)"
     rc=$?
-    case "$rc" in
-      0) rm -rf "$tmp" || return 1; echo same; return 0 ;;
-      1) ;;
-      *) rm -rf "$tmp"; return 1 ;;
-    esac
+    if [ "$rc" -ne 0 ]; then
+      echo "skills-vendor: rsync failed (rc=$rc)" >&2
+      [ -n "$out" ] && echo "$out" >&2
+      rm -rf "$tmp"; return 1
+    fi
+    if [ -d "$dst" ] && [ -z "$out" ]; then
+      rm -rf "$tmp" || return 1; echo same; return 0
+    fi
+  else
+    mkdir "$tmp/tree" || { rm -rf "$tmp"; return 1; }
+    if ! (cd "$src" && tar "${TAR_EXCL[@]}" -cf - .) | (cd "$tmp/tree" && tar -xf -); then
+      rm -rf "$tmp"; return 1
+    fi
+    if [ -d "$dst" ]; then
+      # Save find's status as well as its NUL-delimited results. Process
+      # substitution hides read errors and newline-delimited names lose data.
+      # Like rsync's excludes, preserve matching symlinks and whole directories;
+      # prune them so their children cannot be copied a second time.
+      (cd "$dst" && find . \( "${GUI_FIND[@]}" \) -prune -print0) > "$tmp/gui-files" || { rm -rf "$tmp"; return 1; }
+      while IFS= read -r -d '' rel; do
+        gui_parent_dirs "$tmp/tree" "$rel" && [ ! -L "$tmp/tree/$rel" ] &&
+          cp -a "$dst/$rel" "$tmp/tree/$rel" || { rm -rf "$tmp"; return 1; }
+      done < "$tmp/gui-files"
+    fi
+    if [ -d "$dst" ]; then
+      diff -rq --no-dereference "$tmp/tree" "$dst" >/dev/null 2>&1
+      rc=$?
+      case "$rc" in
+        0) rm -rf "$tmp" || return 1; echo same; return 0 ;;
+        1) ;;
+        *) rm -rf "$tmp"; return 1 ;;
+      esac
+    fi
+    chmod 755 "$tmp/tree" || { rm -rf "$tmp"; return 1; }
   fi
-  chmod 755 "$tmp/tree" || { rm -rf "$tmp"; return 1; }
   # Keep the prior mirror until installation succeeds. -T prevents a concurrent
   # destination directory or symlink from turning the rename into a nested move.
   if [ -d "$dst" ]; then
@@ -294,9 +326,6 @@ owned_mirror() {
     1) ;;
     *) return 2 ;;
   esac
-  if [ -z "$recorded" ]; then
-    case "$LEGACY_MOUNTS" in *" $name "*) return 0 ;; esac
-  fi
   return 1
 }
 
@@ -375,6 +404,9 @@ for i in "${!names[@]}"; do
           echo "skills-vendor: could not move $dstdir aside; left it as it was" >&2
           exit 3
         fi
+        # Said now, not after the install: a failure below (or a kill) must
+        # not leave the folder in the backup with nobody told where it went.
+        printf 'BACKUP   %s: the existing folder was not a mirror sync wrote; kept at %s\n' "$name" "$backup"
         ;;
       *)
         echo "skills-vendor: could not tell whether $dstdir is a mirror sync wrote; left it as it was" >&2
@@ -382,37 +414,16 @@ for i in "${!names[@]}"; do
         ;;
     esac
   fi
-  if [ "$USE_RSYNC" = 1 ]; then
-    if ! mkdir -p "$dstdir"; then
-      [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
-      exit 3
-    fi
-    # --checksum: rsync's default quick check skips a file whose size and mtime
-    # match, so an edit that kept the size within the same second stayed DRIFT
-    # (--check compares content) while sync said UNCHANGED. Skill dirs are
-    # small; comparing content costs nothing.
-    out="$(rsync -ai --checksum --delete "${RSYNC_EXCL[@]}" "$srcdir"/ "$dstdir"/ 2>&1)"
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      echo "skills-vendor: rsync failed for $name (rc=$rc)" >&2
-      [ -n "$out" ] && echo "$out" >&2
-      [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
-      exit 3
-    fi
-  else
-    if ! res="$(tar_mirror "$srcdir" "$dstdir")"; then
-      echo "skills-vendor: tar copy failed for $name" >&2
-      [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
-      exit 3
-    fi
-    out=""; [ "$res" = changed ] && out="changed"
+  engine=tar; [ "$USE_RSYNC" = 1 ] && engine=rsync
+  if ! res="$(stage_mirror "$srcdir" "$dstdir")"; then
+    echo "skills-vendor: $engine copy failed for $name; the previous mirror is unchanged" >&2
+    [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
+    exit 3
   fi
+  out=""; [ "$res" = changed ] && out="changed"
   if ! digest="$(tree_digest "$dstdir")" || ! ledger_set "$name" "$digest"; then
     echo "skills-vendor: synced $name but could not record it in $LEDGER" >&2
     exit 3
-  fi
-  if [ -n "$backup" ]; then
-    printf 'BACKUP   %s: the existing folder was not a mirror sync wrote; kept at %s\n' "$name" "$backup"
   fi
   if [ -n "$out" ]; then
     printf 'SYNCED   %s\n' "$name"

@@ -157,11 +157,13 @@ Replaces the fleet's `claude-wrapper.sh`. Test:
 Mirrors each `SKILLS/VENDORED.tsv` row from its source clone under `PROJECTS/`
 into `SKILLS/<name>/` (`sync`, the default), or reports drift (`--check`: OK,
 DRIFT, MISSING; the gate behind `verify-ops.sh` check 22). Uses rsync with a
-content comparison where installed and tar otherwise. Honors `OPS_DIR`. Deploy
+content comparison where installed and tar otherwise; either builds the mirror
+in a temp dir and swaps it in, so a failed copy leaves the old one intact. Honors `OPS_DIR`. Deploy
 clones the public source once and runs `sync`. It never deletes a folder it
 did not write: `SKILLS/.vendored-state.tsv` records a digest of each mirror,
 and a destination that is not a known mirror (your own skill under a mounted
-name, a hand-edited mirror) is moved to
+name, a hand-edited mirror, any unrecorded folder that differs from its
+source) is moved to
 `.claude-config/backup/skills-replaced/<name>-<UTC>/` first, with a `BACKUP`
 line naming the path, and moved back if the install fails. Test:
 `tests/skills-vendor-test.sh`.

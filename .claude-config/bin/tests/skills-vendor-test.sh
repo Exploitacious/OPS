@@ -12,11 +12,15 @@
 #     exit codes 0, 2, and 1
 #   - OPS_DIR selects the checkout, so HOME is irrelevant
 #   - ownership: a destination sync did not write (the Operator's own folder, a
-#     hand-edited mirror, one holding a .git) is moved to
-#     .claude-config/backup/skills-replaced/ with its content intact, then
-#     replaced; a mirror sync wrote, a pre-record mirror of a legacy row, and
-#     one already equal to its source update in place with no backup; a failed
-#     install moves the folder back, in both engines
+#     hand-edited mirror, one holding a .git, and any unrecorded folder that
+#     differs from its source, even under a name that mounted before the record
+#     existed) is moved to .claude-config/backup/skills-replaced/ with its
+#     content intact, then replaced; a mirror sync wrote and one already equal
+#     to its source update in place with no backup; a failed install moves the
+#     folder back, in both engines
+#   - a failed rsync or tar copy leaves an owned mirror exactly as it was (the
+#     new mirror is built in a temp dir and swapped in)
+#   - the BACKUP line is printed even when a later step fails
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/skills-vendor-test.sh
 # Exit: 0 = all pass; non-zero on first failure.
@@ -287,32 +291,44 @@ line="$(printf '%s\n' "$out" | grep '^BACKUP   delta: ')" || fail "a destination
 [ -f "${line##* kept at }/.git/HEAD" ] || fail "the backup lost the .git"
 pass "a hand-edited mirror and a git checkout are kept in the backup"
 
-# Mirrors that predate the record: a legacy row's stale mirror and a mirror
-# equal to its source update in place, with no backup, and get recorded.
+# Folders with no record. One equal to its source is a mirror and updates in
+# place. One that differs is kept in the backup, even under a name that mounted
+# before the record existed (2026-10-19: those six names counted as owned, so a
+# user's own meta-skill-creator was overwritten in place with no backup).
 o="$TDIR/own-legacy"
-mkdir -p "$o/SKILLS/dynamic-workflows" "$o/SKILLS/epsilon" "$o/PROJECTS/src/skills/dynamic-workflows" "$o/PROJECTS/src/skills/epsilon"
-printf 'dynamic-workflows\tsrc/skills/dynamic-workflows\nepsilon\tsrc/skills/epsilon\n' > "$o/SKILLS/VENDORED.tsv"
+mkdir -p "$o/SKILLS/dynamic-workflows" "$o/SKILLS/epsilon" "$o/SKILLS/meta-skill-creator" \
+  "$o/PROJECTS/src/skills/dynamic-workflows" "$o/PROJECTS/src/skills/epsilon" "$o/PROJECTS/src/skills/meta-skill-creator"
+printf 'dynamic-workflows\tsrc/skills/dynamic-workflows\nepsilon\tsrc/skills/epsilon\nmeta-skill-creator\tsrc/skills/meta-skill-creator\n' > "$o/SKILLS/VENDORED.tsv"
 printf 'current\n' > "$o/PROJECTS/src/skills/dynamic-workflows/SKILL.md"
 printf 'older vendored copy\n' > "$o/SKILLS/dynamic-workflows/SKILL.md"
 printf 'dropped upstream\n' > "$o/SKILLS/dynamic-workflows/gone.md"
 printf 'mirror GUI prompt\n' > "$o/SKILLS/dynamic-workflows/00_System_Prompt.md"
 printf 'same\n' > "$o/PROJECTS/src/skills/epsilon/SKILL.md"
 printf 'same\n' > "$o/SKILLS/epsilon/SKILL.md"
+printf 'vendored meta-skill-creator\n' > "$o/PROJECTS/src/skills/meta-skill-creator/SKILL.md"
+printf 'MY OWN HAND-WRITTEN SKILL\n' > "$o/SKILLS/meta-skill-creator/SKILL.md"
+printf 'mine\n' > "$o/SKILLS/meta-skill-creator/my-extra.md"
 for engine in "${engines[@]}"; do
   rm -rf "$TDIR/legacy-$engine"; cp -a "$o" "$TDIR/legacy-$engine"
-  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$TDIR/legacy-$engine" sync)" || fail "engine $engine: legacy sync failed: $out"
-  printf '%s\n' "$out" | grep -q '^BACKUP' && fail "engine $engine: a pre-record mirror was moved aside: $out"
-  printf '%s\n' "$out" | grep -q '^SYNCED   dynamic-workflows$' || fail "engine $engine: legacy mirror not SYNCED: $out"
-  printf '%s\n' "$out" | grep -q '^UNCHANGED epsilon$' || fail "engine $engine: equal mirror not UNCHANGED: $out"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$TDIR/legacy-$engine" sync)" || fail "engine $engine: unrecorded sync failed: $out"
   m="$TDIR/legacy-$engine/SKILLS"
+  for n in dynamic-workflows meta-skill-creator; do
+    line="$(printf '%s\n' "$out" | grep "^BACKUP   $n: ")" || fail "engine $engine: unrecorded $n that differs from its source was not moved aside: $out"
+    diff -r --no-dereference "$o/SKILLS/$n" "${line##* kept at }" >/dev/null || fail "engine $engine: the backup of $n lost content"
+    printf '%s\n' "$out" | grep -q "^SYNCED   $n\$" || fail "engine $engine: $n not SYNCED: $out"
+  done
+  [ "$(cat "$m/meta-skill-creator/SKILL.md")" = "vendored meta-skill-creator" ] && [ ! -e "$m/meta-skill-creator/my-extra.md" ] \
+    || fail "engine $engine: meta-skill-creator mirror not installed cleanly"
   [ "$(cat "$m/dynamic-workflows/SKILL.md")" = current ] && [ ! -e "$m/dynamic-workflows/gone.md" ] \
-    || fail "engine $engine: legacy mirror not updated in place"
-  [ "$(cat "$m/dynamic-workflows/00_System_Prompt.md")" = "mirror GUI prompt" ] || fail "engine $engine: legacy mirror lost its GUI-local file"
-  grep -q '^dynamic-workflows	sha256:' "$m/.vendored-state.tsv" && grep -q '^epsilon	sha256:' "$m/.vendored-state.tsv" \
-    || fail "engine $engine: pre-record mirrors were not recorded"
-  [ "$(backups "$TDIR/legacy-$engine")" = 0 ] || fail "engine $engine: a backup was made"
+    || fail "engine $engine: dynamic-workflows mirror not installed"
+  printf '%s\n' "$out" | grep -q '^UNCHANGED epsilon$' || fail "engine $engine: equal mirror not UNCHANGED: $out"
+  printf '%s\n' "$out" | grep -q '^BACKUP   epsilon' && fail "engine $engine: a mirror equal to its source was moved aside: $out"
+  for n in dynamic-workflows epsilon meta-skill-creator; do
+    grep -q "^$n	sha256:" "$m/.vendored-state.tsv" || fail "engine $engine: $n was not recorded"
+  done
+  [ "$(backups "$TDIR/legacy-$engine")" = 2 ] || fail "engine $engine: expected 2 backups, found $(backups "$TDIR/legacy-$engine")"
 done
-pass "pre-record mirrors (a legacy row, one equal to its source) update in place with no backup"
+pass "unrecorded folders: equal to the source updates in place; different is kept in the backup, legacy names included"
 
 # A failed install moves the local folder back, in both engines.
 REAL_RSYNC="$(command -v rsync || true)"
@@ -325,8 +341,8 @@ exec "$REAL_MV" "$@"
 STUB
 cat > "$TDIR/bin-install/rsync" <<'STUB'
 #!/usr/bin/env bash
-dst="${*: -1}"
-case "$dst" in */gamma/) mkdir -p "$dst" && echo partial > "${dst}partial"; exit 23 ;; esac
+src="${*: -2:1}" dst="${*: -1}"
+case "$src" in */gamma/) mkdir -p "$dst" && echo partial > "${dst}partial"; exit 23 ;; esac
 exec "$REAL_RSYNC" "$@"
 STUB
 chmod +x "$TDIR/bin-install/mv" "$TDIR/bin-install/rsync"
@@ -344,5 +360,62 @@ for engine in "${engines[@]}"; do
   printf '%s\n' "$out" | grep -q 'restored' || fail "engine $engine: the restore was not reported: $out"
 done
 pass "a failed install moves the local folder back and exits 3"
+
+# A failed or interrupted rsync must not leave an owned mirror half-updated
+# (2026-10-19: rsync --delete ran in place, so a failure left a mirror that
+# matched neither the record nor the source, and the next sync moved it aside
+# with its GUI-local files). The stub writes into its destination, then fails.
+if command -v rsync >/dev/null 2>&1; then
+  mkdir -p "$TDIR/bin-halfway"
+  cat > "$TDIR/bin-halfway/rsync" <<'STUB'
+#!/usr/bin/env bash
+dst="${*: -1}"
+mkdir -p "$dst" && echo 'half-written' > "${dst}SKILL.md" && rm -f "${dst}refs/a.md"
+exit 23
+STUB
+  chmod +x "$TDIR/bin-halfway/rsync"
+  o="$TDIR/halfway"
+  make_tree "$o"
+  run_sv "$o" sync >/dev/null || fail "halfway fixture sync failed"
+  printf 'moved on again\n' >> "$o/PROJECTS/src/skills/alpha/SKILL.md"
+  cp -a "$o/SKILLS" "$TDIR/halfway-before"
+  out="$(PATH="$TDIR/bin-halfway:$PATH" run_sv "$o" sync 2>&1)"; rc=$?
+  [ "$rc" -eq 3 ] || fail "a failing rsync exited $rc, want 3: $out"
+  diff -r --no-dereference "$TDIR/halfway-before" "$o/SKILLS" >/dev/null \
+    || { diff -r --no-dereference "$TDIR/halfway-before" "$o/SKILLS" >&2; fail "a failing rsync changed the owned mirror"; }
+  [ -z "$(find "$o/SKILLS" -maxdepth 1 -name '.vendor.*' -print -quit)" ] || fail "a failing rsync left a temp dir in SKILLS"
+  out="$(run_sv "$o" sync)" || fail "the sync after a failed rsync failed: $out"
+  printf '%s\n' "$out" | grep -q '^BACKUP' && fail "the sync after a failed rsync moved the mirror aside: $out"
+  printf '%s\n' "$out" | grep -q '^SYNCED   alpha$' || fail "the sync after a failed rsync did not update alpha: $out"
+  [ "$(cat "$o/SKILLS/alpha/00_System_Prompt.md")" = "mirror-side GUI prompt" ] || fail "the GUI-local file left the mirror"
+  pass "a failing rsync leaves the owned mirror as it was; the next sync updates it in place"
+else
+  echo "SKIP: failing rsync on an owned mirror (rsync not installed)"
+fi
+
+# The BACKUP line is printed as soon as a folder is moved aside, so a later
+# failure (here the ledger write: sort fails unless it is the -z sort of the
+# digest) still says where the folder went.
+mkdir -p "$TDIR/bin-nosort"
+REAL_SORT="$(command -v sort)"; export REAL_SORT
+cat > "$TDIR/bin-nosort/sort" <<'STUB'
+#!/usr/bin/env bash
+case " $* " in *" -z "*) exec "$REAL_SORT" "$@" ;; esac
+exit 2
+STUB
+chmod +x "$TDIR/bin-nosort/sort"
+for engine in "${engines[@]}"; do
+  o="$TDIR/late-fail-$engine"
+  make_tree "$o"
+  SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync >/dev/null || fail "engine $engine: late-failure fixture sync failed"
+  add_local "$o" gamma
+  cp -a "$o/SKILLS/gamma" "$TDIR/late-gamma-$engine"
+  out="$(PATH="$TDIR/bin-nosort:$PATH" SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)"; rc=$?
+  [ "$rc" -eq 3 ] || fail "engine $engine: a failed ledger write exited $rc, want 3: $out"
+  printf '%s\n' "$out" | grep -q 'could not record it' || fail "engine $engine: the ledger failure was not reported: $out"
+  line="$(printf '%s\n' "$out" | grep '^BACKUP   gamma: ')" || fail "engine $engine: no BACKUP line after a late failure: $out"
+  diff -r --no-dereference "$TDIR/late-gamma-$engine" "${line##* kept at }" >/dev/null || fail "engine $engine: the named backup does not hold the folder"
+done
+pass "the BACKUP line is printed before a later failure"
 
 echo "ALL PASS"

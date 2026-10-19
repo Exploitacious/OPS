@@ -104,8 +104,7 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   including a hand-edited mirror, to
   `.claude-config/backup/skills-replaced/<name>-<UTC>/` before installing,
   with a `BACKUP` line naming the path; a failed install moves it back.
-  Mirrors of the six earlier rows, and mirrors already equal to their source,
-  update in place as before.
+  Mirrors already equal to their source update in place as before.
 - **Template sync for older copies.** `harness-update-scan.sh` is self-contained
   by contract (it finds its root from the working directory and loads no helper
   file), so a copy that predates it runs it straight from the template; the
@@ -169,6 +168,19 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   Without Python 3 it checks every directory the command names instead. The
   session-handoff, session-close and self-compact docs, the handoff README,
   `AGENTS.md` and `core.md` now say so. New `guard-selftest.sh` cases.
+- **Skill mounts keep every folder they cannot prove they wrote, and swap
+  mirrors in whole.** `skills-vendor.sh` treated an unrecorded folder under
+  one of the six names that mounted before the record existed as its own
+  mirror, so a user's own or hand-edited `meta-skill-creator` (or any of the
+  six) was overwritten in place with no backup. An unrecorded folder that
+  differs from its source is now moved aside like any other; one equal to its
+  source still updates in place. The rsync engine synced straight into the
+  mirror, so a failed or interrupted rsync left it half-updated, and the next
+  sync then moved it aside with its GUI-local files; both engines now build
+  the mirror in a temp dir and swap it in, keeping the old one on any
+  failure. The `BACKUP` line is printed as soon as a folder is moved aside,
+  so a later failure still says where it went. New cases in
+  `skills-vendor-test.sh`.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
