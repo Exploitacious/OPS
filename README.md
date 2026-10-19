@@ -38,18 +38,54 @@ What it gives you, out of the box:
 OPS ships the author's working configuration, not a set of neutral defaults you
 have to assemble yourself. That means:
 
-- **1M-context worker tiers** with a fixed three-way policy (mechanical /
-  default / hard-lane) instead of per-task model shopping.
-- **Autocompact OFF** — compaction is always a deliberate `/compact`, never a
-  surprise mid-task.
-- **A full-autonomy posture** — you plan with it up front, then it runs the list
+- **Fixed model tiers** instead of per-task model shopping: Opus 5.5 is the
+  foreman, Sonnet 5.5 every sub-agent's default, Opus 5.5 again for
+  high-criticality lanes, Haiku 5.5 for cheap bounded reads, Fable 5.1 rarely.
+  Effort is `xhigh` everywhere. `CONTEXT/model-roles.md` is the policy.
+- **A full-autonomy posture**: you plan with it up front, then it runs the list
   end to end without re-prompting.
 
 There are no feature flags and no hedging. The philosophy is explained once,
-here and in `CONTEXT/`, and after you bootstrap you adjust it to taste — it's
+here and in `CONTEXT/`, and after you bootstrap you adjust it to taste; it's
 your copy. If a default doesn't fit you, change it; nothing stops you. But the
 defaults are chosen on purpose, and they are what makes the harness feel like
 one system instead of a pile of settings.
+
+### What the Stage-1 settings turn on
+
+The recommended install (linuxploitacious, Stage 1) links its `settings.json`
+into `~/.claude/` for every profile. Read this before your first session,
+because these defaults decide what Claude Code may do without asking you:
+
+- **`permissions.defaultMode: "bypassPermissions"`.** Every session starts in
+  bypass mode: Claude Code runs every tool call, including shell commands, file
+  edits and deletes, and network requests, without a permission prompt. Only
+  `deny` rules and hooks still stop a call. OPS's own brakes are two
+  PreToolUse hooks: a git guard (hook bypass, force-push, history rewrites,
+  remote branch deletes, and recursive deletes of a few protected roots) and a
+  secrets guard (literal credentials written into memory and lessons files).
+  They are narrow guards, not a sandbox: anything else runs.
+- **`skipDangerousModePermissionPrompt: true`.** Claude Code normally shows a
+  one-time confirmation before a session enters bypass mode; this skips it, so
+  nothing warns you at launch.
+- **`remoteControlAtStartup: true`.** Every interactive session connects to
+  Remote Control at start, so you can watch and drive it from the Claude apps
+  signed in to your own claude.ai account. It grants no one else access, but a
+  session is reachable from your other devices without you asking for it.
+- **Auto-compaction on** (`autoCompactEnabled: true`, `DISABLE_AUTO_COMPACT`
+  `"0"`; idle compaction off). It is a backstop near the end of the context
+  window; the harness still compacts by hand at natural breaks
+  (`working-preferences.md` Standing Orders). Haiku 5.5 gets a 100K
+  compaction window so its lanes stay cheap.
+
+The same file also pins the model tiers above, sets effort to `xhigh`, empties
+the commit and PR attribution lines, and turns on push notifications for agent
+events. `BOOTSTRAP.md` asks you, as an explicit step, whether to keep the
+permission defaults or switch to normal permission prompts, and shows the exact
+change. Do not edit the Stage-1 file to change them: it is a tracked file in
+your linuxploitacious checkout, so a local edit (including a `/config` or
+`/model` save, which writes it) dirties that checkout, and its next
+`git pull --ff-only` fails whenever upstream changed the same file.
 
 ## Spin-up
 
@@ -116,7 +152,7 @@ OPS/
 │   ├── operating-doctrine.md   #   the universal principles (P1-P15) any session follows
 │   ├── foreman-charter.md      #   always-on foreman posture (rides the cached system prompt via the launch shim)
 │   ├── boot-digest.md          #   identity slot template — rides the system prompt with the charter; BOOTSTRAP fills it
-│   ├── model-roles.md          #   the model-tier policy (foreman / worker / banned), one source
+│   ├── model-roles.md          #   the model-tier policy (foreman / lanes / retired / banned), one source
 │   ├── slots.md                #   context-slot registry (voice, team, tools, work-tracking, doctrine)
 │   ├── fleet-doctrine.md       #   multi-agent coordination rules (loaded on ACTIVATE)
 │   ├── worker-digest.md        #   ~2KB doctrine distillation for spawned sub-agents
@@ -130,7 +166,7 @@ OPS/
 │   ├── protocol/               #   messaging, lifecycle, escalation, closeout, lessons/
 │   └── bin/                    #   ac-* helpers (spawn, task, msg, reorient, memory-sync, ...)
 ├── .claude-config/        # Stage 2 deploy + the machinery it does not itself install
-│   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (symlinks, PATH, memory-sync, plugins, ...)
+│   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (symlinks, PATH, memory-sync, plugin retirement, ...)
 │   ├── hooks/                  #   SessionStart briefing, pre-compact snapshot, secrets/git guards
 │   ├── systemd/                #   ops-verify + ops-memory-gc timers (nightly drift gate, weekly GC)
 │   ├── agents/ + workflows/    #   sub-agent definitions + multi-lane workflow scripts

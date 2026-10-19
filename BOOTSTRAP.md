@@ -60,16 +60,24 @@ so recon is transparent, not spooky.
 - **Existing Claude Code setup:** list `~/.claude/skills/` and read
   `~/.claude/settings.json` (model aliases, effort, env) if present — a
   returning user may carry preferences worth honoring rather than overwriting.
-- **Which foreman this plan can run:**
+  Note the values of `permissions.defaultMode`,
+  `skipDangerousModePermissionPrompt`, `remoteControlAtStartup`, and
+  `autoCompactEnabled`: Round F discloses them and asks about them. Never edit
+  this file: on Linux and macOS it is a symlink into the Operator's tracked
+  linuxploitacious checkout.
+- **Do the pinned models answer on this plan:**
   ```bash
-  .claude-config/bin/model-probe.sh --refresh
+  .claude-config/bin/model-probe.sh --list   # what the settings pin; no API call
+  .claude-config/bin/model-probe.sh          # one short request per distinct id
   ```
-  Settles the main-session pin for this machine — Fable 5 where the plan
-  allows it, Opus 4.8 otherwise — so the Operator's first real session boots
-  the right foreman instead of erroring on an unavailable model. Model
-  availability is plan-dependent and most Operators don't know their own
-  entitlements, so detect it and report the verdict in the recon summary;
-  never turn it into an interview question.
+  Report only: it prints `ok`, `FAIL`, or `UNSURE` per pinned id and changes
+  nothing. Model availability is plan-dependent and most Operators don't know
+  their own entitlements, so detect it and report the result in the recon
+  summary instead of asking. If an id FAILs (the plan lacks that model), say
+  which one and what it serves (`CONTEXT/model-roles.md`), and point the
+  Operator at "Settings, pins, and the shared Stage-1 file" in that file; do
+  not edit a settings file to work around it. `UNSURE` (a timeout or a usage
+  limit) says nothing about entitlement; mention it and move on.
 - **Repos under `~`:** a shallow scan for `.git` dirs (e.g.
   `find ~ -maxdepth 3 -name .git -type d 2>/dev/null | head -40`) sketches
   what the Operator actually builds — languages, org names, project count.
@@ -129,6 +137,79 @@ reflect the choice; don't leave defaults they rejected.
 whether they want the rich-Artifact treatment for complex data offered by
 default. Fold answers into `working-preferences.md` § "Output Defaults".
 
+**Round F: Permission mode (always asked; never skipped or defaulted
+silently).** Before the question, tell the Operator plainly what the Stage-1
+settings turned on (README "Opinionated by design" has the full list), using
+the values recon read:
+- `permissions.defaultMode: "bypassPermissions"`: every session starts with no
+  permission prompts. Claude Code runs shell commands, file edits and deletes,
+  and network requests without asking; only `deny` rules and OPS's two guard
+  hooks (git guard, secrets guard) stop a call.
+- `skipDangerousModePermissionPrompt: true`: the one-time confirmation Claude
+  Code shows before entering bypass mode is skipped.
+- `remoteControlAtStartup: true`: every interactive session connects to Remote
+  Control at start, reachable from the Claude apps signed in to the Operator's
+  own account (no one else gets access).
+- Auto-compaction is on as a backstop near the end of the window (not part of
+  this choice; the compaction standing order covers it).
+
+Then ask, with these options:
+- `Keep the OPS defaults` (the shipped configuration): bypass mode, no launch
+  confirmation, Remote Control at startup. Fits the full-autonomy posture.
+- `Normal permission prompts in terminal sessions` (no admin rights needed):
+  Claude Code asks before edits and shell commands, and Remote Control waits
+  for `/remote-control`. Applies to every session launched through the
+  `claude()` shell function; IDE extensions and other launchers keep the
+  Stage-1 defaults.
+- `Normal permission prompts everywhere, enforced` (needs admin rights): the
+  same, for every launch path and every user on the machine, and bypass mode
+  can no longer be entered at all.
+
+Prompts and the full-autonomy posture pull against each other: with prompts
+on, a run stops at each one until the Operator answers. If they pick prompts,
+say so and offer to revisit Round C.
+
+Apply the choice without touching the Stage-1 `settings.json` (a tracked file
+in their linuxploitacious checkout; an edit there dirties it, and its next
+`git pull --ff-only` fails whenever upstream changed the same file):
+- **Keep:** no change.
+- **Terminal sessions:** in the `claude()` function that `deploy.sh` wrote to
+  `~/.zshrc.local` and `~/.bashrc.local` (Windows: the `profile.local.ps1` seam
+  `deploy.ps1` wrote), replace each `--settings '{"ultracode":true}'` with
+  ```
+  --settings '{"ultracode":true,"permissions":{"defaultMode":"default"},"remoteControlAtStartup":false}'
+  ```
+  Show the Operator the diff before writing it. `--settings` sits above the user
+  settings file, so these keys win for that session; a re-deploy leaves the
+  edited function alone. When the Operator passes their own `--settings` to a
+  launch, the shim adds nothing, so they add `--permission-mode default` to
+  that launch. `"acceptEdits"` instead of `"default"` is the middle ground
+  (file edits without asking, shell commands still ask).
+- **Everywhere, enforced:** give the Operator this file to install with admin
+  rights (merge it into an existing file rather than overwrite one) at
+  `/etc/claude-code/managed-settings.json` (Linux and WSL),
+  `/Library/Application Support/ClaudeCode/managed-settings.json` (macOS), or
+  `C:\Program Files\ClaudeCode\managed-settings.json` (Windows):
+  ```json
+  {
+    "permissions": {
+      "defaultMode": "default",
+      "disableBypassPermissionsMode": "disable"
+    },
+    "remoteControlAtStartup": false
+  }
+  ```
+  Managed settings outrank every other file and every `--settings` flag, and
+  `disableBypassPermissionsMode` also rejects `--dangerously-skip-permissions`.
+  Do not run the install yourself: it is a system-wide change the Operator
+  makes.
+
+Check it took: in a new shell, launch `claude`; the footer no longer shows
+bypass permissions mode, and the first shell command asks before it runs.
+Record the choice in the marker (`permissions=keep`, `permissions=shell`, or
+`permissions=managed`) and as a dated line under `working-preferences.md`
+§ "Standing Orders", so a later session never quietly reverts it.
+
 ### What Stage 1 writes
 
 1. **`CONTEXT/about-me.md`** — created fresh from the answers, with the
@@ -149,7 +230,7 @@ default. Fold answers into `working-preferences.md` § "Output Defaults".
    marked "Stage 1 starter — refine via Stage 2." State in the file that voice
    has not yet been evidence-captured.
 
-3. **`CONTEXT/working-preferences.md`** — edited in place per Rounds C, D, E.
+3. **`CONTEXT/working-preferences.md`**: edited in place per Rounds C, D, E, and F (the permission choice as a dated Standing Orders line).
    It already ships generic; you are adjusting the Operator-specific knobs,
    not rewriting it.
 
@@ -280,6 +361,7 @@ Write it as simple key=value lines, e.g.:
 ```
 stage=1
 bootstrapped_at=<ISO-8601 date>
+permissions=<keep, shell, or managed: the Round F choice>
 ```
 
 Bump `stage` to `2` after voice capture and `3` after the tune pass. Never

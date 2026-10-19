@@ -8,7 +8,7 @@ These are the rules of engagement for any AI agent working with me. Follow them 
 
 1. **Read my context files first.** Before executing anything, read `about-me.md`, `brand-voice.md`, and this file. Every time. Don't assume you remember from a previous session. **Additionally, read `project-kata.md` whenever the task touches a project or repository** — see the "Project Work" section below.
 
-2. **Always clarify before executing — at intake, hardline.** Put the intent, scope, and success-criteria questions to me in prose before doing real work. The only exceptions are simple factual questions or quick conversational exchanges. This planning phase is a feature, not friction: deep, in-depth planning where we make all the decisions together, until nothing is left for me to decide. a prose question block doesn't stand in the way of the system — it's part of the same system.
+2. **Always clarify before executing, at intake, hardline.** Put the intent, scope, and success-criteria questions to me before doing real work (see "How to Ask Me Questions"). The only exceptions are simple factual questions or quick conversational exchanges. This planning phase is a feature, not friction: deep, in-depth planning where we make all the decisions together, until nothing is left for me to decide. a question round doesn't stand in the way of the system, it's part of the same system.
 
 3. **Show a brief plan and wait for my go.** After clarifying, outline what you're going to do in 3-5 bullet points and wait for my approval or adjustments. **The go is the switch (standing order, 2026-07-06):** once given, run with full autonomy and zero re-prompts, and never re-prompt with questions the go already answered. The full order (what lands without asking, the few things that still gate) lives in `foreman-charter.md` § "Full-autonomy standing order", which is authoritative; this line was collapsed from a full restatement to this pointer on 2026-09-04. This is the shipped default — `BOOTSTRAP.md` offers the option to dial the autonomy level up or down for operators who want more check-ins along the way.
 
@@ -18,7 +18,7 @@ These are the rules of engagement for any AI agent working with me. Follow them 
 
 ## How to Ask Me Questions
 
-Ask in prose: one short block of questions, each with its choices spelled out (the AskUserQuestion tool is retired here). I want:
+Ask with the structured question tool where one exists (AskUserQuestion in Claude Code), so I can click an answer; where none exists, ask in numbered prose with each question's choices spelled out. Either way, I want:
 
 - Multiple-choice questions with specific alternatives
 - Concrete options rather than open-ended "what do you want?"
@@ -109,11 +109,14 @@ wrong rather than unlucky, it belongs here. Add to this list when you rule on
 something; date it and say why. The harness ships the one universal ruling below;
 the rest are yours to add during use.
 
-- **Compact at any clean task boundary, as a rest stop: pre-authorized, never
-  metered.** A compact is a rest stop between stretches, not an interruption and
-  not a scarcity response. Preferred timing is any clean task boundary: a closed
-  task, a merged PR, a settled plan, a branch switch, or before stepping away.
-  You never ask a go and you never watch a meter; the boundary itself is the cue.
+- **Compact at any clean task boundary, as a rest stop: pre-authorized.** A
+  compact is a rest stop between stretches, not an interruption and not a
+  scarcity response. Preferred timing is any clean task boundary: a closed
+  task, a merged PR, a settled plan, a branch switch, or before stepping away;
+  if no boundary has come by about 300K tokens of context, take the next one.
+  You never ask a go; the boundary itself is the cue. Auto-compaction is on in
+  the Stage-1 settings as a backstop near the end of the window, so a manual
+  compact at a boundary is the norm and the automatic one is the safety net.
   Default to an in-place `/compact` and continue the same body of work with a
   clean desk; start a fresh session instead at a branch switch or a multi-day
   boundary, where a cold, aligned start beats carrying a stale thread. The one

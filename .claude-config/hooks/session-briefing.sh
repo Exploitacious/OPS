@@ -42,7 +42,7 @@ if [[ ! -t 0 ]]; then
 fi
 
 # --- worker posture ---
-gate="Opus 4.8 default worker · Sonnet 5 light lanes"
+gate="Sonnet 5.5 default lane · Opus 5.5 foreman and high-criticality lanes"
 
 # --- config posture (parse flat keys from the resolved settings.json) ---
 val() { grep -iE "\"$1\"[[:space:]]*:" "$SETTINGS" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*//; s/[",]//g; s/[[:space:]]*$//'; }
@@ -59,7 +59,7 @@ printf '============================================================\n'
 printf ' SESSION BRIEFING\n'
 printf '============================================================\n'
 printf ' Worker:  %s\n' "$gate"
-printf ' Config:  autocompact %s  ·  effort %s  ·  main=%s  ·  fallback(opus)=%s\n' "$acs" "$eff" "$main_model" "$fallback_model"
+printf ' Config:  autocompact %s  ·  effort %s  ·  main=%s  ·  opus=%s\n' "$acs" "$eff" "$main_model" "$fallback_model"
 printf ' Ultra:   ultracode is session-set via the alias (--settings); /effort to change\n'
 # Boot surface: the claude() launch shim appends the charter + boot-digest to the
 # cached system prompt and exports OPS_BOOT_SHA (first 8 hex of the sha1 of the

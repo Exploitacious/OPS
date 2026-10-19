@@ -14,8 +14,11 @@
       4. Seed the trust anchor ($HOME trusted, no folder-trust prompt)
       5. Emit the always-on ultracode shim to the profile.local.ps1 seam
       6. Register the daily backup scheduled task (dynamic bash + WorkingDirectory)
-      7. Install caveman Claude Code plugin (with CLI fallback probe)
+      7. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
       8. Pin CLAUDE_CODE_GIT_BASH_PATH + run the security-guard self-test
+
+    Never writes settings.json or the model pin: Stage 1 owns that file, and
+    bin/model-probe.sh only reports whether the pinned models answer.
 
     All host-specific content goes to the untracked profile.local.ps1 seam, never
     $PROFILE (a shim/symlink tied to the PUBLIC linuxploitacious repo).
@@ -373,9 +376,9 @@ else {
     }
 }
 
-# --- Install Claude Code plugins ---
+# --- Claude Code plugins: retire caveman + ponytail ---
 Write-Host ""
-Write-Status "Checking Claude Code plugins..." "Yellow"
+Write-Status "Retiring caveman + ponytail Claude Code plugins..." "Yellow"
 
 # Resolve the claude CLI. A bare deploy.ps1 re-run may reach here before a PATH
 # refresh, so probe known install locations too (mirrors deploy.sh find_claude).
@@ -392,28 +395,33 @@ function Resolve-ClaudeCli {
     return $null
 }
 
+# This block used to INSTALL caveman, unpinned, from its third-party
+# marketplace head, right after Stage 1 had uninstalled it; Stage 1 retires
+# both plugins because their modes are now part of the harness's own operating
+# rules. It now UNINSTALLS any left on an already-provisioned host and is a
+# no-op once they are gone (idempotent). Removal goes through the CLI only,
+# never a delete of a plugins dir (the CLI owns profile selection and cleanup).
+# The calls run with ErrorActionPreference Continue: the CLI writes to stderr
+# when a plugin is already absent, and Windows PowerShell 5.1 turns redirected
+# native stderr into a terminating error under "Stop".
 $claudeExe = Resolve-ClaudeCli
 if ($claudeExe) {
-    Write-Action "Registering caveman plugin marketplace..."
-    $marketplaceOut = & $claudeExe plugin marketplace add JuliusBrussee/caveman 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Good "Marketplace registered."
-        Write-Action "Installing caveman plugin..."
-        $pluginOut = & $claudeExe plugin install caveman@caveman 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Good "Caveman plugin installed."
-        }
-        else {
-            Write-Warn "Plugin install returned: $pluginOut"
-            Write-Warn "Run manually: claude plugin install caveman@caveman"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        foreach ($plg in @('caveman', 'ponytail')) {
+            & $claudeExe plugin uninstall "${plg}@${plg}" 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Good "Removed retired plugin: $plg" }
+            & $claudeExe plugin marketplace remove $plg 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Good "Removed retired plugin marketplace: $plg" }
         }
     }
-    else {
-        Write-Warn "Marketplace add returned: $marketplaceOut"
+    finally {
+        $ErrorActionPreference = $prevEap
     }
 }
 else {
-    Write-Warn "Claude CLI not found in PATH or standard install locations. Skipping plugin install."
+    Write-Warn "Claude CLI not found in PATH or standard install locations. Skipping plugin retirement."
     Write-Warn "Install Claude Code first: https://claude.ai/download"
 }
 

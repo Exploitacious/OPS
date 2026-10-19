@@ -13,8 +13,14 @@
 #   4. Wire claude-wrapper.sh into the invoking user's + root's shellrcs (flock/permission-mode shim)
 #   5. Initialize Claude Code auto-memory git-sync (ac-memory-init)
 #   6. Schedule daily backup cron entry
-#   7. Install caveman Claude Code plugin
-#   8. Settle the main-session model pin for this machine (bin/model-probe.sh)
+#   7. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
+#
+# Never writes settings.json: on a linuxploitacious host it is a symlink into
+# the user's tracked Stage-1 checkout, so a write there dirties that public
+# repo, and its next `git pull --ff-only` fails whenever upstream changed the
+# same file. An earlier version ran
+# bin/model-probe.sh here, which rewrote the "model" pin on every deploy; that
+# step is gone, and model-probe.sh now only reports.
 #
 # Idempotent. Safe to re-run after any OPS git pull.
 # Full procedure: see ~/OPS/DEPLOYMENT.md.
@@ -382,9 +388,9 @@ else
   fi
 fi
 
-# --- Claude Code plugins ---
+# --- Claude Code plugins: retire caveman + ponytail ---
 echo ""
-c_yel "Checking Claude Code plugins..."
+c_yel "Retiring caveman + ponytail Claude Code plugins..."
 
 # A bare `bash deploy.sh` doesn't source the user's login profile, so PATH
 # may lack ~/.local/bin or pnpm's bin dir even when claude is installed.
@@ -426,20 +432,25 @@ find_claude() {
 
 CLAUDE_BIN="$(find_claude 2>/dev/null || true)"
 
+# Retire the caveman + ponytail plugins. This block used to INSTALL caveman,
+# unpinned, from its third-party marketplace head, right after Stage 1 had
+# uninstalled it; Stage 1 retires both plugins because their terse-prose and
+# lazy-engineering modes are now part of the harness's own operating rules.
+# It now UNINSTALLS any left on an already-provisioned host and is a no-op once
+# they are gone (idempotent). Removal goes through the CLI only, never an rm of
+# a plugins dir: the CLI owns profile selection and cleanup, and deleting
+# ~/.claude paths after a failed command can break a still-registered or
+# different profile (the same reasoning as Stage 1's retire step).
 if [[ -n "$CLAUDE_BIN" ]]; then
   msg_ok "Claude CLI: $CLAUDE_BIN"
-  msg_action "Registering caveman plugin marketplace..."
-  if "$CLAUDE_BIN" plugin marketplace add JuliusBrussee/caveman >/dev/null 2>&1; then
-    msg_ok "Marketplace registered."
-    msg_action "Installing caveman plugin..."
-    if "$CLAUDE_BIN" plugin install caveman@caveman >/dev/null 2>&1; then
-      msg_ok "Caveman plugin installed."
-    else
-      msg_warn "Plugin install failed. Run manually: $CLAUDE_BIN plugin install caveman@caveman"
+  for plg in caveman ponytail; do
+    if "$CLAUDE_BIN" plugin uninstall "${plg}@${plg}" >/dev/null 2>&1; then
+      msg_ok "Removed retired plugin: ${plg}"
     fi
-  else
-    msg_warn "Marketplace add failed. Run manually: $CLAUDE_BIN plugin marketplace add JuliusBrussee/caveman"
-  fi
+    if "$CLAUDE_BIN" plugin marketplace remove "$plg" >/dev/null 2>&1; then
+      msg_ok "Removed retired plugin marketplace: ${plg}"
+    fi
+  done
 else
   msg_warn "Claude CLI not found in PATH or standard install locations."
   msg_warn "Checked: \$PATH, ~/.local/bin, ~/.local/share/pnpm, ~/.npm-global/bin, /usr/local/bin, /opt/homebrew/bin"
@@ -494,29 +505,6 @@ if result="$(seed_trust "$jf")"; then
   esac
 fi
 
-# --- Model availability probe ---
-# Which foreman this machine can actually run is plan-dependent, so the pin
-# stage 1 shipped is a guess until something checks. The probe settles it
-# (Fable 5 where the plan allows, Opus 4.8 otherwise) at the END of deploy,
-# once the CLI and config surface it needs are wired.
-#
-# Deliberately NON-FATAL: a probe that cannot reach the API must not fail an
-# otherwise-good deploy — the pin stays whatever stage 1 wrote, and the next
-# session's own probe (BOOTSTRAP recon / harness-update gate) re-settles it.
-echo ""
-c_yel "Settling model pin for this machine..."
-
-MODEL_PROBE="${CONFIG_DIR}/bin/model-probe.sh"
-if [[ ! -x "$MODEL_PROBE" ]]; then
-  msg_warn "model-probe.sh not present at $MODEL_PROBE — skipping (pin left as stage 1 wrote it)."
-elif [[ -z "$CLAUDE_BIN" ]]; then
-  msg_warn "Claude CLI not found — skipping model probe (pin left as stage 1 wrote it)."
-elif "$MODEL_PROBE" --refresh; then
-  msg_ok "Model pin settled."
-else
-  msg_warn "model-probe.sh exited rc=$? — pin left as stage 1 wrote it; re-run: $MODEL_PROBE --refresh"
-fi
-
 echo ""
 c_cyan "--------------------------------------------------"
 c_green "Deploy complete."
@@ -524,4 +512,7 @@ echo ""
 echo "  Config source:   $CONFIG_DIR"
 echo "  Claude home:     $CLAUDE_HOME       (launch: claude)"
 echo "  Skills source:   ${OPS_ROOT}/SKILLS"
+echo ""
+echo "  Model pins come from your Stage-1 settings.json; deploy does not change them."
+echo "  To check they answer on your plan: ${CONFIG_DIR}/bin/model-probe.sh (report only)"
 echo ""
