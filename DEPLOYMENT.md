@@ -195,11 +195,12 @@ In order:
    push gate verifies it private (no-op if clean; an origin with no branch of
    that name yet gets it as a first push), pulls every project repo, then runs
    `branch-gc --apply` to remove merged branches and park their worktrees in a
-   7-day trash (it needs a signed-in `gh` and git 2.45 or newer, and removes
-   nothing without them: an older git skips every repository, and the stage
-   logs the skip). It logs to `.claude-config/backup/sync.log`, and always
-   exits 0, so the session briefing's `Backup:` line repeats the last run's
-   OPS-stage errors and skipped pushes at boot. Skipped with `--no-system`.
+   7-day trash. It needs a signed-in `gh`, git 2.45 or newer and GNU coreutils
+   9.5 or newer: without `gh` it removes nothing, an older git skips every
+   repository, and an older `mv` cannot move a worktree to the trash; each case
+   is logged. The sync script logs to `.claude-config/backup/sync.log`, and
+   always exits 0, so the session briefing's `Backup:` line repeats the last
+   run's OPS-stage errors and skipped pushes at boot. Skipped with `--no-system`.
 
    **The push gate.** Your copy holds your memory, context, and notes, so the
    two automatic pushes (memory-init's and the daily backup's) run only when
