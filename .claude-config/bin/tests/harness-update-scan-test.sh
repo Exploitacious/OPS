@@ -23,6 +23,8 @@
 #      bit is reported as MODE, never silently IDENTICAL, and never changed.
 #   8. Under umask 027 the exec bit is still set and cleared (chmod a+x/a-x).
 #   9. A template symlink arrives as a symlink, not a file holding its target.
+#  10. A local symlink ancestor cannot redirect a safe copy outside the repo
+#      or into an excluded identity path, even when its content matches base.
 # No network: the ops-template remote points at a local bare repo.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -189,6 +191,31 @@ out="$(cd "$T/copy4" && umask 027 && OPS_UPSTREAM=local/test bash "$SCAN_TMP" --
   && ok "umask 027: an UPDATE to 100644 clears every exec bit, exit 0" || bad "umask 027: rc=$rc, $(ls -l "$T/copy4/bin/wasexec"): $out"
 [ -x "$T/copy4/bin/newtool" ] && [ -x "$T/copy4/bin/runme" ] \
   && ok "umask 027: NEW and UPDATE 100755 files land executable" || bad "umask 027: $(ls -l "$T/copy4/bin")"
+
+# --- 12. a symlink ancestor redirects both NEW and UPDATE destinations ---
+g init -q "$T/up4"; mkdir -p "$T/up4/tools"
+echo 'local identity' > "$T/up4/tools/USER.md"
+g -C "$T/up4" add -A; g -C "$T/up4" commit -qm base; BASE4="$(git -C "$T/up4" rev-parse HEAD)"
+echo 'template replacement' > "$T/up4/tools/USER.md"; echo new > "$T/up4/tools/new.md"
+g -C "$T/up4" add -A; g -C "$T/up4" commit -qm update
+g clone -q --bare "$T/up4" "$T/up4.git"
+for boundary in outside identity; do
+  copy="$T/symlink-$boundary"
+  g clone -q "$T/up4" "$copy"; g -C "$copy" reset -q --hard "$BASE4"
+  g -C "$copy" remote add ops-template "$T/up4.git"; mkdir -p "$copy/.claude-config"
+  printf 'upstream=local/test\nlast_synced=%s\n' "$BASE4" > "$copy/.claude-config/ops-upstream-ref"
+  if [ "$boundary" = outside ]; then target_dir="$T/outside"; else target_dir="$copy/CONTEXT"; fi
+  mv "$copy/tools" "$target_dir"; ln -s "$target_dir" "$copy/tools"
+  out="$(run_scan "$copy" --apply-safe 2>&1)"; rc=$?
+  [ "$rc" -eq 0 ] && grep -q -E '^CONFLICT +tools/USER.md .*symlink ancestor' <<<"$out" \
+    && grep -q -E '^CONFLICT +tools/new.md .*symlink ancestor' <<<"$out" \
+    && ok "symlink ancestor ($boundary): NEW and UPDATE are conflicts" \
+    || bad "symlink ancestor ($boundary): rc=$rc: $out"
+  [ "$(cat "$target_dir/USER.md")" = 'local identity' ] && [ ! -e "$target_dir/new.md" ] \
+    && [ -L "$copy/tools" ] && [ -z "$(find "$target_dir" -name '.harness-update.*' -print)" ] \
+    && ok "symlink ancestor ($boundary): destination and identity stay untouched" \
+    || bad "symlink ancestor ($boundary): wrote through the parent symlink"
+done
 
 echo; echo "harness-update-scan-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS"

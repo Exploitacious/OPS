@@ -90,21 +90,19 @@ identity_hint() {
 # commits touch are re-created at the default mode: a chmod 600 note came back
 # 644. save_modes records their permission bits before the pull, and
 # restore_modes puts them back after it, whether it succeeded or was aborted;
-# an exec bit the pull itself changed is kept.
+# an exec bit the pull itself changed is kept. Save all tracked files: a local
+# chmod 600 is invisible to git diff, and a remote edit can recreate that file
+# at 644 even on a day with no local commits.
 MODE_PATHS=() MODE_BITS=()
 file_mode() { stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' -- "$1" 2>/dev/null; }
 save_modes() {
-    local upstream="$1" p m
+    local p m
     MODE_PATHS=() MODE_BITS=()
     while IFS= read -r -d '' p; do
         [ -f "$p" ] && [ ! -L "$p" ] || continue
         m="$(file_mode "$p")" && [ -n "$m" ] || continue
         MODE_PATHS+=("$p"); MODE_BITS+=("$m")
-    done < <(if git rev-parse -q --verify "$upstream" >/dev/null; then
-                 git diff --name-only -z "$upstream" HEAD
-             else
-                 git ls-files -z
-             fi)
+    done < <(git ls-files -z)
 }
 restore_modes() {
     local i p m now
@@ -165,7 +163,7 @@ backup_ops() {
     # aborts the rebase it left half-done, so the local commit and the tree
     # stay exactly as they were, and the next run retries.
     local pull_err pull_why
-    save_modes "origin/$branch"
+    save_modes
     if ! pull_err="$(git pull --rebase --no-autostash origin "$branch" 2>&1 >/dev/null)"; then
         # git's first fatal/error line names the cause; its last line is often a hint.
         pull_why="$(printf '%s\n' "$pull_err" | grep -m1 -E '^(fatal|error|ERROR|CONFLICT)')" \

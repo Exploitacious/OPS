@@ -136,7 +136,7 @@ pass "failed commit: logged as an error, nothing pushed, project stage still ran
 
 # --- No git identity: the failure names the fix --------------------------------
 (
-  export GIT_AUTHOR_NAME= GIT_COMMITTER_NAME= GIT_AUTHOR_EMAIL= GIT_COMMITTER_EMAIL= GIT_CONFIG_GLOBAL=/dev/null
+  export GIT_AUTHOR_NAME='' GIT_COMMITTER_NAME='' GIT_AUTHOR_EMAIL='' GIT_COMMITTER_EMAIL='' GIT_CONFIG_GLOBAL=/dev/null
   GH_ANSWER=true run_sync
 )
 grep -q 'OPS: ERROR' "$LOG" || fail "a backup without an identity did not log an error"
@@ -253,6 +253,22 @@ for remote_moved in no yes; do
     no_stash "dirty day (remote moved: $remote_moved)"
 done
 pass "a dirty day keeps empty directories and file modes, also when the rebase replays over a moved remote"
+
+# A chmod-only local restriction is invisible to git diff. When another host
+# edits that file, both a fast-forward and a rebase recreate it at default
+# permissions unless the backup saves modes beyond its locally changed paths.
+for local_change in no yes; do
+    chmod 600 "$OPS/note3.md"
+    if [ "$local_change" = yes ]; then printf 'other local work\n' > "$OPS/mode-rebase.md"; fi
+    git -C "$WORK/other" pull -q --rebase origin main \
+      && printf 'remote edit (%s)\n' "$local_change" >> "$WORK/other/note3.md" \
+      && git -C "$WORK/other" add note3.md && git -C "$WORK/other" commit -q -m 'remote note edit' \
+      && git -C "$WORK/other" push -q origin HEAD:main || fail "fixture: remote note edit"
+    GH_ANSWER=true run_sync
+    grep -q "remote edit ($local_change)" "$OPS/note3.md" || fail "remote note edit was not pulled"
+    [ "$(stat -c %a "$OPS/note3.md")" = 600 ] || fail "chmod-only restriction lost (local changes: $local_change)"
+done
+pass "chmod-only restrictions survive remote edits on clean and dirty days"
 
 # --- A run killed mid-pull leaves the work in place ------------------------------
 dirty_tree killed

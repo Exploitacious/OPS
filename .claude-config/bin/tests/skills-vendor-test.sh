@@ -21,12 +21,15 @@
 #   - a failed rsync or tar copy leaves an owned mirror exactly as it was (the
 #     new mirror is built in a temp dir and swapped in)
 #   - the BACKUP line is printed even when a later step fails, and a RESTORED
-#     line follows it when a failed install moves the folder back
+#     line follows it when a failed install moves the folder back; a recreated
+#     destination is preserved alongside the backup
 #   - no mv -T: a PATH mv that rejects -T (as BSD/macOS mv does) still syncs
 #   - stale SKILLS/.vendor.XXXXXX dirs from an interrupted run are cleaned at
 #     the start of a sync; a mirror a kill left aside between the two renames
 #     is moved back first (with its GUI-local files); other names are untouched;
 #     .gitignore keeps the staging dirs out of the backup
+#   - every unplaceable previous mirror is backed up, and overlapping syncs
+#     refuse their directory lock before touching another run's staging
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/skills-vendor-test.sh
 # Exit: 0 = all pass; non-zero on first failure.
@@ -370,6 +373,99 @@ for engine in "${engines[@]}"; do
 done
 pass "a failed install moves the local folder back, says so after the BACKUP line, and exits 3"
 
+# A destination can be recreated after an unowned folder has moved aside. A
+# failed install must preserve that new directory as well as the backup, never
+# rm -rf a path merely because it was empty earlier in this run.
+mkdir -p "$TDIR/bin-recreated"
+cat > "$TDIR/bin-recreated/mv" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */tree)
+    dst="${*: -1}"
+    case "$dst" in
+      */gamma) mkdir -p "$dst" && printf 'new independent work\n' > "$dst/new.md"; exit 71 ;;
+    esac
+    ;;
+esac
+exec "$REAL_MV" "$@"
+STUB
+chmod +x "$TDIR/bin-recreated/mv"
+for engine in "${engines[@]}"; do
+  o="$TDIR/recreated-$engine"
+  make_tree "$o"
+  SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync >/dev/null || fail "engine $engine: recreated fixture sync failed"
+  add_local "$o" gamma
+  cp -a "$o/SKILLS/gamma" "$TDIR/recreated-before-$engine"
+  out="$(PATH="$TDIR/bin-recreated:$PATH" SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)"; rc=$?
+  [ "$rc" -eq 3 ] || fail "engine $engine: recreated destination exited $rc, want 3: $out"
+  [ "$(cat "$o/SKILLS/gamma/new.md" 2>/dev/null)" = 'new independent work' ] || fail "engine $engine: restore deleted the independently recreated destination: $out"
+  line="$(printf '%s\n' "$out" | grep '^BACKUP   gamma: ')" || fail "engine $engine: no BACKUP line for conflicting restore: $out"
+  diff -r --no-dereference "$TDIR/recreated-before-$engine" "${line##* kept at }" >/dev/null || fail "engine $engine: conflicting restore lost the original folder"
+  printf '%s\n' "$out" | grep -q 'destination exists' || fail "engine $engine: restore did not explain why the backup stayed aside: $out"
+done
+pass "a failed install preserves an independently recreated destination and the original backup"
+
+# Plain mv can succeed by nesting tree/ into a directory created after the
+# destination check. Never record that independent directory as an owned
+# mirror: the next --delete sync would then delete its new.md as stale content.
+mkdir -p "$TDIR/bin-nested"
+cat > "$TDIR/bin-nested/mv" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */tree)
+    dst="${*: -1}"
+    case "$dst" in
+      */alpha) mkdir -p "$dst" && printf 'new independent work\n' > "$dst/new.md" ;;
+    esac
+    ;;
+esac
+exec "$REAL_MV" "$@"
+STUB
+chmod +x "$TDIR/bin-nested/mv"
+for engine in "${engines[@]}"; do
+  o="$TDIR/nested-$engine"
+  make_tree "$o"
+  SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync >/dev/null || fail "engine $engine: nested fixture sync failed"
+  cp "$o/SKILLS/.vendored-state.tsv" "$TDIR/nested-ledger-$engine"
+  printf 'changed source\n' >> "$o/PROJECTS/src/skills/alpha/SKILL.md"
+  out="$(PATH="$TDIR/bin-nested:$PATH" SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)"; rc=$?
+  [ "$rc" -eq 3 ] || fail "engine $engine: nested mv was reported as a successful install: $out"
+  [ "$(cat "$o/SKILLS/alpha/new.md" 2>/dev/null)" = 'new independent work' ] || fail "engine $engine: nested install lost independent work"
+  cmp -s "$TDIR/nested-ledger-$engine" "$o/SKILLS/.vendored-state.tsv" || fail "engine $engine: nested install claimed ownership of independent work"
+  previous="$(find "$o/SKILLS" -mindepth 2 -maxdepth 2 -name previous -type d -print -quit)"
+  [ "$(cat "$previous/00_System_Prompt.md" 2>/dev/null)" = 'mirror-side GUI prompt' ] || fail "engine $engine: nested install discarded the prior mirror"
+  printf '%s\n' "$out" | grep -q 'destination changed during install' || fail "engine $engine: nested install was not explained: $out"
+done
+pass "a successful nested mv is refused without owning independent work or discarding the previous mirror"
+
+# An editor can write immediately after the rename. The ledger must describe
+# the staged copy, not adopt that later edit and permit its deletion next time.
+mkdir -p "$TDIR/bin-after-install"
+cat > "$TDIR/bin-after-install/mv" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}:${*: -1}" in
+  */tree:*/alpha)
+    "$REAL_MV" "$@" || exit $?
+    printf 'concurrent local edit\n' > "${*: -1}/fresh-local.md"
+    exit 0
+    ;;
+esac
+exec "$REAL_MV" "$@"
+STUB
+chmod +x "$TDIR/bin-after-install/mv"
+for engine in "${engines[@]}"; do
+  o="$TDIR/after-install-$engine"
+  make_tree "$o"
+  SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync >/dev/null || fail "engine $engine: post-install fixture sync failed"
+  printf 'changed source\n' >> "$o/PROJECTS/src/skills/alpha/SKILL.md"
+  out="$(PATH="$TDIR/bin-after-install:$PATH" SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)" || fail "engine $engine: post-install sync failed: $out"
+  [ "$(cat "$o/SKILLS/alpha/fresh-local.md" 2>/dev/null)" = 'concurrent local edit' ] || fail "engine $engine: concurrent edit fixture did not run"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)" || fail "engine $engine: sync after concurrent edit failed: $out"
+  line="$(printf '%s\n' "$out" | grep '^BACKUP   alpha: ')" || fail "engine $engine: the ledger adopted and deleted the concurrent edit: $out"
+  [ "$(cat "${line##* kept at }/fresh-local.md" 2>/dev/null)" = 'concurrent local edit' ] || fail "engine $engine: the concurrent edit was not preserved"
+done
+pass "the ledger records the staged content and preserves edits made immediately after installation"
+
 # A failed or interrupted rsync must not leave an owned mirror half-updated
 # (2026-10-19: rsync --delete ran in place, so a failure left a mirror that
 # matched neither the record nor the source, and the next sync moved it aside
@@ -465,6 +561,77 @@ line="$(printf '%s\n' "$out" | grep '^BACKUP   .vendor.Ty56Ui: ')" || fail "an u
 [ -z "$(find "$o/SKILLS" -maxdepth 1 -name '.vendor.??????' -print -quit)" ] || fail "a stale staging dir survived: $(ls -a "$o/SKILLS")"
 [ -d "$o/SKILLS/.vendor.keep-me" ] && [ -d "$o/SKILLS/.vendor.Zz9" ] || fail "a dir not named like a staging dir was removed"
 printf '%s\n' "$out" | grep -q '^UNCHANGED alpha$' || fail "the restored mirror was not recognized as owned: $out"
+
+# An interrupted swap can retain previous/ because the destination was
+# independently recreated, or because a restore collided. That old copy may
+# hold the only GUI-local files. A valid name is no proof it is redundant.
+for name in alpha '../unsafe'; do
+  o="$TDIR/stale-collision-${name##*/}"
+  make_tree "$o"
+  run_sv "$o" sync >/dev/null || fail "stale collision fixture sync failed"
+  mkdir -p "$o/SKILLS/.vendor.Cc12Dd/previous"
+  printf '%s\n' "$name" > "$o/SKILLS/.vendor.Cc12Dd/name"
+  printf 'only copy of GUI setup\n' > "$o/SKILLS/.vendor.Cc12Dd/previous/SETUP.md"
+  out="$(run_sv "$o" sync 2>&1)" || fail "stale collision cleanup failed: $out"
+  line="$(printf '%s\n' "$out" | grep '^BACKUP   .vendor.Cc12Dd: ')" || fail "unplaceable previous mirror was removed instead of kept: $out"
+  [ "$(cat "${line##* kept at }/SETUP.md" 2>/dev/null)" = 'only copy of GUI setup' ] || fail "stale cleanup lost the only GUI-local copy"
+  [ -d "$o/SKILLS/alpha" ] || fail "stale cleanup replaced the current mirror"
+done
+pass "stale previous mirrors with an occupied or unsafe destination are kept in the backup"
+
+# Pause a real sync after it moves the old mirror into staging. Another sync
+# must fail before clean_stale can remove or restore the first run's live work.
+mkdir -p "$TDIR/bin-overlap"
+cat > "$TDIR/bin-overlap/mv" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  "$OPS_DIR/SKILLS/alpha":*/previous)
+    "$REAL_MV" "$@" || exit $?
+    : > "$OPS_DIR/paused"
+    for ((n=0; n<200; n++)); do
+      [ -f "$OPS_DIR/release" ] && exit 0
+      sleep 0.05
+    done
+    exit 71
+    ;;
+esac
+exec "$REAL_MV" "$@"
+STUB
+chmod +x "$TDIR/bin-overlap/mv"
+o="$TDIR/overlap"
+make_tree "$o"
+PATH="$TDIR/bin-overlap:$PATH" SKILLS_VENDOR_NO_RSYNC=1 run_sv "$o" sync > "$o/first.log" 2>&1 &
+first_pid=$!
+for ((n=0; n<100; n++)); do
+  [ -f "$o/paused" ] && break
+  sleep 0.05
+done
+if [ ! -f "$o/paused" ]; then
+  : > "$o/release"; wait "$first_pid"
+  fail "the overlap fixture did not reach the paused rename"
+fi
+previous="$(find "$o/SKILLS" -mindepth 2 -maxdepth 2 -name previous -type d -print -quit)"
+out="$(SKILLS_VENDOR_NO_RSYNC=1 run_sv "$o" sync 2>&1)"; rc=$?
+preserved=0
+[ "$(cat "$previous/00_System_Prompt.md" 2>/dev/null)" = 'mirror-side GUI prompt' ] && preserved=1
+: > "$o/release"
+wait "$first_pid"; first_rc=$?
+[ "$rc" -eq 3 ] || fail "overlapping sync exited $rc, want 3: $out"
+printf '%s\n' "$out" | grep -q 'sync lock' || fail "overlapping sync did not report its lock: $out"
+[ "$preserved" -eq 1 ] || fail "overlapping sync touched the active staging directory"
+[ "$first_rc" -eq 0 ] || fail "the first sync failed after refusing an overlap: $(cat "$o/first.log")"
+[ ! -e "$o/SKILLS/.vendor-sync.lock" ] || fail "a completed sync left its lock"
+check_mirror "$o" 'overlapping sync'
+# A lock left by SIGKILL is ambiguous. Refuse it and explain manual recovery,
+# without removing a potentially active lock or touching any staging.
+mkdir "$o/SKILLS/.vendor-sync.lock" "$o/SKILLS/.vendor.Lock12"
+printf 'keep active staging\n' > "$o/SKILLS/.vendor.Lock12/marker"
+out="$(run_sv "$o" sync 2>&1)"; rc=$?
+[ "$rc" -eq 3 ] && printf '%s\n' "$out" | grep -q 'confirming no sync is running' || fail "an existing lock was not refused with recovery instructions: $out"
+[ "$(cat "$o/SKILLS/.vendor.Lock12/marker" 2>/dev/null)" = 'keep active staging' ] || fail "a refused lock still cleaned staging"
+[ -d "$o/SKILLS/.vendor-sync.lock" ] || fail "a refused lock was removed"
+pass "overlapping syncs are refused before cleanup; ambiguous locks require explicit recovery"
+
 # --- A time-only difference is not a change (2026-10-19 flake: rsync -i also
 # itemizes ".d..t......", so the result flipped with the clock). A mode change
 # still syncs. Both engines.

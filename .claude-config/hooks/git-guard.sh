@@ -141,12 +141,13 @@ fi
 # subcommands, `bash -c` (and -lc, never --norc or --rcfile), eval, scripts fed
 # to a shell through a heredoc, a here-string or a pipe, $(...) and backticks
 # (quoted or not), and git aliases read as data. Redirections (2>&1, &>/dev/null,
-# >&2) are not arguments, so they never read as the remote. Python 3 only
-# tokenizes the command; the one subprocess it starts reads an alias with
-# `git config --get`, from the hook's own environment, never the command's.
+# >&2) are not arguments, so they never read as the remote. Python 3 tokenizes
+# the command and reads Git config and repository paths. Those reads use the
+# hook's trusted git and environment, with only Git's config inputs forwarded;
+# a command's PATH or LD_PRELOAD must never choose code the hook executes.
 #
 # Also blocked on an OPS copy: a push carrying `-c`, `--config-env` or
-# GIT_CONFIG_* settings that can move it (remote.*, url.*, push.*,
+# GIT_CONFIG_* settings that can move it (remote.*, url.*, push.*, includes,
 # branch.<b>.remote or .pushRemote), plumbing pushes (send-pack, http-push,
 # subtree push, lfs push), and a push in the same command as a change to where
 # pushes go (git remote add/set-url, git config remote.*/url.*/ops.pushVerified,
@@ -227,6 +228,9 @@ apply reflog cat-file hash-object ls-tree for-each-ref show-ref name-rev var hel
 maintenance count-objects fsck prune repack write-tree read-tree commit-tree mktree
 verify-commit rerere archive bundle fast-export replace check-ignore check-attr diff-tree
 diff-index diff-files rev-list whatchanged""".split())
+# Aliases cannot shadow these publishing builtins either: alias.push=status
+# must never make a real `git push` disappear from the inspection.
+BUILTINS.update(("push", "send-pack", "http-push"))
 
 def native_path(p):
     if os.name == "nt":
@@ -428,9 +432,9 @@ def tokens(text):
     return out
 
 def shell(base, parent=None, env=None):
-    sh = {"base": base, "oldpwd": None, "dirs": [], "vars": {}, "exported": set(), "pos": []}
+    sh = {"base": base, "oldpwd": None, "dirs": [], "vars": {}, "exported": set(), "pos": [], "push_override": "", "git_config": []}
     if parent:
-        sh.update(oldpwd=parent["oldpwd"], vars=dict(parent["vars"]), exported=set(parent["exported"]), pos=list(parent["pos"]))
+        sh.update(oldpwd=parent["oldpwd"], vars=dict(parent["vars"]), exported=set(parent["exported"]), pos=list(parent["pos"]), push_override=parent["push_override"], git_config=list(parent["git_config"]))
     for k, v in (env or {}).items():
         sh["vars"][k] = v; sh["exported"].add(k)
     return sh
@@ -575,13 +579,24 @@ def command(seg, sh, depth, bodies, quoted, subs, piped):
 
 def push_override(key):
     k = key.lower()
-    return k.startswith(("remote.", "url.", "push.")) or (k.startswith("branch.") and k.rsplit(".", 1)[-1] in ("remote", "pushremote"))
+    # An included config can set any push destination even when the include
+    # key itself does not mention a remote. The gate never saw that config.
+    return k.startswith(("remote.", "url.", "push.", "include.", "includeif.")) or (k.startswith("branch.") and k.rsplit(".", 1)[-1] in ("remote", "pushremote"))
 
 def git(w, base, sh, env, depth):
     genv = {k: v for k, v in sh["vars"].items() if k in sh["exported"]}
     genv.update(env)
     unresolved = base is None
-    gd, kv, override = "", [], ""
+    gd, kv, override = "", list(sh["git_config"]), sh["push_override"]
+    # Config reads are data-only. Forward exactly the config inputs, never
+    # PATH, LD_PRELOAD, GIT_EXEC_PATH, or other command execution settings.
+    config_env = dict(os.environ)
+    # GIT_CONFIG affects only `git config`, not Git's own alias lookup. Letting
+    # it replace this read could hide a real push alias behind an empty file.
+    config_env.pop("GIT_CONFIG", None)
+    for k, v in genv.items():
+        if v is not None and (k in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_NOSYSTEM") or re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", k)):
+            config_env[k] = v
     for k in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"):
         if k in genv: override = override or k + " in the environment"
     if "GIT_CONFIG_COUNT" in genv:
@@ -591,38 +606,56 @@ def git(w, base, sh, env, depth):
     if "GIT_DIR" in genv:
         gd = path(genv["GIT_DIR"], base, sh, True) if genv["GIT_DIR"] is not None else None
         unresolved |= gd is None
-    while w and w[0].startswith("-"):
-        opt, val = w.pop(0), None
-        if opt in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"):
-            val = w.pop(0) if w else ""
-        elif opt.startswith("-C") and len(opt) > 2: opt, val = "-C", opt[2:]
-        elif opt.startswith("-c") and not opt.startswith("--") and len(opt) > 2: opt, val = "-c", opt[2:]
-        elif opt.startswith("--") and "=" in opt: opt, val = opt.split("=", 1)
-        else: continue
-        if opt == "-C":
-            base = path(val, base, sh, True); unresolved |= base is None
-        elif opt == "--git-dir":
-            gd = path(val, base, sh, True); unresolved |= gd is None
-        elif opt == "-c":
-            k, eq, v = val.partition("="); kv.append((k, v if eq else "true"))
-        elif opt == "--config-env":
-            kv.append((val.partition("=")[0], None))
-    bad = [k for k, v in kv if push_override(k)]
-    if bad: override = override or "-c " + bad[0]
-    aliases = {k[6:].lower(): v for k, v in kv if k.lower().startswith("alias.") and v}
     for _ in range(8):
+        # A non-shell alias may itself begin with global options. Parse them
+        # on every expansion, as Git does, before deciding what command runs.
+        while w and w[0].startswith("-"):
+            opt, val = w.pop(0), None
+            if opt in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"):
+                val = w.pop(0) if w else ""
+            elif opt.startswith("-C") and len(opt) > 2: opt, val = "-C", opt[2:]
+            elif opt.startswith("-c") and not opt.startswith("--") and len(opt) > 2: opt, val = "-c", opt[2:]
+            elif opt.startswith("--") and "=" in opt: opt, val = opt.split("=", 1)
+            else: continue
+            if opt == "-C":
+                base = path(val, base, sh, True); unresolved |= base is None
+            elif opt == "--git-dir":
+                gd = path(val, base, sh, True); unresolved |= gd is None
+            elif opt == "-c":
+                k, eq, v = val.partition("="); kv.append((k, v if eq else "true"))
+            elif opt == "--config-env":
+                k, eq, name = val.partition("=")
+                kv.append((k, genv.get(name, os.environ.get(name)) if eq else None))
+        bad = [k for k, v in kv if push_override(k)]
+        if bad: override = override or "-c " + bad[0]
+        aliases = {k[6:].lower(): v for k, v in kv if k.lower().startswith("alias.") and v}
+        config_args = [arg for k, v in kv if v is not None for arg in ("-c", k + "=" + v)]
         if not w or w[0] in BUILTINS: break
         value = aliases.get(w[0].lower())
         if value is None and not unresolved:
-            args = [GIT] + (["--git-dir=" + native_path(gd)] if gd else ["-C", native_path(base)])
+            args = [GIT, "-C", native_path(base)] + (["--git-dir=" + native_path(gd)] if gd else []) + config_args
             result = subprocess.run(args + ["config", "--get", "alias." + w[0]], stdout=subprocess.PIPE,
-                                    stderr=subprocess.DEVNULL, text=True, timeout=5)
+                                    stderr=subprocess.DEVNULL, text=True, timeout=5, env=config_env)
             value = result.stdout.strip() if result.returncode == 0 else ""
         if not value: break
         w.pop(0)
         if value.startswith("!"):
             # git runs a shell alias as `sh -c '<alias> "$@"'` with the call's arguments.
-            child = shell(base, sh, genv)
+            # Its cwd is the work-tree root, not the caller's subdirectory.
+            # Relative -C/cd in the alias must reach the same repo Git reaches.
+            alias_base = base
+            if not unresolved:
+                args = [GIT, "-C", native_path(base)] + (["--git-dir=" + native_path(gd)] if gd else []) + config_args
+                result = subprocess.run(args + ["rev-parse", "--show-toplevel"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True, timeout=5, env=config_env)
+                if result.returncode == 0:
+                    alias_base = path(result.stdout.rstrip("\n"), base, sh, True)
+            child = shell(alias_base, sh, genv)
+            # Git also exports its -c/--config-env settings to shell aliases.
+            # Keep a destination override attached to every nested git call;
+            # otherwise alias.publish='!git push' silently lost this check.
+            child["push_override"] = override
+            child["git_config"] = list(kv)
             if gd: child["vars"]["GIT_DIR"] = gd; child["exported"].add("GIT_DIR")
             child["pos"] = list(w)
             commands(value[1:] + ' "$@"', child, depth + 1)
@@ -760,7 +793,7 @@ changes_push_config() {
       done
       shopt -s nocasematch
       for a in "$@"; do
-        case "$a" in remote.*|url.*|push.*|branch.*.remote|branch.*.pushremote|ops.pushverified) rc=0; break ;; esac
+        case "$a" in remote.*|url.*|push.*|include.*|includeif.*|branch.*.remote|branch.*.pushremote|ops.pushverified) rc=0; break ;; esac
       done
       shopt -u nocasematch
       return "$rc" ;;
@@ -798,7 +831,7 @@ coarse_check() {
   # order, so a path inside a quoted or escaped bash -c body is seen too.
   while IFS= read -r tok; do
     w="${tok#[\"\']}"; w="${w%[\"\']}"; w="${w#-C}"
-    case "$w" in "~"|"~/"*) w="$HOME${w#\~}" ;; '$HOME'*) w="$HOME${w#\$HOME}" ;; '${HOME}'*) w="$HOME${w#\$\{HOME\}}" ;; esac
+    case "$w" in \~|\~/*) w="$HOME${w#\~}" ;; '$HOME'*) w="$HOME${w#\$HOME}" ;; '${HOME}'*) w="$HOME${w#\$\{HOME\}}" ;; esac
     [ -n "$w" ] || continue
     cands=()
     case "$w" in /*) cands=("$w") ;; *) for b in "${bases[@]}"; do cands+=("$b/$w"); done ;; esac

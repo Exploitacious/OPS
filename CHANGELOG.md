@@ -315,6 +315,13 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   engine ignores time-only itemize lines when deciding UNCHANGED, so a mirror
   whose directory time moved no longer flips between SYNCED and UNCHANGED; a
   mode or content change still syncs.
+- **Review hardening.** git-guard closes push bypasses through config
+  includes, inherited alias settings and alias options. The template scanner
+  refuses any path whose parent is a symlink, so it cannot write outside the
+  copy or onto an excluded identity file. Skill sync serializes concurrent
+  runs, records the content it staged, and backs up a mirror it cannot place
+  instead of deleting it. The daily backup keeps every tracked file's
+  permissions across a pull.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

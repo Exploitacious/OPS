@@ -131,7 +131,33 @@ for form in 'git -c remote.origin.pushurl=https://github.com/Exploitacious/OPS.g
   pc "push override blocked on a private copy: $form" 2 "$P" "$form"
 done
 pc "an unrelated -c setting does not block a private push" 0 "$P" "git -c core.quotepath=false push origin main"
+printf '[remote "origin"]\n  pushurl = https://github.com/Exploitacious/OPS.git\n[alias]\n  included-publish = push origin main\n' > "$PG/push-override.config"
+# Verify the realistic input changes Git's destination, using reads only.
+for form in "include.path=$PG/push-override.config" "includeIf.gitdir:$P/.git.path=$PG/push-override.config"; do
+  if [ "$(git -C "$P" -c "$form" remote get-url --push origin)" != https://github.com/Exploitacious/OPS.git ]; then
+    printf '  FAIL  config include fixture does not move the push destination\n'; fails=$((fails + 1))
+  fi
+  pc "a config include cannot move a private push past the gate: $form" 2 "$P" "git -c '$form' push origin main"
+done
+pc "a push alias defined in a command-line include is inspected" 2 "$P" "git -c include.path=$PG/push-override.config included-publish"
+pc "a push alias in an alternate config file is inspected" 2 "$P" "GIT_CONFIG_GLOBAL=$PG/push-override.config git included-publish"
+pc "a shell alias inherits a push destination override" 2 "$P" "git -c remote.origin.pushurl=https://github.com/Exploitacious/OPS.git -c 'alias.publish=!git push origin main' publish"
+pc "an ordinary shell push alias still works on a private copy" 0 "$P" "git -c 'alias.publish=!git push origin main' publish"
+mkdir -p "$P/sub"
+pc "a shell alias runs from the repository root, even from a subdirectory" 2 "$P/sub" "git -c 'alias.publish=!git -C ../ops-template push origin main' publish"
+pc "an environment-supplied push alias is still gated" 2 "$T" "PUSH_ALIAS='push origin main' git --config-env=alias.publish=PUSH_ALIAS publish"
+pc "an environment-supplied shell push alias is still gated" 2 "$T" "PUSH_ALIAS='!git push origin main' git --config-env=alias.publish=PUSH_ALIAS publish"
+pc "an environment-supplied push alias works on a private copy" 0 "$P" "PUSH_ALIAS='push origin main' git --config-env=alias.publish=PUSH_ALIAS publish"
+pc "a shell alias inherits other command-line aliases" 2 "$T" "git -c 'alias.publish=!git nested-publish' -c 'alias.nested-publish=push origin main' publish"
+pc "global options inside an alias cannot move a push past the gate" 2 "$P" "git -c 'alias.publish=-c remote.origin.pushurl=https://github.com/Exploitacious/OPS.git push origin main' publish"
+pc "an alias with an unrelated global option still works" 0 "$P" "git -c 'alias.publish=-c core.quotepath=false push origin main' publish"
+pc "an alias cannot shadow the push builtin on the template copy" 2 "$T" "git -c alias.push=status push origin main"
+pc "an ignored alias for the push builtin does not block a private push" 0 "$P" "git -c 'alias.push=push backup' push origin main"
+git -C "$T" config alias.config-file-publish 'push origin main'
+: > "$PG/empty.gitconfig"
+pc "GIT_CONFIG cannot hide a real push alias from the config read" 2 "$T" "GIT_CONFIG=$PG/empty.gitconfig git config-file-publish"
 pc "a remote change in the same command blocks the push" 2 "$P" "git remote set-url origin https://github.com/acme/elsewhere.git && git push origin main"
+pc "adding a config include before a push makes the gate stale" 2 "$P" "git config include.path $PG/push-override.config && git push origin main"
 pc "a self-approval in the same command blocks the push" 2 "$P" "git config ops.pushVerified true && git push origin main"
 pc "reading the remotes first does not block the push" 0 "$P" "git remote -v && git push origin main"
 pc "send-pack from an OPS copy is a push (blocked even when private)" 2 "$P" "git send-pack https://github.com/acme/elsewhere.git main"

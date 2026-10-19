@@ -48,7 +48,10 @@
 # the same on GNU and BSD/macOS (mv -T is GNU-only, so every swap failed there).
 # A run that is interrupted leaves its SKILLS/.vendor.XXXXXX staging dir behind;
 # the next sync cleans it, first moving back a mirror a kill left aside between
-# the two renames (RESTORED line). Two syncs at once are not supported.
+# the two renames (RESTORED line). A directory lock refuses overlapping syncs
+# before cleanup can mistake a live run's staging for interrupted work. A kill
+# that skips EXIT leaves the lock; recovery requires confirming no sync is
+# active, then removing the empty lock directory named in the error.
 #
 # Ownership: sync never deletes a folder it did not write. A manifest row
 # claims SKILLS/<name>, but the folder already there can be the Operator's own
@@ -63,7 +66,8 @@
 # moved to .claude-config/backup/skills-replaced/<name>-<UTC>/, outside the
 # skills index, before the install, and the BACKUP line is printed at once, so
 # a later failure still tells the user where the folder went; a failed install
-# moves it back. The digest skips the GUI-local files, which sync keeps in
+# moves it back if its path is still free, retaining both copies otherwise.
+# The digest skips the GUI-local files, which sync keeps in
 # place, so GUI authoring in a mirror never reads as foreign content. A
 # hand-edited mirror does, and is kept the same way. A folder with no record
 # that differs from its source is kept the same way too, even under one of the
@@ -188,16 +192,16 @@ gui_parent_dirs() {
 }
 
 # stage_mirror <src> <dst>: build the new mirror in a temp dir beside <dst>,
-# then swap it in only when it differs. Prints "changed" or "same"; returns
-# non-zero on any failure, leaving <dst> as it was (an rsync or tar that fails
-# midway only ever touched the temp copy).
+# then swap it in only when it differs. Prints "changed" or "same", a tab,
+# and the staged digest. Returns non-zero on any failure; a swap collision
+# retains the previous mirror for recovery. Copy failures only touch staging.
 #   rsync: start from a copy of <dst>, so rsync's excludes keep its GUI-local
 #   files, --delete drops stale ones, and its itemized output says whether
 #   anything changed, exactly as the old in-place sync did.
 #   tar: the source minus the excludes, plus <dst>'s own GUI-local files, and
 #   a content compare against <dst>.
 stage_mirror() {
-  local src="$1" dst="$2" tmp rel rc out content
+  local src="$1" dst="$2" tmp rel rc out content digest marker mirror_state=changed
   tmp="$(mktemp -d "$SKILLS/.vendor.XXXXXX")" || return 1
   # The skill this staging dir belongs to, so a later run can put back a
   # mirror a kill left in $tmp/previous (clean_stale).
@@ -227,7 +231,7 @@ stage_mirror() {
     # owner or content change still counts.
     content="$(printf '%s\n' "$out" | grep -v -E '^\.[a-zA-Z]\.\.[tT]\.{6}( |$)' | grep -v '^$' || true)"
     if [ -d "$dst" ] && [ -z "$content" ]; then
-      rm -rf "$tmp" || return 1; echo same; return 0
+      mirror_state=same
     fi
   else
     mkdir "$tmp/tree" || { rm -rf "$tmp"; return 1; }
@@ -249,17 +253,29 @@ stage_mirror() {
       diff -rq --no-dereference "$tmp/tree" "$dst" >/dev/null 2>&1
       rc=$?
       case "$rc" in
-        0) rm -rf "$tmp" || return 1; echo same; return 0 ;;
+        0) mirror_state=same ;;
         1) ;;
         *) rm -rf "$tmp"; return 1 ;;
       esac
     fi
     chmod 755 "$tmp/tree" || { rm -rf "$tmp"; return 1; }
   fi
-  # Keep the prior mirror until installation succeeds. Each rename targets a
-  # name that does not exist, so plain mv renames rather than moving into a
-  # directory, on GNU and BSD alike. A destination something recreated in
-  # between is refused rather than nested into.
+  # Record what sync built, never a digest of the live destination afterward:
+  # an editor can add a file after installation. Claiming that edit in the
+  # ledger would authorize deleting it as stale on the following sync.
+  digest="$(tree_digest "$tmp/tree")" || { rm -rf "$tmp"; return 1; }
+  if [ "$mirror_state" = same ]; then
+    rm -rf "$tmp" || return 1
+    printf 'same\t%s\n' "$digest"; return 0
+  fi
+  # A portable mv can return success by nesting tree/ in a destination that
+  # appears after the check below. A unique marker proves where our tree
+  # actually landed before we discard previous/ or authorize it in the ledger.
+  marker="$(mktemp "$tmp/tree/.vendor-install.XXXXXX")" || { rm -rf "$tmp"; return 1; }
+  marker="${marker##*/}"
+  # Keep the prior mirror until installation succeeds. Aim each portable
+  # rename at a free name, refuse an occupied destination, then use the marker
+  # above to detect a directory that appeared after the final existence check.
   if [ -d "$dst" ]; then
     mv "$dst" "$tmp/previous" || { rm -rf "$tmp"; return 1; }
   fi
@@ -270,8 +286,13 @@ stage_mirror() {
     fi
     rm -rf "$tmp"; return 1
   fi
+  if [ ! -f "$dst/$marker" ] || [ -L "$dst/$marker" ]; then
+    echo "skills-vendor: destination changed during install at $dst; nothing recorded; any previous mirror is retained at $tmp/previous" >&2
+    return 1
+  fi
+  rm -f "$dst/$marker" || { echo "skills-vendor: could not remove the install marker at $dst/$marker; any previous mirror is retained at $tmp/previous" >&2; return 1; }
   rm -rf "$tmp" || return 1
-  echo changed
+  printf 'changed\t%s\n' "$digest"
 }
 
 # tree_digest <dir>: a sha256 over every path, entry type, file content and
@@ -362,13 +383,18 @@ move_aside() {
   printf '%s\n' "$path"
 }
 
-# restore_aside <backup> <dst>: after a failed install, drop what this run
-# wrote at <dst> (nothing else was there: the folder had been moved aside) and
-# move the folder back. The BACKUP line already on stdout names <backup>, which
-# no longer exists, so a RESTORED line on stdout says where the folder is.
+# restore_aside <backup> <dst>: after a failed install, move the folder back
+# only when its old path is still free. stage_mirror writes into staging, so
+# an existing destination can be independently recreated work; its absence
+# earlier does not authorize deleting it. The BACKUP line already names the
+# preserved folder; a RESTORED line corrects it when it moves back.
 restore_aside() {
   local backup="$1" dst="$2"
-  if rm -rf -- "$dst" && mv -- "$backup" "$dst"; then
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    echo "skills-vendor: could not restore $dst: destination exists; your folder is kept at $backup" >&2
+    return 1
+  fi
+  if mv -- "$backup" "$dst"; then
     rmdir "$BACKUP_ROOT" 2>/dev/null
     echo "skills-vendor: restored $dst" >&2
     printf 'RESTORED %s: the install failed, so the folder is back at %s; the BACKUP path above no longer exists\n' "${dst##*/}" "$dst"
@@ -382,8 +408,10 @@ restore_aside() {
 # directories named exactly like mktemp's .vendor.XXXXXX are touched. One whose
 # previous/ is a mirror a kill left aside between the two renames, with its
 # skill folder now missing, is moved back first: previous/ can hold the only
-# copy of GUI-local files. A previous/ that cannot be placed (no name record,
-# from an earlier release) goes to the backup dir, never to rm.
+# copy of GUI-local files. A previous/ that cannot be placed (an occupied or
+# invalid destination, or no name record from an earlier release) goes to the
+# backup dir, never to rm: the current destination does not prove that copy
+# also contains the old GUI-local work.
 clean_stale() {
   local d name dest
   for d in "$SKILLS"/.vendor.??????; do
@@ -394,7 +422,7 @@ clean_stale() {
       if [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] && [ ! -e "$SKILLS/$name" ] && [ ! -L "$SKILLS/$name" ]; then
         mv "$d/previous" "$SKILLS/$name" || { echo "skills-vendor: could not move $d/previous back to $SKILLS/$name; left it there" >&2; exit 3; }
         printf 'RESTORED %s: an interrupted sync had left it in %s; it is back in place\n' "$name" "${d##*/}"
-      elif [ -z "$name" ]; then
+      else
         dest="$(move_aside "vendor-leftover" "$d/previous")" || { echo "skills-vendor: could not move $d/previous aside; left it there" >&2; exit 3; }
         printf 'BACKUP   %s: an interrupted sync left a mirror it could not place; kept at %s\n' "${d##*/}" "$dest"
       fi
@@ -405,7 +433,19 @@ clean_stale() {
 
 drift=0
 missing=0
-[ "$MODE" = sync ] && clean_stale
+if [ "$MODE" = sync ]; then
+  # Atomic mkdir works on both GNU and BSD hosts. Never guess whether an
+  # existing lock is stale: an incorrect guess authorizes deleting another
+  # run's staging, including a mirror it temporarily moved into previous/.
+  SYNC_LOCK="$SKILLS/.vendor-sync.lock"
+  if ! mkdir "$SYNC_LOCK" 2>/dev/null; then
+    echo "skills-vendor: sync lock exists or cannot be created: $SYNC_LOCK; another sync may be active. After confirming no sync is running, remove this empty lock directory and retry" >&2
+    exit 3
+  fi
+  trap 'rmdir "$SYNC_LOCK" || echo "skills-vendor: could not remove sync lock: $SYNC_LOCK" >&2' EXIT
+  trap 'exit 3' HUP INT TERM
+  clean_stale
+fi
 
 for i in "${!names[@]}"; do
   name="${names[$i]}"
@@ -469,8 +509,13 @@ for i in "${!names[@]}"; do
     [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
     exit 3
   fi
-  out=""; [ "$res" = changed ] && out="changed"
-  if ! digest="$(tree_digest "$dstdir")" || ! ledger_set "$name" "$digest"; then
+  case "$res" in
+    changed$'\t'sha256:*) out=changed ;;
+    same$'\t'sha256:*) out="" ;;
+    *) echo "skills-vendor: invalid staging result for $name; nothing recorded" >&2; exit 3 ;;
+  esac
+  digest="${res#*$'\t'}"
+  if ! ledger_set "$name" "$digest"; then
     echo "skills-vendor: synced $name but could not record it in $LEDGER" >&2
     exit 3
   fi

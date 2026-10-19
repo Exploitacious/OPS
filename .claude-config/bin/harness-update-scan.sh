@@ -195,6 +195,19 @@ is_excluded() {
   return 1
 }
 
+# Replacing the leaf safely is not enough: a personalized parent directory
+# may be a symlink outside this copy, or into excluded CONTEXT identity files.
+# Treat every symlink ancestor as a manual conflict, even one pointing inside
+# the repo, so spelling a public path cannot bypass the private-path boundary.
+has_symlink_ancestor() {
+  local rest="$1" parent="$OPS_ROOT" part
+  while [[ "$rest" = */* ]]; do
+    part="${rest%%/*}"; rest="${rest#*/}"; parent="$parent/$part"
+    [ -L "$parent" ] && return 0
+  done
+  return 1
+}
+
 # Entries are "<mode> <blob>". A blob sha does not include the mode, so a file
 # made executable upstream with the same content compared IDENTICAL and was
 # never applied, and a copy whose scripts lost the exec bit was never told.
@@ -253,6 +266,9 @@ classify_one() {
   local path="$1" up loc base rc=0
   if is_excluded "$path"; then EXC=$((EXC+1)); return 0; fi
   SEEN="$SEEN$path"$'\n'
+  if has_symlink_ancestor "$path"; then
+    echo "CONFLICT  $path (symlink ancestor; check the destination by hand)"; CON=$((CON+1)); return 0
+  fi
   up="$(up_entry "$path")"
   loc="$(loc_entry "$path" "$up")" || rc=$?
   if [ -z "$up" ]; then
@@ -305,6 +321,7 @@ mode_audit() {
     sha="${rest%%$'\t'*}"; path="${entry#*$'\t'}"
     is_file_mode "$mode" || continue
     is_excluded "$path" && continue
+    has_symlink_ancestor "$path" && continue
     case "$SEEN" in *$'\n'"$path"$'\n'*) continue ;; esac
     f="$OPS_ROOT/$path"
     [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -328,6 +345,10 @@ mode_audit() {
 apply_safe() {
   local path dest dir mode tmp target rc=0 n=0
   for path in "${APPLY_LIST[@]}"; do
+    # Recheck at the write boundary: the working tree can change after the scan.
+    if has_symlink_ancestor "$path"; then
+      echo "ERR_APPLY: symlink ancestor for $path; nothing copied there" >&2; rc=1; continue
+    fi
     dest="$OPS_ROOT/$path"; dir="$(dirname "$dest")"
     mode="$(tree_entry "$UP_REF" "$path")"; mode="${mode%% *}"
     if [ -z "$mode" ]; then
