@@ -71,6 +71,17 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `verify-ops.sh` checks another checkout through `OPS_DIR`. New tests:
   `.claude-config/bin/tests/` (memory-index, root wrapper, deploy rc and core
   wiring, skills-vendor) and new `verify-ops-selftest.sh` cases.
+- **Skills refreshed.** `grill-me`, `tdd` and `diagnosing-bugs` mount from
+  the public agent-skills library alongside the six earlier mounts; deploy
+  clones it and runs `skills-vendor.sh sync`. `harness-update`,
+  `pre-compact-synthesis`, `session-close`, `session-handoff`, `memory-prune`,
+  `operator-voice` and the grabit skills follow the current rest-stop and close
+  rules: a session closes only on the Operator's word, and the close stamp is
+  now cleared (its redirect was missing, so the `rm` became a `printf`
+  argument). New `scripts/inventory` for memory-prune, which exits 1 on a
+  missing store so a wrong path cannot read as a clean pool. New generic
+  `operating-model` and `stewardship` skills. The `fleet-doctrine` skill is
+  removed with the fleet.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
