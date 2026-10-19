@@ -103,7 +103,11 @@ gh repo create <you>/<your-name> --template Exploitacious/OPS --private --clone
 
 **Never fork this repo**: forks of a public repo cannot be made private, and
 **never run your copy public.** Your OPS repo accumulates who you are and what
-you're working on. It has to be private.
+you're working on. It has to be private. The automatic pushes (the daily
+backup and memory-init) check this first: they commit locally but push only
+when `gh` confirms origin is a private GitHub repo, and they refuse the public
+template itself, so a tryout clone never publishes your notes
+(`DEPLOYMENT.md`, "The push gate").
 
 ### 2. Deploy it on your machine
 

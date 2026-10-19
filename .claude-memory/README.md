@@ -33,7 +33,9 @@ pools never collide even though both encode the same `~/OPS` cwd.
 
 Stage 2 (`.claude-config/deploy.{sh,ps1}`) runs
 `memory-init --auto-commit` during deploy, so a new machine wires
-this automatically and commits its new pool. See `DEPLOYMENT.md`.
+this automatically and commits its new pool. It pushes the commit only
+when origin is verified private (`DEPLOYMENT.md`, "The push gate");
+otherwise the commit stays local and the deploy output says why.
 
 **Second profile.** If you run a second Claude Code profile via
 `CLAUDE_CONFIG_DIR`, `memory-init` points that profile's per-cwd

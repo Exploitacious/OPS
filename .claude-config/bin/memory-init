@@ -25,7 +25,9 @@
 #                                  key; default runs ADOPT existing dirs
 #   memory-init --dry-run          # show what would happen
 #   memory-init --auto-commit      # after each successful init, stage +
-#                                  commit + push the new memory subdir
+#                                  commit the new memory subdir, and push it
+#                                  when origin-private-check verifies origin
+#                                  private (see "Push gate" below)
 #   memory-init --help
 #
 # Exit codes:
@@ -58,7 +60,7 @@ while [[ $# -gt 0 ]]; do
     --only-home)        ONLY_HOME=1; shift ;;
     --migrate-host-key) MIGRATE_HOST_KEY=1; shift ;;
     -h|--help)
-      sed -n '2,30p' "$0"
+      sed -n '2,32p' "$0"
       exit 0
       ;;
     *) echo "memory-init: unknown arg: $1" >&2; exit 1 ;;
@@ -68,6 +70,29 @@ done
 die() { echo "memory-init: $*" >&2; exit 1; }
 log() { echo "[memory-init] $*"; }
 dry() { log "[dry-run] $*"; }
+
+# --- Push gate ----------------------------------------------------------------
+# Auto-commit pushes the Operator's memory to origin, so it pushes only when
+# origin-private-check (beside this script) verifies origin private (exit 0).
+# A public origin, such as a tryout clone of the public template, or one it
+# cannot verify keeps the commit local and logs the reason and the fix. The
+# answer is computed once per run because it may call the GitHub API.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PUSH_GATE_RC=""
+PUSH_GATE_REASON=""
+push_gate() {
+  if [[ -z "$PUSH_GATE_RC" ]]; then
+    local check="$SELF_DIR/origin-private-check" rc=0
+    if [[ -f "$check" ]]; then
+      PUSH_GATE_REASON=$(bash "$check" "$OPS_ROOT" 2>&1 >/dev/null) || rc=$?
+    else
+      rc=2
+      PUSH_GATE_REASON="$check is missing, so origin cannot be verified private"
+    fi
+    PUSH_GATE_RC=$rc
+  fi
+  return "$PUSH_GATE_RC"
+}
 
 # --- Host key (namespaces this machine's memory in the shared store) ---------
 # The key prefixes .claude-memory/<key>-<encoded>/, which is git-synced ACROSS
@@ -264,36 +289,41 @@ init_one_encoded() {
   fi
 
   # --- auto-commit for this encoded path ---
+  # Runs in this shell (git -C, no subshell) so the push gate's answer is
+  # cached across encoded paths.
   if (( AUTO_COMMIT )) && (( ! DRY )); then
     if ! command -v git >/dev/null 2>&1; then
       log "[$ENCODED] auto-commit: git missing, skipping"
       return 0
     fi
-    (
-      cd "$OPS_ROOT" || exit 1
-      local status_out
-      status_out=$(git status --porcelain "$TARGET_REL" 2>/dev/null || true)
-      if [[ -z "$status_out" ]]; then
-        log "[$ENCODED] auto-commit: nothing new, skipping"
-        exit 0
-      fi
-      log "[$ENCODED] auto-commit: staging $TARGET_REL"
-      if ! git add "$TARGET_REL" 2>/dev/null; then
-        log "[$ENCODED] auto-commit: git add failed, leaving untracked"
-        exit 0
-      fi
-      local commit_msg="feat(memory): seed .claude-memory/${HOST}${ENCODED}"
-      if git commit -m "$commit_msg" 2>/dev/null; then
-        log "[$ENCODED] auto-commit: committed"
-        if git push 2>/dev/null; then
-          log "[$ENCODED] auto-commit: pushed"
-        else
-          log "[$ENCODED] auto-commit: push failed, commit landed locally"
-        fi
-      else
-        log "[$ENCODED] auto-commit: commit failed (hook/signing?), staged but uncommitted"
-      fi
-    )
+    local status_out
+    status_out=$(git -C "$OPS_ROOT" status --porcelain -- "$TARGET_REL" 2>/dev/null || true)
+    if [[ -z "$status_out" ]]; then
+      log "[$ENCODED] auto-commit: nothing new, skipping"
+      return 0
+    fi
+    log "[$ENCODED] auto-commit: staging $TARGET_REL"
+    if ! git -C "$OPS_ROOT" add -- "$TARGET_REL" 2>/dev/null; then
+      log "[$ENCODED] auto-commit: git add failed, leaving untracked"
+      return 0
+    fi
+    local commit_msg="feat(memory): seed .claude-memory/${HOST}${ENCODED}"
+    if ! git -C "$OPS_ROOT" commit -m "$commit_msg" 2>/dev/null; then
+      log "[$ENCODED] auto-commit: commit failed (hook/signing?), staged but uncommitted"
+      return 0
+    fi
+    log "[$ENCODED] auto-commit: committed"
+    if ! push_gate; then
+      log "[$ENCODED] auto-commit: push skipped, commit kept locally: $PUSH_GATE_REASON"
+      return 0
+    fi
+    # Name origin: the gate verified origin, and a bare `git push` could follow
+    # a branch pushRemote or remote.pushDefault somewhere else.
+    if git -C "$OPS_ROOT" push origin 2>/dev/null; then
+      log "[$ENCODED] auto-commit: pushed"
+    else
+      log "[$ENCODED] auto-commit: push failed, commit landed locally"
+    fi
   fi
 
   return 0

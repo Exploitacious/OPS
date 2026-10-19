@@ -82,6 +82,20 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   missing store so a wrong path cannot read as a clean pool. New generic
   `operating-model` and `stewardship` skills. The `fleet-doctrine` skill is
   removed with the fleet.
+- **Automatic pushes go only to a private origin.** `memory-init
+  --auto-commit` and the daily backup (`daily-sync.sh`, which the Windows task
+  also runs) pushed to wherever origin pointed, so a tryout clone of this
+  public template, a copy made public by mistake, or a public fork would have
+  published the Operator's memory and notes every day. New
+  `.claude-config/bin/origin-private-check` exits 0 only when GitHub (`gh
+  api`) reports every push URL of origin private; it refuses the template URL
+  in any form (exit 1) and anything it cannot verify (exit 2). Both callers
+  still commit, keep the commit local on a refusal, and log the reason and the
+  fix; the next backup that passes pushes every held commit. `memory-init.ps1`
+  carries the same check. A self-hosted remote opts in per repo with `git
+  config ops.pushVerified true`, which never overrides a public answer. Tests:
+  `origin-private-check-test.sh`, `daily-sync-test.sh`, and new memory-init
+  cases in bash and PowerShell.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

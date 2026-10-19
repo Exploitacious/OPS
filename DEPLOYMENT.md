@@ -179,12 +179,29 @@ In order:
    `.claude-config/bin/memory-init --auto-commit`, which walks Claude's encoded
    cwd subdirs under `~/.claude/projects/` and symlinks each `memory/` into
    `.claude-memory/<host>-<encoded>/` so per-session memory survives in this
-   repo and syncs to your other machines.
+   repo and syncs to your other machines. It commits each new pool and pushes
+   only to a private origin (see "The push gate" below).
 
 8. **Schedule daily backup.** Installs a user crontab entry
    (`0 9 * * * ~/OPS/.claude-config/backup/daily-sync.sh`). The sync script
-   commits and pushes any uncommitted changes to the OPS origin (no-op if
-   clean). Skipped with `--no-system`.
+   commits any uncommitted changes and pushes them to the OPS origin when the
+   push gate verifies it private (no-op if clean); it logs to
+   `.claude-config/backup/sync.log`. Skipped with `--no-system`.
+
+   **The push gate.** Your copy holds your memory, context, and notes, so the
+   two automatic pushes (memory-init's and the daily backup's) run only when
+   `.claude-config/bin/origin-private-check` verifies that every push URL of
+   `origin` is a private GitHub repo, asking through `gh api`. A public origin
+   (a tryout clone of the `Exploitacious/OPS` template, a copy made public by
+   mistake, a public fork) is refused; so is an origin it cannot verify (`gh`
+   missing or signed out, offline, or a host other than github.com). Either way
+   the commit stays local, and the deploy output or `sync.log` names the
+   reason and the fix; the next daily run that passes the gate pushes every
+   held commit. Your own git server, which `gh` cannot ask: after confirming
+   the repo is private, run `git -C ~/OPS config ops.pushVerified true`. That
+   opt-in is per repo, covers only what cannot be verified, and never
+   overrides a public answer. `memory-init.ps1` applies the same rule on
+   Windows, and the Windows backup task runs this same script in Git Bash.
 
 9. **Retire the caveman and ponytail plugins.** Runs
    `claude plugin uninstall <name>@<name>` and
@@ -226,8 +243,9 @@ once to confirm); removal of the retired `WORKFORCE\bin` PATH block from the
 untracked `profile.local.ps1` seams (one per PowerShell edition, under
 `Documents/PowerShell` and `Documents/WindowsPowerShell`; never `$PROFILE`,
 which is tied to the public linuxploitacious repo); auto-memory git-sync
-(`bin\memory-init.ps1`); the trust anchor; the ultracode shim in the seam; an
-`OPS Daily Backup` scheduled task (skipped with `-NoSystem`); the skill mount
+(`bin\memory-init.ps1`, behind the same push gate as step 8); the trust
+anchor; the ultracode shim in the seam; an `OPS Daily Backup` scheduled task
+that runs `daily-sync.sh` in Git Bash (skipped with `-NoSystem`); the skill mount
 (clone, then `skills-vendor.sh sync` through Git Bash); plugin retirement (same
 CLI calls as step 9); and a Git Bash pin plus the guard self-test.
 
@@ -258,6 +276,9 @@ bash ~/OPS/.claude-config/bin/verify-ops.sh
 # Backup scheduler
 crontab -l | grep OPS                       # Linux
 schtasks /Query /TN "OPS Daily Backup"      # Windows
+
+# The backup may push (expect exit 0 and "private: github.com/<you>/<repo> is private")
+bash ~/OPS/.claude-config/bin/origin-private-check ~/OPS; echo "exit $?"
 ```
 
 Then open a new session (any launch path) and check the briefing's `Boot:`
@@ -360,9 +381,11 @@ because the rule link does not depend on the Stage-1 `CLAUDE.md`. If your own
 OPS runs on several machines off **one private repo**. Clone the same repo to
 `~/OPS` on each host and run Stage 2 there. Auto-memory is the shared surface:
 `memory-init` symlinks each machine's Claude session-memory dirs into
-`.claude-memory/<host>-<encoded>/`, and the daily backup commits and pushes
-them. Doctrine, identity (`CONTEXT/`), project lessons, and handoff batons ride
-the same git sync, so every machine boots from the same durable state.
+`.claude-memory/<host>-<encoded>/`, and the daily backup commits them and
+pushes them to your private origin (the push gate in "What Stage 2 does" step
+8 refuses a public one). Doctrine, identity (`CONTEXT/`), project lessons, and
+handoff batons ride the same git sync, so every machine boots from the same
+durable state.
 
 ## Updating an existing deploy
 
@@ -486,6 +509,7 @@ If a new piece of OPS setup needs to run on every host:
 - `.claude-config/deploy.sh`: Linux/macOS Stage 2 entry point.
 - `.claude-config/deploy.ps1`: Windows Stage 2 entry point.
 - `.claude-config/backup/daily-sync.sh`: backup script invoked by the scheduler.
+- `.claude-config/bin/origin-private-check`: the push gate for the backup and memory-init.
 - `.claude-config/hooks/`: SessionStart, pre-compact, and guard hooks (registered via the Stage-1 `settings.json`).
 - `.claude-config/systemd/`: the `ops-verify` timer and the optional `tmux-main` unit.
 - `.claude-config/bin/verify-ops.sh`: the drift gate.

@@ -19,7 +19,9 @@
 #   .\memory-init.ps1 -OnlyHome                 # only the HOME cwd
 #   .\memory-init.ps1 -HostnameOverride foo     # override host key
 #   .\memory-init.ps1 -DryRun                   # show what would happen
-#   .\memory-init.ps1 -AutoCommit               # stage+commit+push each target
+#   .\memory-init.ps1 -AutoCommit               # stage+commit each target; push only
+#                                               # to an origin Test-OriginPrivate
+#                                               # verifies private (see below)
 #
 # Exit codes:
 #   0 -- success (already initialized OR initialized just now)
@@ -60,6 +62,97 @@ function New-DirLink {
     if (-not (Test-Path $LinkPath)) { return $false }
     $it = Get-Item $LinkPath -Force
     return ($it.LinkType -in @('SymbolicLink', 'Junction'))
+}
+
+# Push gate: the PowerShell twin of bin/origin-private-check, kept in this file
+# so a Windows deploy needs no Git Bash for it; keep the two in step.
+# -AutoCommit pushes the Operator's memory, and a copy whose origin is public (a
+# tryout clone of the public template, a copy made public by mistake, a public
+# fork) would publish it, so the push happens only on Code 0. Every push URL of
+# origin is checked, because that is where a push lands. Returns Code and Reason:
+#   0  verified private (GitHub says private, or the opt-in covers the rest)
+#   1  public: the template github.com/Exploitacious/OPS in any URL form or case,
+#      or GitHub reports the repo public
+#   2  unverified: no origin, gh missing or not signed in, an API or network
+#      failure, an unparseable URL, or a host other than github.com
+# Opt-in for a remote this cannot verify: `git -C <copy> config ops.pushVerified
+# true`, read from the repo's own config only. It turns 2 into 0, never 1.
+# Reasons name only host and owner/repo, never a URL's credentials.
+function Test-OriginPrivate {
+    param([string]$Dir)
+    # Windows PowerShell 5.1 turns a native command's stderr into an error
+    # record, which under the script's Stop preference would abort the run.
+    $ErrorActionPreference = 'Continue'
+    $template = 'exploitacious/ops'
+    $githubHosts = @('github.com', 'www.github.com', 'ssh.github.com')
+    $result = { param($Code, $Reason) [pscustomobject]@{ Code = $Code; Reason = $Reason } }
+
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        return (& $result 2 'unverified: git is not installed')
+    }
+    $null = & git -C $Dir rev-parse --git-dir 2>$null
+    if ($LASTEXITCODE -ne 0) { return (& $result 2 "unverified: $Dir is not a git repository") }
+    $urls = @(& git -C $Dir remote get-url --push --all origin 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if (-not $urls.Count) { return (& $result 2 "unverified: $Dir has no origin remote") }
+    $optIn = ("$(& git -C $Dir config --local --bool --get ops.pushVerified 2>$null)".Trim() -eq 'true')
+
+    $oks = New-Object System.Collections.Generic.List[string]
+    $unverified = New-Object System.Collections.Generic.List[string]
+    foreach ($url in $urls) {
+        # Parse to host, owner/repo, and transport; credentials are dropped.
+        $h = ''; $path = ''; $ssh = $false
+        if ($url -match '^([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(.*)$') {
+            $scheme = $Matches[1].ToLower(); $authority = ($Matches[2] -split '@')[-1]; $path = $Matches[3]
+            if ($authority -match '^\[([^\]]*)\]') { $h = $Matches[1] } else { $h = ($authority -split ':')[0] }
+            if ($scheme -in @('ssh', 'git+ssh', 'ssh+git')) { $ssh = $true }
+            if ($scheme -eq 'file') { $h = '' }
+        }
+        elseif ($url -match '^([^/:]{2,}):(.*)$') {
+            # [user@]host:path is ssh when no slash precedes the first colon; a
+            # one-letter "host" is a Windows drive, so the pattern needs two.
+            $h = ($Matches[1] -split '@')[-1]; $path = $Matches[2]; $ssh = $true
+        }
+        $h = $h.ToLower().TrimEnd('.')
+        $path = $path.Trim('/')
+        if ($path.ToLower().EndsWith('.git')) { $path = $path.Substring(0, $path.Length - 4).TrimEnd('/') }
+
+        if (-not $h) { $unverified.Add('origin is a local path, not a GitHub repo'); continue }
+        if ($h.StartsWith('-')) { $unverified.Add('origin has an unsafe host name'); continue }
+        $label = $h
+        $sshCmd = Get-Command ssh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ssh -and $h -notin $githubHosts -and $sshCmd) {
+            $resolved = & $sshCmd.Source -G -- $h 2>$null | ForEach-Object { if ($_ -match '^hostname\s+(\S+)') { $Matches[1].ToLower() } } | Select-Object -First 1
+            if ($resolved -in $githubHosts) { $label = "$h (ssh alias for $resolved)"; $h = $resolved }
+        }
+        if ($h -notin $githubHosts) { $unverified.Add("origin host $label is not github.com, so its visibility cannot be checked"); continue }
+        $parts = $path -split '/'
+        if ($path -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or ($parts | Where-Object { $_ -in @('.', '..') })) {
+            $unverified.Add("cannot read owner/repo from the origin URL on $label"); continue
+        }
+        # The template check needs no network: a tryout clone is refused offline too.
+        if ($path.ToLower() -eq $template) {
+            return (& $result 1 "public: origin is the public OPS template (github.com/$path); create your own private copy from it (README.md, Spin-up) and point origin at that copy")
+        }
+        $gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $gh) { $unverified.Add("gh (GitHub CLI) is not installed, so github.com/$path cannot be checked"); continue }
+        # --hostname pins github.com: a GH_HOST for an Enterprise server must not
+        # answer for a github.com URL.
+        $prevPrompt = $env:GH_PROMPT_DISABLED
+        $env:GH_PROMPT_DISABLED = '1'
+        try { $answer = "$(& $gh.Source api --hostname github.com "repos/$path" --jq .private 2>$null)".Trim(); $ghRc = $LASTEXITCODE }
+        finally { if ($null -eq $prevPrompt) { Remove-Item Env:\GH_PROMPT_DISABLED -ErrorAction SilentlyContinue } else { $env:GH_PROMPT_DISABLED = $prevPrompt } }
+        if ($ghRc -ne 0) { $unverified.Add("gh could not read github.com/$path (exit ${ghRc}: not signed in, no access, or offline)"); continue }
+        switch ($answer) {
+            'true'  { $oks.Add("github.com/$path is private") }
+            'false' { return (& $result 1 "public: github.com/$path is public; make it private (gh repo edit $path --visibility private --accept-visibility-change-consequences) or point origin at a private copy") }
+            default { $unverified.Add("gh gave an unexpected answer for github.com/$path") }
+        }
+    }
+    if ($unverified.Count) {
+        if ($optIn) { return (& $result 0 ("private by opt-in (ops.pushVerified=true): " + ($unverified -join '; '))) }
+        return (& $result 2 ("unverified: " + ($unverified -join '; ') + "; run gh auth login, or confirm the repo is private and run: git -C `"$Dir`" config ops.pushVerified true"))
+    }
+    return (& $result 0 ("private: " + ($oks -join '; ')))
 }
 
 $Ops        = if ($env:OPS_DIR) { $env:OPS_DIR } else { Join-Path $env:USERPROFILE "OPS" }
@@ -245,8 +338,19 @@ function Init-OneEncoded {
             git commit -m $commitMsg 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 Log "[$Encoded] auto-commit: committed"
-                git push 2>$null | Out-Null
-                if ($LASTEXITCODE -eq 0) { Log "[$Encoded] auto-commit: pushed" }
+                # One gate answer per run: it may call the GitHub API.
+                if ($null -eq $script:PushGate) { $script:PushGate = Test-OriginPrivate -Dir $Ops }
+                if ($script:PushGate.Code -ne 0) {
+                    Log "[$Encoded] auto-commit: push skipped, commit kept locally: $($script:PushGate.Reason)"
+                    return
+                }
+                # Name origin, the remote the gate verified. git push reports on
+                # stderr, which Windows PowerShell 5.1 under Stop would raise.
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                try { git push origin 2>$null | Out-Null; $pushRc = $LASTEXITCODE }
+                finally { $ErrorActionPreference = $prevEap }
+                if ($pushRc -eq 0) { Log "[$Encoded] auto-commit: pushed" }
                 else { Log "[$Encoded] auto-commit: push failed -- commit landed locally" }
             }
             else {
@@ -281,6 +385,7 @@ Write-Host ""
 # so a bad subdir doesn't block the others from initializing, but remember the
 # failure and reflect it in the final exit code instead of reporting success.
 $hadError = $false
+$script:PushGate = $null
 
 foreach ($enc in $encodedList) {
     try { Init-OneEncoded -Encoded $enc }

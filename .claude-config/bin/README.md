@@ -111,11 +111,31 @@ SessionStart matcher check against fixture trees under a throwaway `HOME`.
 `memory-init` (bash; `memory-init.ps1` on Windows) walks Claude Code's encoded
 cwd dirs under `<config>/projects/` and links each `memory/` into
 `.claude-memory/<host>-<encoded>/`, so auto-memory is git-synced; deploy runs
-it with `--auto-commit`. `memory-index <dir>` regenerates a pool's `MEMORY.md`
+it with `--auto-commit`, which commits each new pool and pushes it only through
+`origin-private-check` (below; `memory-init.ps1` carries the same check as
+`Test-OriginPrivate`). `memory-index <dir>` regenerates a pool's `MEMORY.md`
 from each entry's frontmatter (atomic write; `--check` prints without writing);
 the `memory-index.sh` SessionStart hook calls it, so never hand-edit an index.
 Both moved here from the retired fleet's `WORKFORCE/bin` (formerly
-`ac-memory-*`). Test: `tests/memory-index-test.sh`.
+`ac-memory-*`). Tests: `tests/memory-index-test.sh`, `tests/memory-init-test.sh`,
+`tests/memory-init-windows-test.ps1`.
+
+## `origin-private-check`: the push gate
+
+`origin-private-check [dir]` exits 0 only when every push URL of the repo's
+`origin` is verified private, so the unattended pushes (`memory-init
+--auto-commit`, `../backup/daily-sync.sh`) never publish an Operator's notes.
+Exit 1: a push URL is the public template (`github.com/Exploitacious/OPS` in
+any URL form or case) or GitHub reports the repo public. Exit 2: it cannot
+verify (no origin, `gh` missing or signed out, an API or network failure, a
+host other than github.com). It asks `gh api --hostname github.com
+repos/<owner>/<repo> --jq .private`, resolves an ssh host alias with `ssh -G`,
+and prints one line on stderr either way, naming only host and owner/repo,
+never a URL's credentials. Callers commit regardless and push only on 0. For a
+remote it cannot verify, `git -C <copy> config ops.pushVerified true` (read
+from the repo's own config only) turns 2 into 0; it never changes 1. Tests:
+`tests/origin-private-check-test.sh`, and the caller cases in
+`tests/memory-init-test.sh` and `tests/daily-sync-test.sh`.
 
 ## `claude-root-wrapper.sh`: root permission mode and shared-host lock
 

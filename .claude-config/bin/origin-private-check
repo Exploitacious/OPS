@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# origin-private-check: verify that a copy's origin is private before an
+# automatic push.
+#
+# An OPS copy holds its Operator's memory, context, and work notes, and the
+# automatic pushes (`memory-init --auto-commit`, `backup/daily-sync.sh`) send
+# them to origin with nobody watching. A copy whose origin is public (a tryout
+# clone of the public template, a copy made public by mistake, a public fork)
+# would publish those notes on every run. Callers still commit locally; they
+# push only when this exits 0. `memory-init.ps1` carries the PowerShell twin
+# (Test-OriginPrivate); keep the two in step.
+#
+# Usage: origin-private-check [dir]       dir defaults to the current directory
+#
+# Every push URL of the origin remote is checked (`git remote get-url --push
+# --all origin`), because that is where a push lands: a pushurl or a
+# pushInsteadOf rewrite counts, and with several push URLs each must pass.
+#
+# Exit codes, each with a one-line reason on stderr. A URL's credentials are
+# never printed: reasons name only the host and owner/repo.
+#   0  verified private: GitHub reports every push URL private, or the opt-in
+#      below covers what could not be verified
+#   1  public: a push URL is the public template (github.com/Exploitacious/OPS
+#      in any URL form or case), or GitHub reports the repo public
+#   2  unverified: not a git repo, no origin, gh missing or not signed in, a
+#      network or API failure, an unparseable URL, or a host other than
+#      github.com
+#
+# Opt-in for a remote this cannot verify (self-hosted git, GitHub Enterprise, a
+# host gh cannot reach): after confirming the repo is private, run
+#   git -C <copy> config ops.pushVerified true
+# It is read from the repo's own config only (--local), so one global setting
+# cannot vouch for every repo on the machine. It turns exit 2 into 0 and never
+# changes exit 1: a public answer or the template URL still stops the push.
+#
+# GitHub is asked through `gh api --hostname github.com repos/<owner>/<repo>
+# --jq .private`. An ssh host alias (`git@work-gh:owner/repo.git` with a
+# ~/.ssh/config HostName of github.com) is resolved with `ssh -G`, so the
+# template and public checks also see aliased URLs.
+
+set -uo pipefail
+
+NAME="origin-private-check"
+TEMPLATE="exploitacious/ops"
+DIR="${1:-.}"
+
+say() { printf '%s: %s\n' "$NAME" "$*" >&2; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# A hung network call must not stall the unattended daily backup. Where
+# coreutils `timeout` is missing (stock macOS), run without it.
+with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+is_github_host() {
+  case "$1" in github.com|www.github.com|ssh.github.com) return 0 ;; esac
+  return 1
+}
+
+# parse_url <url>: sets P_HOST (lowercase, empty for a local path), P_PATH
+# (owner/repo with slashes and any .git suffix trimmed), and P_SSH (1 when the
+# transport is ssh). Credentials in the authority are dropped here.
+parse_url() {
+  local url="$1" rest authority scheme before
+  P_HOST="" P_PATH="" P_SSH=0
+  case "$url" in
+    *://*)
+      scheme="$(lower "${url%%://*}")"
+      rest="${url#*://}"
+      authority="${rest%%/*}"
+      P_PATH="${rest#"$authority"}"
+      authority="${authority##*@}"
+      case "$authority" in
+        \[*) P_HOST="${authority%%]*}"; P_HOST="${P_HOST#[}" ;;
+        *) P_HOST="${authority%%:*}" ;;
+      esac
+      case "$scheme" in
+        ssh|git+ssh|ssh+git) P_SSH=1 ;;
+        file) P_HOST="" ;;
+      esac
+      ;;
+    *)
+      # Git reads [user@]host:path as ssh only when no slash comes before the
+      # first colon. A one-letter "host" is a Windows drive (C:/Users/...).
+      before="${url%%:*}"
+      if [[ "$url" == *:* && "$before" != */* && ${#before} -gt 1 ]]; then
+        P_HOST="${before##*@}"
+        P_PATH="${url#*:}"
+        P_SSH=1
+      fi
+      ;;
+  esac
+  P_HOST="$(lower "$P_HOST")"
+  P_HOST="${P_HOST%.}"
+  while [[ "$P_PATH" == /* ]]; do P_PATH="${P_PATH#/}"; done
+  while [[ "$P_PATH" == */ ]]; do P_PATH="${P_PATH%/}"; done
+  case "$(lower "$P_PATH")" in *.git) P_PATH="${P_PATH%????}" ;; esac
+  while [[ "$P_PATH" == */ ]]; do P_PATH="${P_PATH%/}"; done
+}
+
+# check_url <url>: sets U_RC (0 private, 1 public, 2 unverified) and U_WHY.
+check_url() {
+  local url="$1" label owner repo out rc resolved
+  parse_url "$url"
+  if [[ -z "$P_HOST" ]]; then
+    U_RC=2; U_WHY="origin is a local path, not a GitHub repo"; return
+  fi
+  if [[ "$P_HOST" == -* ]]; then
+    U_RC=2; U_WHY="origin has an unsafe host name"; return
+  fi
+  label="$P_HOST"
+  if (( P_SSH )) && ! is_github_host "$P_HOST" && command -v ssh >/dev/null 2>&1; then
+    resolved="$(with_timeout 10 ssh -G -- "$P_HOST" 2>/dev/null \
+      | awk 'tolower($1) == "hostname" { print tolower($2); exit }')"
+    if is_github_host "$resolved"; then
+      label="$P_HOST (ssh alias for $resolved)"
+      P_HOST="$resolved"
+    fi
+  fi
+  if ! is_github_host "$P_HOST"; then
+    U_RC=2; U_WHY="origin host $label is not github.com, so its visibility cannot be checked"; return
+  fi
+  owner="${P_PATH%%/*}"
+  repo="${P_PATH#*/}"
+  if [[ ! "$P_PATH" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+     || [[ "$owner" == . || "$owner" == .. || "$repo" == . || "$repo" == .. ]]; then
+    U_RC=2; U_WHY="cannot read owner/repo from the origin URL on $label"; return
+  fi
+  # The template check comes first and needs no network, so a tryout clone is
+  # refused even offline or when gh would answer otherwise.
+  if [[ "$(lower "$P_PATH")" == "$TEMPLATE" ]]; then
+    U_RC=1
+    U_WHY="origin is the public OPS template (github.com/$P_PATH); create your own private copy from it (README.md, Spin-up) and point origin at that copy"
+    return
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    U_RC=2; U_WHY="gh (GitHub CLI) is not installed, so github.com/$P_PATH cannot be checked"; return
+  fi
+  # --hostname pins github.com: a GH_HOST pointing at an Enterprise server
+  # must not answer for a github.com URL.
+  rc=0
+  out="$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 with_timeout 30 \
+    gh api --hostname github.com "repos/$P_PATH" --jq .private 2>/dev/null)" || rc=$?
+  out="${out%$'\r'}"
+  if (( rc != 0 )); then
+    U_RC=2; U_WHY="gh could not read github.com/$P_PATH (exit $rc: not signed in, no access, or offline)"; return
+  fi
+  case "$out" in
+    true)  U_RC=0; U_WHY="github.com/$P_PATH is private" ;;
+    false) U_RC=1
+           U_WHY="github.com/$P_PATH is public; make it private (gh repo edit $P_PATH --visibility private --accept-visibility-change-consequences) or point origin at a private copy" ;;
+    *)     U_RC=2; U_WHY="gh gave an unexpected answer for github.com/$P_PATH" ;;
+  esac
+}
+
+if ! command -v git >/dev/null 2>&1; then
+  say "unverified: git is not installed"; exit 2
+fi
+if ! git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  say "unverified: $DIR is not a git repository"; exit 2
+fi
+urls="$(git -C "$DIR" remote get-url --push --all origin 2>/dev/null)" || urls=""
+if [[ -z "$urls" ]]; then
+  say "unverified: $DIR has no origin remote"; exit 2
+fi
+optin=0
+[[ "$(git -C "$DIR" config --local --bool --get ops.pushVerified 2>/dev/null)" == true ]] && optin=1
+
+oks=() unverified=()
+while IFS= read -r url; do
+  url="${url%$'\r'}"
+  [[ -n "$url" ]] || continue
+  check_url "$url"
+  case "$U_RC" in
+    0) oks+=("$U_WHY") ;;
+    1) say "public: $U_WHY"; exit 1 ;;
+    *) unverified+=("$U_WHY") ;;
+  esac
+done <<< "$urls"
+
+joined() { local out="" s; for s in "$@"; do out="${out:+$out; }$s"; done; printf '%s' "$out"; }
+
+if (( ${#unverified[@]} )); then
+  if (( optin )); then
+    say "private by opt-in (ops.pushVerified=true): $(joined "${unverified[@]}")"
+    exit 0
+  fi
+  say "unverified: $(joined "${unverified[@]}"); run gh auth login, or confirm the repo is private and run: git -C \"$DIR\" config ops.pushVerified true"
+  exit 2
+fi
+say "private: $(joined "${oks[@]}")"
+exit 0
