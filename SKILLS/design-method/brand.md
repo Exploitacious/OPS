@@ -1,5 +1,5 @@
 <!--
-DESIGN-BRAND-TEMPLATE: unfilled — remove this line once you have replaced the
+DESIGN-BRAND-TEMPLATE: unfilled; remove this line once you have replaced the
 EXAMPLE values with your own brand. While this banner is present, the design
 skill treats the work as free-design (no brand to honor).
 
@@ -22,7 +22,7 @@ never drift.
 light office/document palette), name each mode and when it applies. Delete if
 you have one mode. -->
 
-EXAMPLE — replace: web surfaces are dark-first (cinematic, restrained, surgical
+EXAMPLE, replace: web surfaces are dark-first (cinematic, restrained, surgical
 warm accents); office documents invert to a light palette. Never mix them.
 
 ## Color tokens
@@ -31,7 +31,7 @@ warm accents); office documents invert to a light palette. Never mix them.
 etc.), per mode. This is the source of truth for the design skill; it invents no
 color you do not list here. -->
 
-EXAMPLE — replace: `--bg:#0E0F12` `--surface:#16181D` `--text:#EDEDED`
+EXAMPLE, replace: `--bg:#0E0F12` `--surface:#16181D` `--text:#EDEDED`
 `--muted:#9AA0A6` `--accent:#<your accent>`. Accent is surgical, never a large fill.
 
 ## Type stack
@@ -39,7 +39,7 @@ EXAMPLE — replace: `--bg:#0E0F12` `--surface:#16181D` `--text:#EDEDED`
 <!-- The families and their roles (display/UI, body, accents/headings, data/mono),
 with weights. Name the exact families; the skill uses no substitute. -->
 
-EXAMPLE — replace: `<Display family>` (display/UI), `<Body family>` (body),
+EXAMPLE, replace: `<Display family>` (display/UI), `<Body family>` (body),
 `<Serif family>` (accents + section headings), `<Mono family>` (data/labels).
 
 ## Brand language and ratified patterns
@@ -48,7 +48,7 @@ EXAMPLE — replace: `<Display family>` (display/UI), `<Body family>` (body),
 design skill treats them as ratified here rather than avoiding them. Also the
 voice rules that bind design copy (e.g. no em dashes, sentence case). -->
 
-EXAMPLE — replace: one serif-italic accent word per heading; uppercase mono
+EXAMPLE, replace: one serif-italic accent word per heading; uppercase mono
 eyebrows; numbered cards. No em dashes in any brand-voice output. No emoji.
 
 ## Assets and naming
@@ -56,7 +56,7 @@ eyebrows; numbered cards. No em dashes in any brand-voice output. No emoji.
 <!-- Logo usage, public vs legal name, where the logo files live, and any hard
 rules (do not recolor, do not stretch). -->
 
-EXAMPLE — replace: public name "<Public Name>"; legal name only where required;
+EXAMPLE, replace: public name "<Public Name>"; legal name only where required;
 logo used as-is from `<path or URL>`, never edited.
 
 ## Traps and gotchas
@@ -64,5 +64,5 @@ logo used as-is from `<path or URL>`, never edited.
 <!-- Surface-specific pitfalls the design skill must respect: HTML email client
 quirks, scroll-entrance timings, framework-specific build rules. -->
 
-EXAMPLE — replace: HTML email header logo via MSO conditionals; CTA padding on
+EXAMPLE, replace: HTML email header logo via MSO conditionals; CTA padding on
 the anchor with mso-padding-alt matched; verified on a real client screenshot.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# grabit — move files between this (often headless) OPS box and the machine
+# grabit: move files between this (often headless) OPS box and the machine
 # you're driving it from, over Tailscale. No SFTP, no cloud; tailnet-encrypted,
 # never public (uses `tailscale serve`, not `funnel`).
 #
@@ -16,7 +16,7 @@
 #   grabit -h | --help
 #
 # One-time per box (already done on this one): sudo tailscale set --operator=$USER
-# so transfers need no sudo. Only ever stages files you name — never exposes the
+# so transfers need no sudo. Only ever stages files you name and never exposes the
 # directory they live in, so a neighbouring .env can't leak.
 set -euo pipefail
 
@@ -73,7 +73,7 @@ serve(){
   rm -rf "$SERVE_DIR"; mkdir -p "$SERVE_DIR"
   local p; for p in "$@"; do [ -e "$p" ] || die "no such path: $p"; cp -r "$p" "$SERVE_DIR/"; done
   # Serving a path is privileged even for an operator; needs (passwordless) sudo.
-  # Taildrop (the default push) does NOT need this — prefer it where sudo is absent.
+  # Taildrop (the default push) does NOT need this, so prefer it where sudo is absent.
   sudo tailscale serve --bg "$SERVE_DIR" >/dev/null 2>&1 \
     || die "tailscale serve failed (needs sudo + tailnet HTTPS enabled; just use a plain 'grabit FILE' push instead)"
   local url; url="https://$(self_dns)/"

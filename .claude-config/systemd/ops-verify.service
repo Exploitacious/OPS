@@ -1,5 +1,5 @@
 [Unit]
-Description=OPS drift gate (verify-ops.sh) — nightly report for session-briefing
+Description=OPS drift gate (verify-ops.sh): nightly report for session-briefing
 
 [Service]
 Type=oneshot

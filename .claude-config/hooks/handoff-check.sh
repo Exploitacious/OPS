@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# handoff-check.sh — SessionStart notifier for PROJECT-KEYED handoff batons.
+# handoff-check.sh: SessionStart notifier for PROJECT-KEYED handoff batons.
 #
 # Surfaces a PENDING baton for THE CURRENT PROJECT ONLY. Batons live at
 # ~/OPS/.claude-handoffs/pending/<project-key>.md (key = git repo root or
 # cwd; see key.sh). Because the banner is keyed to the session's own project,
-# parallel sessions on different projects NEVER see each other's batons —
+# parallel sessions on different projects NEVER see each other's batons:
 # this is the fix for "handoffs picking up another agent's work".
 #
 # Notify ONLY. Never auto-loads context (that would re-inject stale state
 # every session). The session-handoff skill does the actual pickup and
-# archives the baton so this stops firing. Exit 0 always — a surface, not a
+# archives the baton so this stops firing. Exit 0 always, a surface, not a
 # gate. If you run more than one profile via CLAUDE_CONFIG_DIR, this fires in
 # each of them (settings.json is symlinked into every config dir).
 #
@@ -22,7 +22,7 @@ set -uo pipefail
 HANDOFF_DIR="${OPS_DIR:-$HOME/OPS}/.claude-handoffs"
 KEY_SH="$HANDOFF_DIR/key.sh"
 
-# Current project key — shared logic via key.sh, with an inline fallback so a
+# Current project key: shared logic via key.sh, with an inline fallback so a
 # missing/non-exec helper degrades gracefully instead of crashing the hook.
 if [ -x "$KEY_SH" ]; then
   KEY="$(bash "$KEY_SH" 2>/dev/null)"
@@ -35,7 +35,7 @@ fi
 BATON="$HANDOFF_DIR/pending/$KEY.md"
 
 # Legacy single-baton fallback (pre project-keying): surface ONLY if its
-# recorded cwd matches this session — never blast an old global baton.
+# recorded cwd matches this session, never blast an old global baton.
 if [ ! -f "$BATON" ] && [ -f "$HANDOFF_DIR/ACTIVE_HANDOFF.md" ]; then
   _legacy="$HANDOFF_DIR/ACTIVE_HANDOFF.md"
   _lcwd="$(grep -iE '^cwd:' "$_legacy" 2>/dev/null | head -1 | sed -E 's/^[^:]*:[[:space:]]*//')"
@@ -62,7 +62,7 @@ cur="default"
 
 cat <<EOF
 ============================================================
- PENDING HANDOFF (this project)  —  you are on: ${cur}
+ PENDING HANDOFF (this project), you are on: ${cur}
 ============================================================
 Project: ${KEY}
 From:    ${writer:-unknown}   @   ${when:-unknown}

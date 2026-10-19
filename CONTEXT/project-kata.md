@@ -1,6 +1,6 @@
 # Project Kata
 
-> A portable system for organizing any repository — documentation,
+> A portable system for organizing any repository: documentation,
 > scaffolding, and the rules that hold them together. Not tied to a
 > particular project, language, or domain. Apply wherever the doc set
 > is starting to sprawl, the root directory is growing files faster
@@ -24,14 +24,14 @@ that follow from them.
 
 1. **The root holds canonical entry points only.** A repo's root has
    four documentation files, no more:
-   - `README.md` — _what exists_. The first file a visitor reads.
-   - `CONTRIBUTING.md` (or your project's equivalent — `CLAUDE.md`,
-     `AGENTS.md`, `STYLE.md`, etc.) — _how we work in this repo_. The
+   - `README.md`: _what exists_. The first file a visitor reads.
+   - `CONTRIBUTING.md` (or your project's equivalent: `CLAUDE.md`,
+     `AGENTS.md`, `STYLE.md`, etc.): _how we work in this repo_. The
      first file a contributor reads.
    - One spec / rulebook file (commonly `RULEBOOK.md`, `SPEC.md`,
-     `RFC.md`, or `ARCHITECTURE.md`) — _the rules of the road_. The
+     `RFC.md`, or `ARCHITECTURE.md`): _the rules of the road_. The
      authoritative document everything else defers to.
-   - `CHANGELOG.md` — _every merged change_. The history.
+   - `CHANGELOG.md`: _every merged change_. The history.
 
    Any new file at the root needs a positive justification, not just
    "couldn't think of where else to put it." If you want to add a
@@ -58,8 +58,8 @@ that follow from them.
 
    **User-facing help is the same principle, applied externally.**
    If the project has a UI and non-technical users, user-facing docs
-   live where users find them — in-app, a `/docs` route, a customer
-   portal — not in the repo root. Repo docs are for contributors;
+   live where users find them (in-app, a `/docs` route, a customer
+   portal), not in the repo root. Repo docs are for contributors;
    user docs are for users. Don't mix them.
 
 4. **No fact lives in two places.** If you find yourself writing the
@@ -80,7 +80,7 @@ that follow from them.
 6. **Soft cap on file lengths.** README around 500 lines. The
    spec/rulebook is the deliberate exception (it's a spec). Any other
    file approaching the cap is a signal to split it. A long file
-   isn't comprehensive — it's a sign the topic isn't carved up well
+   isn't comprehensive; it's a sign the topic isn't carved up well
    yet.
 
 That's the whole kata. The rest of this file is application detail.
@@ -116,14 +116,14 @@ groups entries:
 | Backlog             | Unscoped + scoped work                | `IDEAS.md`, `ROADMAP.md`                      |
 
 Migrations get their own subdirectory because they're write-once,
-historical-after — they shouldn't crowd the active runbooks.
+historical-after; they shouldn't crowd the active runbooks.
 
 ---
 
 ## The README ↔ CONTRIBUTING boundary
 
 The two most-read files in any repo are the README and the
-how-we-work file (CONTRIBUTING.md, CLAUDE.md, AGENTS.md — whatever
+how-we-work file (CONTRIBUTING.md, CLAUDE.md, AGENTS.md, whatever
 the project calls it). They have distinct jobs and content drifts
 between them constantly if the boundary isn't enforced.
 
@@ -170,9 +170,9 @@ Every file in `docs/` follows the same pattern:
 
 ## See also
 
-- `<related doc 1>` — what it covers
-- `<related doc 2>` — what it covers
-- `<root spec>` § <section> — the underlying rule
+- `<related doc 1>`: what it covers
+- `<related doc 2>`: what it covers
+- `<root spec>` § <section>: the underlying rule
 ```
 
 The opening blockquote and the closing "See also" are
@@ -197,7 +197,7 @@ The procedure when something needs to be written down:
    - Adjacent to code? Yes for component-specific notes.
 
 3. **Add a row to `docs/README.md`** with a one-line "what it
-   covers". Don't skip this — an unindexed doc is invisible.
+   covers". Don't skip this: an unindexed doc is invisible.
 
 4. **Add a "see also" footer** to the new file pointing at the
    relevant entry points (the rulebook section it derives from, any
@@ -222,10 +222,10 @@ discipline can fix later.
 When creating a new project, ask before scaffolding. Use structured
 multiple-choice questions, not open-ended ones:
 
-1. **Initialize a git repo?** — `Yes (recommended)` / `No`
-2. **Project type?** — `Work` / `Personal` (drives license + copyright defaults — see overlays)
-3. **Public or private?** — `Public` / `Private`
-4. **License?** (Work, or Personal+Public) — `MIT (default)` / `Apache 2.0` / `None`
+1. **Initialize a git repo?** `Yes (recommended)` / `No`
+2. **Project type?** `Work` / `Personal` (drives license + copyright defaults; see overlays)
+3. **Public or private?** `Public` / `Private`
+4. **License?** (Work, or Personal+Public) `MIT (default)` / `Apache 2.0` / `None`
    - Personal + Private: skip license entirely.
 
 Don't scaffold past these questions. If any answer is unclear, ask
@@ -234,10 +234,10 @@ before creating files.
 ### Required files at the root
 
 Every git-initialized project starts with these files. They are
-exempt from Rule 1 (canonical entry points) — they're not
+exempt from Rule 1 (canonical entry points): they're not
 documentation, they're tooling configuration.
 
-**`.gitattributes`** — prevents line-ending and binary-diff issues
+**`.gitattributes`**: prevents line-ending and binary-diff issues
 between Windows and Linux contributors:
 
 ```
@@ -261,7 +261,7 @@ between Windows and Linux contributors:
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
-# Binary — never diff or normalize
+# Binary: never diff or normalize
 *.png binary
 *.jpg binary
 *.jpeg binary
@@ -276,7 +276,7 @@ between Windows and Linux contributors:
 *.eot binary
 ```
 
-**`.gitignore`** — baseline patterns. Extend with
+**`.gitignore`**: baseline patterns. Extend with
 language/framework-specific entries based on the stack:
 
 ```
@@ -322,7 +322,7 @@ workflows. If the project uses other agent tooling (`.cursor/`,
 `.aider/`, etc.), add those too. None of these should ever be
 committed.
 
-**`README.md`** — at minimum, project name and a one-line description.
+**`README.md`**: at minimum, project name and a one-line description.
 
 ### Public-repo additions
 
@@ -338,19 +338,19 @@ the title:
 ```
 
 **`LICENSE`** file based on the user's choice. Copyright line
-depends on project type — see overlays.
+depends on project type; see overlays.
 
-**`.env.example`** if the project uses environment variables —
+**`.env.example`** if the project uses environment variables:
 document every required variable with placeholder values, never
 real credentials.
 
-**Tighter `.gitignore` review** — confirm coverage of all secret
+**Tighter `.gitignore` review**: confirm coverage of all secret
 patterns, build outputs, and environment-specific files before the
 first push.
 
 ### Private-repo notes
 
-- `.gitignore` still covers secrets — private isn't an excuse for
+- `.gitignore` still covers secrets: private isn't an excuse for
   laziness here. Repos get cloned, forked, and re-shared.
 - No `LICENSE` needed unless explicitly requested.
 - README doesn't need the sensitivity banner, but should still note
@@ -368,7 +368,7 @@ follow this kata, the files are:
 | The rules / spec          | `ARCHITECTURE.md`   | System design, decision records     |
 | Every merged change       | `CHANGELOG.md`      | Keep a Changelog format             |
 
-`ARCHITECTURE.md` is the spec/rulebook slot — required only for
+`ARCHITECTURE.md` is the spec/rulebook slot, required only for
 mid-to-large projects. Break it out of `README.md` when the README
 crosses ~500 lines (the kata's soft cap) or when three or more
 major sections start competing for space (infra maps, data flow,
@@ -378,8 +378,8 @@ service dependencies, onboarding).
 
 Secrets never live in the repo. The pattern:
 
-- A `SECRETS.md` pointer file is allowed at the root or in `docs/`
-  — it lists *where* credentials actually live (1Password, Key
+- A `SECRETS.md` pointer file is allowed at the root or in `docs/`:
+  it lists *where* credentials actually live (1Password, Key
   Vault, vendor-specific stores). It contains zero secrets itself.
 - Pair with a pre-commit hook that blocks `.env` files and common
   credential patterns from reaching staging.
@@ -389,16 +389,16 @@ Secrets never live in the repo. The pattern:
 ### Image-publishing repos: GHCR retention workflow
 
 Any repo that publishes container images to GHCR gets a retention
-workflow at scaffold time — registries accumulate versions forever,
+workflow at scaffold time, because registries accumulate versions forever,
 and the cost surfaces only after thousands of stale versions pile
 up (one dashboard repo hit ~3,000 before its first cleanup).
 
 The standard shape is `ghcr-cleanup.yml` using
 `dataaxiom/ghcr-cleanup-action`, manual-first:
 
-- `workflow_dispatch` only — no schedule until the config has
+- `workflow_dispatch` only: no schedule until the config has
   proven itself on a real run.
-- A `dry_run` input defaulting to `true` — nothing deletes until
+- A `dry_run` input defaulting to `true`: nothing deletes until
   someone deliberately runs it dry, reviews, then runs it live.
 - Keep the last N tagged versions (10-25 depending on release
   cadence).
@@ -413,7 +413,7 @@ Two platform gotchas, learned live:
   lands on the default. Check this before declaring the workflow
   deployed.
 - **Guessed package names 404.** The workflow's package list must
-  name packages that actually exist in the registry — a plausible
+  name packages that actually exist in the registry: a plausible
   but never-published name fails the run. Always dry-run first and
   confirm the package exists and `latest`/pins are excluded before
   the real deletion.
@@ -423,7 +423,7 @@ Two platform gotchas, learned live:
 Per Rule 1, backlog files (`IDEAS.md`, `ROADMAP.md`,
 `BACKLOG.md`) are not canonical entry points. They live in
 `docs/`, not at the root. A backlog at the root is the most common
-form of root sprawl in practice — resist it.
+form of root sprawl in practice, so resist it.
 
 Keep the backlog one flat file (`docs/IDEAS.md`), not a
 `docs/ideas/` subfolder. Folders of improvement files become
@@ -445,7 +445,7 @@ non-canonical doc is taking it away from the four that matter.
 ### Duplicated paragraphs
 
 Writing the same thing in two places "for convenience." Convenient
-to write, expensive to maintain — the second copy goes stale within
+to write, expensive to maintain: the second copy goes stale within
 a quarter. Always link by anchor.
 
 ### Topic creep
@@ -491,7 +491,7 @@ The kata is a default, not a law. Break it when:
 - **The rule conflicts with a tool's expectations.** Some tools
   expect specific filenames at the root (`LICENSE`, `SECURITY.md`,
   `CODE_OF_CONDUCT.md`, `.github/`). Those files get an automatic
-  exception — they're not documentation in the kata's sense.
+  exception, since they're not documentation in the kata's sense.
 - **You're at the very start.** A brand-new repo with two files in
   total doesn't need a `docs/` directory. The kata kicks in when the
   doc set is starting to sprawl, not before.
@@ -579,7 +579,7 @@ Four files to read. Everything else is on demand.
 
 ## Sandboxed-agent git constraint
 
-**Scope: sandboxed agent environments only** — any agent surface
+**Scope: sandboxed agent environments only**: any agent surface
 that runs shell commands inside a sandbox against a host-mounted
 filesystem (Anthropic's desktop app is the common case). Claude
 Code, chat Claude, and any other environment have no such
@@ -587,7 +587,7 @@ constraint and handle git normally. Don't carry this rule outside
 the sandbox.
 
 **Inside the sandbox, 99% of repo work is fine.** Edit files, read
-files, restructure folders, run scripts, browse history — all
+files, restructure folders, run scripts, browse history. All
 normal. A sandboxed session is a perfectly capable environment for
 working in a repo.
 
@@ -600,11 +600,11 @@ subsequent git operations on the host.
 The rule:
 
 - Read-only git commands (`status`, `log`, `diff`, `show`,
-  `branch -l`) — fine in the sandbox.
-- File edits, scaffolding, doc work, code changes — fine in the
+  `branch -l`): fine in the sandbox.
+- File edits, scaffolding, doc work, code changes: fine in the
   sandbox. The lock-file issue is about the `git` CLI specifically,
   not about touching files in a repo.
-- Git write commands — don't run them from the sandbox shell.
+- Git write commands: don't run them from the sandbox shell.
   Either let the Operator run them outside the sandbox, or switch
   to Claude Code if a continuous build-commit-iterate cycle is
   needed.
@@ -616,7 +616,7 @@ has a single home.
 
 ## Operator overlays
 
-Everything above this section is portable — apply it to any repo,
+Everything above this section is portable: apply it to any repo,
 any team, any domain. This section is where the kata's portable
 rules meet one specific setup: project portfolio layout, LICENSE
 defaults, which file plays which canonical role, backlog
@@ -624,20 +624,20 @@ conventions, and anything else true of *your* machine and *your*
 organizations but not true of the kata in general.
 
 This section ships as a template. `BOOTSTRAP.md` fills it in on
-first run — it asks a short set of structured questions (repo home
+first run: it asks a short set of structured questions (repo home
 path, organization name(s), license defaults, which file plays the
 spec/rulebook role) and writes the answers here as a living record.
 Until bootstrap has run, treat the entries below as illustrative
-only — they are not real configuration.
+only; they are not real configuration.
 
-### EXAMPLE — project portfolio + license defaults
+### EXAMPLE: project portfolio + license defaults
 
 *(Synthetic. Replace this entire subsection with your own answers
-during bootstrap — it shows the shape an overlay entry takes, not a
+during bootstrap; it shows the shape an overlay entry takes, not a
 default to inherit.)*
 
 Project repos live under `PROJECTS/<organization>/<repo>`. The
-organization folder is mandatory — never drop a repo directly under
+organization folder is mandatory: never drop a repo directly under
 `PROJECTS/`. Example organizations for a two-context setup:
 `ExampleCorp` (work), `personal` (side projects). New organizations
 get added when warranted; the canonical description of current
@@ -647,13 +647,13 @@ clusters, cross-repo relationships, and keyword routing lives in
 | Project type | License default      | Copyright line              |
 | ------------ | --------------------- | ---------------------------- |
 | Work         | MIT                    | Copyright (c) Example Corp   |
-| Personal     | None (skip the file)   | n/a — only add if asked      |
+| Personal     | None (skip the file)   | n/a (only add if asked)      |
 
 If a personal project is going public and a license is wanted, ask
-before defaulting — don't auto-attach a work organization's name to
+before defaulting, and don't auto-attach a work organization's name to
 a personal repo.
 
-### EXAMPLE — layered IDEAS files
+### EXAMPLE: layered IDEAS files
 
 *(Synthetic, same caveat as above.)*
 
@@ -671,9 +671,9 @@ one:
 
 Each file declares its scope at the top and routes anything
 narrower down to the next level. IDEAS and TODO are interchangeable
-in this layout — pick one and stick with it per file. CHANGELOGs
+in this layout: pick one and stick with it per file. CHANGELOGs
 are not duplicated at cluster level (a cluster folder is a
-grouping, not a project — track its changes via the parent harness
+grouping, not a project; track its changes via the parent harness
 CHANGELOG).
 
 Add further overlay entries below these the same way, as your

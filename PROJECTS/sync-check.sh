@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-check.sh — walk PROJECTS/ git repos, fetch from remote, rebase,
+# sync-check.sh: walk PROJECTS/ git repos, fetch from remote, rebase,
 # and shepherd uncommitted changes safely through the update.
 # Linux port of Sync-Check.ps1.
 #
@@ -74,7 +74,7 @@ read_choice() {
 declare -a sum_synced=() sum_clean=() sum_attn=() sum_skipped=() sum_stashes=()
 
 echo
-status "GIT SYNC — $(date '+%Y-%m-%d %H:%M')" "$C_CYAN$C_BOLD"
+status "GIT SYNC: $(date '+%Y-%m-%d %H:%M')" "$C_CYAN$C_BOLD"
 status "$SEPARATOR" "$C_GRAY"
 echo "What this does: for each project, it checks if the server has"
 echo "newer changes, then updates your local copy. If you have unsaved"
@@ -103,7 +103,7 @@ for dir in "${REPOS[@]}"; do
   status "[$name]" "$C_YELLOW$C_BOLD"
 
   action "Asking the server what's new..."
-  explain "This doesn't change anything yet — it just downloads info."
+  explain "This doesn't change anything yet; it just downloads info."
   if ! fetch_out=$(git -C "$dir" fetch --all --prune 2>&1); then
     bad "Couldn't reach the server: $fetch_out"
     sum_skipped+=("$name")
@@ -154,7 +154,7 @@ for dir in "${REPOS[@]}"; do
     continue
   fi
 
-  # Not behind — report and move on (match Windows: don't stash when there's nothing to rebase against)
+  # Not behind: report and move on (match Windows: don't stash when there's nothing to rebase against)
   if [[ "$behind" -eq 0 ]]; then
     if [[ "$ahead" -gt 0 ]]; then
       good "You're ahead of the server. No rebase needed."
@@ -173,7 +173,7 @@ for dir in "${REPOS[@]}"; do
 
   # Auto mode: never touch a dirty tree that needs a rebase
   if [[ $AUTO -eq 1 && $is_dirty -eq 1 ]]; then
-    warn "Dirty tree + behind. Auto mode skips this — run interactively to resolve."
+    warn "Dirty tree + behind. Auto mode skips this, so run interactively to resolve."
     sum_attn+=("$name (dirty + behind, auto-skipped)")
     echo
     continue
@@ -224,7 +224,7 @@ for dir in "${REPOS[@]}"; do
       fi
     fi
 
-    sum_attn+=("$name (rebase conflict — manual resolution needed)")
+    sum_attn+=("$name (rebase conflict, manual resolution needed)")
     echo
     continue
   fi
@@ -238,7 +238,7 @@ for dir in "${REPOS[@]}"; do
       decided=0
       while [[ $decided -eq 0 ]]; do
         choice=$(read_choice "Your shelved changes are still tucked away. What do you want to do with them?" \
-          "P:Put them back in the project (most common — you keep working)" \
+          "P:Put them back in the project (most common: you keep working)" \
           "K:Leave them on the shelf for later (see them with: git stash list)" \
           "D:Discard them permanently (you don't want these edits anymore)" \
           "V:Show me the shelved changes first, then ask again")
@@ -250,7 +250,7 @@ for dir in "${REPOS[@]}"; do
               good "Done. Your edits are back in place."
             else
               warn "Putting them back caused a conflict with the newly pulled code."
-              explain "Your edits and the server's updates touched the same lines. The shelf is still safe — resolve the conflict in your editor, or run: git stash drop $stash_ref to toss them."
+              explain "Your edits and the server's updates touched the same lines. The shelf is still safe: resolve the conflict in your editor, or run: git stash drop $stash_ref to toss them."
               sum_stashes+=("$name ($stash_label)")
               sum_attn+=("$name (stash pop conflict)")
             fi

@@ -27,14 +27,22 @@ current task allows.
 ## Build, test, land
 
 - Gate: `bash .claude-config/bin/verify-ops.sh` after any harness change. It
-  checks `~/OPS`; set `OPS_DIR` to check another checkout.
+  checks `~/OPS`; set `OPS_DIR` to check another checkout. Its host checks
+  (the core link, the Stage-1 settings) still read `$HOME`, so for a checkout
+  other than the deployed one, or on a machine with no deployed OPS, run it in
+  a throwaway `HOME` (DEPLOYMENT.md, "Testing a deploy under a throwaway
+  HOME").
 - Tests: `.claude-config/bin/tests/*-test.{sh,py}`, `.claude-config/bin/*-selftest.*`,
   and `.claude-config/hooks/*-selftest.sh`. Run the ones covering what you
   changed. A suite that runs a tool that deletes or moves files starts with
   the sandbox guard and runs only inside `.claude-config/bin/sandbox-run`
   (exit 97 elsewhere); the command line is in `.claude-config/bin/README.md`.
-  Every shell script you touch passes `bash -n`; every workflow script passes
-  `node --check`.
+  Every shell script you touch passes `bash -n`; every workflow script parses
+  (plain `node --check` is unreliable for them; CONTRIBUTING.md has the
+  command CI uses). In the template repository, CI
+  (`.github/workflows/gate.yml`) runs the syntax checks, every suite, a
+  fresh-install smoke test with `verify-ops.sh`, and a secrets scan on each push
+  and pull request; CONTRIBUTING.md has the same commands for a local run.
 - `CHANGELOG.md` gets a dated entry for every notable change.
 - Several sessions can share this checkout. Before pushing, run
   `git log --oneline origin/main..main`; if it shows commits that are not
@@ -43,9 +51,12 @@ current task allows.
 - This copy pushes only to its own private origin. The git-guard hook runs
   `.claude-config/bin/origin-private-check` on the agent pushes it can parse
   here and blocks one it cannot verify, or one to another remote. It is a
-  seatbelt, not a sandbox: DEPLOYMENT.md "Push gate" lists its limits.
+  seatbelt, not a sandbox: DEPLOYMENT.md, "What Stage 2 does" step 8 ("The
+  push gate"), lists its limits.
 - Contributions to the public template go by PR and follow
-  [CONTRIBUTING.md](CONTRIBUTING.md): port the mechanic, never paste the file.
+  [CONTRIBUTING.md](CONTRIBUTING.md): port the mechanic, never paste the file,
+  keep your private-term list out of every PR and commit, and push the PR branch
+  with `GIT_GUARD=off` (the git guard blocks an unverified push by design).
 
 ## Conventions
 
@@ -85,4 +96,6 @@ current task allows.
 | First launch | `BOOTSTRAP.md` |
 | Template sync from upstream | the `harness-update` skill |
 | Scripts, tests, and the gate | `.claude-config/bin/README.md` |
+| Porting rules, the CI gate, local test commands | `CONTRIBUTING.md`, `.github/workflows/gate.yml` |
+| Licenses of adapted third-party work | `SKILLS/THIRD_PARTY_NOTICES.md` |
 | History | `CHANGELOG.md`, `git log` |

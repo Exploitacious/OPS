@@ -1,0 +1,357 @@
+# The OPS gate. Runs on every push and pull request:
+#
+#   syntax   bash -n, a JavaScript parse, python3 -m py_compile and a PowerShell parse
+#            over every tracked script
+#   suites   every suite under .claude-config/bin/tests/, the *-selftest scripts
+#            and the PowerShell suites (the ones that delete or move files run
+#            inside .claude-config/bin/sandbox-run, as CONTRIBUTING.md says)
+#   smoke    a fresh install in a throwaway HOME (the current Stage-1 settings,
+#            a git identity, deploy.sh --no-system, twice), then verify-ops.sh
+#   secrets  gitleaks over the full history, then OPS's own secrets scanner
+#
+# No secrets are used or needed, so a pull request from a fork gets the same
+# run. A fork's token is read-only (permissions below) and nothing here asks for
+# another.
+#
+# Every job is skipped outside the template repository. A private copy made
+# from the template inherits this file (and template sync can deliver it), and
+# its daily backup pushes every day: without the guard each push would spend
+# runner minutes on a gate written for the template. Delete the file from your
+# copy if you like; if this repository is ever renamed, update the guard, or
+# the gate silently stops running.
+#
+# Not covered, on purpose: Windows and macOS (this runs on Linux; the two
+# PowerShell suites run under pwsh on Linux and exercise deploy.ps1's logic, not
+# a Windows host), and any Claude Code CLI behavior (the CLI is not installed;
+# deploy warns and goes on without it). CONTRIBUTING.md ("Before you open the
+# PR") lists the same commands for a local run.
+name: gate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes a run still going.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # bash --noprofile --norc -eo pipefail: a failing command fails the step.
+    shell: bash
+
+env:
+  # Stage 1's settings.json, read from the public default branch (HEAD follows a
+  # rename of it). Deliberately not pinned to a commit: the smoke test and the
+  # verify-ops self-test exist to catch the day a Stage-1 change (a model pin, a
+  # hook matcher) breaks OPS, so they must read the file new users get today.
+  OPS_STAGE1_SETTINGS_URL: https://raw.githubusercontent.com/Exploitacious/linuxploitacious/HEAD/claude/.claude/settings.json
+
+jobs:
+  syntax:
+    name: syntax
+    if: github.repository == 'Exploitacious/OPS'
+    # Ubuntu 26.04 by name, not ubuntu-latest (which still means 24.04 and is
+    # announced to move to 26.04 in November 2026). branch-gc quarantines a
+    # worktree with `mv --no-copy --update=none-fail`, which GNU coreutils has
+    # only since 9.5; 24.04 ships 9.4, where `mv` rejects the option and every
+    # branch-gc suite fails. The sandbox tests also depend on how the
+    # distribution's AppArmor treats bubblewrap, so a silent image change should
+    # not move them either.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: List the scripts to check
+        # Tracked files only, found by extension or by a #! line (branch-gc,
+        # grabit, memory-init and other scripts have no extension). A check that
+        # sees zero files would pass without checking anything, so an empty list
+        # fails the job.
+        run: |
+          : > "$RUNNER_TEMP/shell.lst"; : > "$RUNNER_TEMP/node.lst"
+          : > "$RUNNER_TEMP/python.lst"; : > "$RUNNER_TEMP/pwsh.lst"
+          while IFS= read -r -d '' f; do
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            case "$f" in
+              *.sh)  echo "$f" >> "$RUNNER_TEMP/shell.lst" ;;
+              *.js)  echo "$f" >> "$RUNNER_TEMP/node.lst" ;;
+              *.py)  echo "$f" >> "$RUNNER_TEMP/python.lst" ;;
+              *.ps1) echo "$f" >> "$RUNNER_TEMP/pwsh.lst" ;;
+              *)
+                first="$(head -n 1 "$f" | tr -d '\r')"
+                case "$first" in
+                  '#!'*bash*|'#!/bin/sh'*|'#!/usr/bin/env sh'*) echo "$f" >> "$RUNNER_TEMP/shell.lst" ;;
+                  '#!'*python*) echo "$f" >> "$RUNNER_TEMP/python.lst" ;;
+                  '#!'*node*)   echo "$f" >> "$RUNNER_TEMP/node.lst" ;;
+                esac ;;
+            esac
+          done < <(git ls-files -z)
+          for k in shell node python pwsh; do
+            n="$(wc -l < "$RUNNER_TEMP/$k.lst")"
+            echo "$k: $n file(s)"
+            [ "$n" -gt 0 ] || { echo "::error::no $k scripts found: the discovery is broken"; exit 1; }
+          done
+
+      - name: bash -n on every shell script
+        run: |
+          rc=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "::error file=$f::bash -n failed"; rc=1; }
+          done < "$RUNNER_TEMP/shell.lst"
+          exit "$rc"
+
+      - name: Check every JavaScript script
+        # A workflow script is any .js whose first statement (after a #! line,
+        # comments and blank lines) is `export const meta =`: the ones under
+        # .claude-config/workflows/ and skill-bundled ones such as
+        # SKILLS/memory-prune/audit_workflow.js. It is chosen by content, not
+        # path, because a path rule sends a skill's workflow to the module
+        # check, which rejects its top-level `return`. The workflow runner
+        # executes the body as an async function, with top-level `await` and
+        # `return`, so that body is parsed directly: constructing an
+        # AsyncFunction parses without running it, and unlike a textual wrapper
+        # it cannot accept a body that closes the wrapper and opens another
+        # function. Only the leading metadata export is removed, so a malformed
+        # later export stays invalid. The parser exits 10 for any other file,
+        # which is then checked in explicit CommonJS, then module, mode: Node
+        # 24's automatic module detection can accept an unclosed brace.
+        run: |
+          node --version
+          rc=0
+          while IFS= read -r f; do
+            st=0
+            node --input-type=commonjs - "$f" <<'JS' || st=$?
+          const { readFileSync } = require('node:fs');
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const source = readFileSync(process.argv[2], 'utf8')
+            .replace(/^#![^\r\n]*(?:\r?\n|$)/, '\n');
+          const lead = source.match(/^(?:\s+|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)*/)[0];
+          const rest = source.slice(lead.length);
+          if (!/^export\s+const\s+meta\s*=/.test(rest)) process.exit(10);
+          new AsyncFunction(lead + rest.replace(/^export(?=\s+const\s+meta\s*=)/, '      '));
+          JS
+            case "$st" in
+              0) ;;
+              10)
+                if ! node --check --input-type=commonjs < "$f" 2> "$RUNNER_TEMP/node.err"; then
+                  node --check --input-type=module < "$f" \
+                    || { cat "$RUNNER_TEMP/node.err"; echo "::error file=$f::invalid JavaScript"; rc=1; }
+                fi ;;
+              *)
+                echo "::error file=$f::invalid workflow async function body"
+                rc=1 ;;
+            esac
+          done < "$RUNNER_TEMP/node.lst"
+          exit "$rc"
+
+      - name: python3 -m py_compile on every .py
+        # Bytecode goes to a scratch prefix, not into the checkout.
+        run: |
+          python3 --version
+          export PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache"
+          rc=0
+          while IFS= read -r f; do
+            python3 -m py_compile "$f" || { echo "::error file=$f::py_compile failed"; rc=1; }
+          done < "$RUNNER_TEMP/python.lst"
+          exit "$rc"
+
+      - name: Parse every PowerShell script
+        # Parse only: ParseFile never runs the script. The parser is a file run
+        # with -File so the path arrives as a bound parameter; passing it after
+        # -Command makes pwsh append it to the command text, which would RUN
+        # each script (deploy.ps1 and Sync-Check.ps1 included) instead of parsing it.
+        run: |
+          pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          cat > "$RUNNER_TEMP/parse.ps1" <<'PS1'
+          param([Parameter(Mandatory)][string]$Path)
+          $errs = $null; $tokens = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $Path).Path, [ref]$tokens, [ref]$errs)
+          if ($errs.Count) { $errs | ForEach-Object { "${Path}: $($_.Message)" }; exit 1 }
+          PS1
+          rc=0
+          while IFS= read -r f; do
+            pwsh -NoProfile -NonInteractive -File "$RUNNER_TEMP/parse.ps1" "$f" \
+              || { echo "::error file=$f::PowerShell parse failed"; rc=1; }
+          done < "$RUNNER_TEMP/pwsh.lst"
+          exit "$rc"
+
+  suites:
+    name: suites
+    if: github.repository == 'Exploitacious/OPS'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install bubblewrap, zsh, rsync and a current git, and prove bubblewrap can build a sandbox
+        # sandbox-run needs a root-owned bwrap. One root-wrapper case runs in zsh
+        # (it prints SKIP without it), and the skill-mount tests exercise the
+        # rsync engine as well as the tar fallback. branch-gc reads `git rev-parse
+        # --show-ref-format` (git 2.45) and skips every repository without it;
+        # Ubuntu 24.04's own git is 2.43, so an older git is upgraded from the
+        # git-core PPA (the 26.04 runner image already ships 2.55, so this is
+        # normally a no-op). Ubuntu can restrict unprivileged user namespaces
+        # through AppArmor: if the probe fails, lift that restriction for this
+        # runner and probe again. The probe uses the namespaces and mounts
+        # sandbox-run itself asks for (a new PID and network namespace, /dev and
+        # a fresh /proc). The last probe is not optional: without a working
+        # sandbox the destructive-tool suites cannot run, and skipping them would
+        # hide a broken gate.
+        run: |
+          need=()
+          for pkg in bubblewrap:bwrap zsh:zsh rsync:rsync; do
+            command -v "${pkg#*:}" >/dev/null 2>&1 || need+=("${pkg%%:*}")
+          done
+          git_ok() { [ "$(printf '%s\n2.45\n' "$(git --version | awk '{print $3}')" | sort -V | head -n 1)" = 2.45 ]; }
+          if [ "${#need[@]}" -gt 0 ] || ! git_ok; then
+            sudo apt-get update -qq
+            [ "${#need[@]}" -eq 0 ] || sudo apt-get install -y --no-install-recommends "${need[@]}"
+          fi
+          if ! git_ok; then
+            sudo apt-get install -y --no-install-recommends software-properties-common
+            sudo add-apt-repository -y ppa:git-core/ppa
+            sudo apt-get update -qq
+            sudo apt-get install -y git
+          fi
+          git --version
+          git_ok || { echo "::error::git 2.45 or newer is required (branch-gc reads --show-ref-format)"; exit 1; }
+          bwrap --version
+          probe() { bwrap --die-with-parent --unshare-pid --unshare-net --new-session --ro-bind / / --dev /dev --proc /proc true; }
+          if ! probe 2>/dev/null; then
+            echo "bwrap is blocked here; lifting the AppArmor user-namespace restriction"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          probe
+
+      - name: Fetch the Stage-1 settings for the verify-ops self-test
+        # verify-ops-selftest.sh also runs the shipped tree against a real
+        # Stage-1 file when OPS_SELFTEST_STAGE1 names one; without it that case
+        # prints SKIP.
+        run: curl -fsSL --retry 3 --retry-delay 2 "$OPS_STAGE1_SETTINGS_URL" -o "$RUNNER_TEMP/stage1-settings.json" && jq -e . "$RUNNER_TEMP/stage1-settings.json" >/dev/null
+
+      - name: Suites under .claude-config/bin/tests
+        run: |
+          fails=0
+          for t in .claude-config/bin/tests/*-test.sh .claude-config/bin/tests/*-test.py; do
+            case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
+            echo "::group::$t"
+            case "$t" in
+              # These two start sandbox-run themselves and bwrap cannot nest, so
+              # they run outside it (safe by construction: each writes and
+              # deletes only in its own scratch directory).
+              */sandbox-run-test.sh|*/sandbox-run-fd-test.py)
+                "${run[@]}" "$t" || { echo "FAILED: $t"; fails=$((fails + 1)); } ;;
+              *)
+                .claude-config/bin/sandbox-run --no-bind --no-net --ro-bind "$PWD" -- "${run[@]}" "$t" \
+                  || { echo "FAILED: $t"; fails=$((fails + 1)); } ;;
+            esac
+            echo "::endgroup::"
+          done
+          echo "suites failed: $fails"
+          [ "$fails" -eq 0 ]
+
+      - name: Self-tests beside their subjects
+        run: |
+          fails=0
+          for t in .claude-config/bin/*-selftest.* .claude-config/hooks/*-selftest.sh; do
+            case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
+            echo "::group::$t"
+            OPS_SELFTEST_STAGE1="$RUNNER_TEMP/stage1-settings.json" \
+              .claude-config/bin/sandbox-run --no-bind --no-net --ro-bind "$PWD" \
+                --ro-bind "$RUNNER_TEMP/stage1-settings.json" -- "${run[@]}" "$t" \
+              || { echo "FAILED: $t"; fails=$((fails + 1)); }
+            echo "::endgroup::"
+          done
+          echo "self-tests failed: $fails"
+          [ "$fails" -eq 0 ]
+
+      - name: PowerShell suites (pwsh on Linux)
+        run: |
+          fails=0
+          for t in deploy-windows-test.ps1 memory-init-windows-test.ps1; do
+            echo "::group::$t"
+            pwsh -NoProfile -File ".claude-config/bin/tests/$t" || { echo "FAILED: $t"; fails=$((fails + 1)); }
+            echo "::endgroup::"
+          done
+          [ "$fails" -eq 0 ]
+
+  smoke:
+    name: fresh install, then verify-ops
+    if: github.repository == 'Exploitacious/OPS'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Deploy into a throwaway HOME, then run the drift gate
+        # One step, so HOME stays the throwaway for every command. This is what a
+        # new user's host looks like after Stage 1: the Stage-1 settings file in
+        # ~/.claude, a git identity, this repository at ~/OPS. --no-system keeps
+        # deploy from touching the runner's crontab or root's rc files. Deploy
+        # runs twice, because the docs promise it is idempotent; verify-ops.sh
+        # exits 1 on any FAIL.
+        run: |
+          T="$(mktemp -d "$RUNNER_TEMP/ops-smoke.XXXXXX")"
+          export HOME="$T"
+          unset CLAUDE_CONFIG_DIR
+          git config --global user.name "OPS gate"
+          git config --global user.email "ops-gate@example.invalid"
+          mkdir -p "$HOME/.claude"
+          curl -fsSL --retry 3 --retry-delay 2 "$OPS_STAGE1_SETTINGS_URL" -o "$HOME/.claude/settings.json"
+          jq -e . "$HOME/.claude/settings.json" >/dev/null
+          git clone --quiet "$GITHUB_WORKSPACE" "$HOME/OPS"
+          echo "::group::deploy.sh --no-system (first run)"
+          bash "$HOME/OPS/.claude-config/deploy.sh" --no-system
+          echo "::endgroup::"
+          echo "::group::deploy.sh --no-system (second run)"
+          bash "$HOME/OPS/.claude-config/deploy.sh" --no-system
+          echo "::endgroup::"
+          [ "$(readlink -f "$HOME/.claude/rules/ops-core.md")" = "$HOME/OPS/CONTEXT/core.md" ]
+          bash "$HOME/OPS/.claude-config/bin/verify-ops.sh" | tee "$T/verify.out"
+          tail -n 1 "$T/verify.out" | grep -q ' 0 fail '
+
+  secrets:
+    name: secrets
+    if: github.repository == 'Exploitacious/OPS'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: gitleaks over the full history
+        # The binary, not gitleaks-action: the action wants a license key for
+        # organization-owned repositories, and a fork's pull request has no
+        # secrets to give it. The tarball is checked against a pinned SHA-256
+        # (the value published in the release's checksums file) before it runs.
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o "$RUNNER_TEMP/gitleaks.tgz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose "$GITHUB_WORKSPACE"
+
+      - name: OPS's own secrets scanner over memory, lessons and skills
+        run: .claude-config/bin/secrets-scan.sh CONTEXT SKILLS .claude-config

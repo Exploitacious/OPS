@@ -18,7 +18,7 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
-# Binary — never diff or normalize
+# Binary: never diff or normalize
 *.png binary
 *.jpg binary
 *.jpeg binary
