@@ -443,11 +443,12 @@ Your copy holds your memory and notes, so every push of it meets one gate.
   gains the private-term rule (your list of private terms never goes in a file,
   a commit message or a PR), a section on where destructive tests run and why,
   and the `GIT_GUARD=off` rule for a PR branch. Its suite loop printed `FAILED`
-  but always exited 0; the command now counts failures and exits non-zero, and
-  runs the self-tests and the PowerShell suites too. It also no longer implies
-  that `verify-ops.sh` on a bare checkout means anything: the gate reads host
-  state from `$HOME`, so a machine with no deployed OPS needs the
-  throwaway-`HOME` run. AGENTS carries the same caveat, and BOOTSTRAP's recon
+  but always exited 0, because its last command was an `echo`; the command now
+  counts failures and ends with a test of the count, so a red run exits
+  non-zero, and it runs the self-tests and the PowerShell suites too. It also
+  no longer implies that `verify-ops.sh` on a bare checkout means anything: the
+  gate reads host state from `$HOME`, so a machine with no deployed OPS needs
+  the throwaway-`HOME` run. AGENTS carries the same caveat, and BOOTSTRAP's recon
   gains a git-identity probe. README and DEPLOYMENT also say that `branch-gc`
   needs git 2.45 or newer and GNU coreutils 9.5 or newer: on Ubuntu 24.04 (git
   2.43, coreutils 9.4) it skips every repository, or cannot move a worktree to

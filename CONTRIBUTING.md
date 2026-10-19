@@ -114,6 +114,7 @@ for t in deploy-windows-test.ps1 memory-init-windows-test.ps1; do
   pwsh -NoProfile -File ".claude-config/bin/tests/$t" || { echo "FAILED: $t"; fails=$((fails + 1)); }
 done
 echo "failed suites: $fails"
+[ "$fails" -eq 0 ]   # last, so the exit status is the result (the echo exits 0)
 ```
 
 `verify-ops-selftest.sh` also checks the shipped tree against the real Stage-1
