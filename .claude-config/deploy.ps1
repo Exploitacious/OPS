@@ -590,7 +590,14 @@ exit $?
                 if ($null -eq $prevRoot) { Remove-Item Env:\OPS_DEPLOY_ROOT -ErrorAction SilentlyContinue }
                 else { $env:OPS_DEPLOY_ROOT = $prevRoot }
             }
-            if ($svRc -eq 0) { Write-Good "Mounted skills synced into SKILLS\" }
+            if ($svRc -eq 0) {
+                Write-Good "Mounted skills synced into SKILLS\"
+                # The output is captured, and printed whole only on failure. A
+                # successful sync can still have moved the Operator's own folder
+                # aside (BACKUP) or put one back (RESTORED); show those lines, or
+                # the folder leaves SKILLS\ with no notice.
+                $svOut | Where-Object { "$_" -match '^(BACKUP|RESTORED) ' } | ForEach-Object { Write-Warn "  $_" }
+            }
             else { Write-Bad "skills-vendor.sh sync or completeness check failed:"; $svOut | ForEach-Object { Write-Warn "  $_" }; $DeployFailed += 'skills-mount' }
         }
         else { Write-Bad "Git Bash not found -- mounted skills not synced (install Git for Windows, then re-run deploy.ps1)."; $DeployFailed += 'skills-mount' }

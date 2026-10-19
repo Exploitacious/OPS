@@ -287,6 +287,28 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   `daily-sync-test.sh`: the tree byte for byte (modes and empty directories)
   after an unreachable origin, a conflicting rebase and a killed run, no
   stash ever created, and modes kept through a rebase.
+- **Skill mounts swap on macOS.** `skills-vendor.sh` swapped each mirror in
+  with `mv -T`, which only GNU mv has, so on macOS and BSD every swap failed
+  and even a fresh install exited 3. Both renames now target a name that does
+  not exist, which plain `mv` handles the same everywhere. New case with a
+  `mv` that rejects `-T`.
+- **Interrupted mounts clean up after themselves.** A run cut off mid-copy
+  left `SKILLS/.vendor.XXXXXX` behind, and the daily backup committed it.
+  A sync now removes those staging dirs first (only that exact name shape),
+  after moving back a mirror a kill left aside between the two renames, so
+  its GUI-local files return with it (a `RESTORED` line); a leftover it
+  cannot place goes to the backup dir. `.gitignore` lists
+  `SKILLS/.vendor.*/`. New cases.
+- **Windows deploy shows a moved skill folder.** `deploy.ps1` captured the
+  sync's output and printed it only on failure, so a successful sync that
+  moved the Operator's own skill aside said nothing. It now prints the
+  `BACKUP` and `RESTORED` lines on success too. New case in
+  `deploy-windows-test.ps1`, whose fixture script is now written with LF
+  line endings so the test also passes on a fresh (CRLF) checkout.
+- **A restored skill folder says so.** When an install failed and the
+  folder went back to its place, the earlier `BACKUP` line still named a
+  backup path that no longer existed. A `RESTORED` line on stdout now says
+  the folder is back where it was. New case.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

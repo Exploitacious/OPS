@@ -30,6 +30,9 @@ desktop.ini
 
 # --- OPS machine-local churn ---
 .claude-config/backup/sync.log
+# skills-vendor.sh staging dirs: an interrupted sync leaves one, and the next
+# sync cleans it; until then the daily backup must not commit a mirror copy.
+SKILLS/.vendor.*/
 
 # --- PROJECTS: repo subdirs (2nd-level) are their own repos (ignored).
 # Cluster folders (1st-level: ExampleOrg/, AnotherOrg/, etc.)

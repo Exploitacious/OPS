@@ -149,7 +149,10 @@ try {
         $sourceSkill = Join-Path $SkillsSrcDir 'SKILLS/alpha/SKILL.md'
         New-Item -ItemType Directory -Path (Split-Path $sourceSkill -Parent) -Force | Out-Null
         [IO.File]::WriteAllText($sourceSkill, 'skill source')
-        [IO.File]::WriteAllText((Join-Path $OpsRoot '.claude-config/bin/skills-vendor.sh'), @'
+        # .gitattributes checks *.ps1 out with CRLF, and this here-string
+        # inherits the file's line endings; bash rejects a CRLF script, so a
+        # fresh clone failed this case. Write the fixture with LF only.
+        [IO.File]::WriteAllText((Join-Path $OpsRoot '.claude-config/bin/skills-vendor.sh'), (@'
 [ "$OPS_DIR" = "$OPS_TEST_EXPECTED_ROOT" ] || exit 22
 source="$OPS_DIR/PROJECTS/Exploitacious/agent-skills/SKILLS/alpha/SKILL.md"
 case "$1" in
@@ -158,6 +161,8 @@ case "$1" in
         mkdir -p "$OPS_DIR/SKILLS/alpha"
         cp "$source" "$OPS_DIR/SKILLS/alpha/SKILL.md"
         printf 'mounted' > "$OPS_DIR/SKILLS/mounted.txt"
+        printf 'BACKUP   alpha: the existing folder was not a mirror sync wrote; kept at %s\n' "$OPS_DIR/.claude-config/backup/skills-replaced/alpha-test"
+        printf 'SYNCED   alpha\n'
         ;;
     --check)
         [ -f "$source" ] && [ -f "$OPS_DIR/SKILLS/alpha/SKILL.md" ] || exit 2
@@ -165,7 +170,7 @@ case "$1" in
         ;;
     *) exit 23 ;;
 esac
-'@)
+'@ -replace "`r", ''))
         $env:OPS_TEST_EXPECTED_ROOT = $OpsRoot
         function Invoke-FixtureBash {
             param($Mode)
@@ -177,11 +182,18 @@ esac
         }
         $BashExe = 'Invoke-FixtureBash'
         $DeployFailed = @()
+        $script:warnings = @()
+        function Write-Warn { param($Msg) $script:warnings += @("$Msg") }
         Invoke-Expression $skillsBlock
         Assert ($DeployFailed.Count -eq 0) 'Skill sync failed with a spaced or apostrophe path'
         Assert ([IO.File]::ReadAllText((Join-Path $OpsRoot 'SKILLS/mounted.txt')) -eq 'mounted') 'Skill sync did not reach the intended root'
         Assert ($null -eq $env:OPS_DEPLOY_ROOT) 'Skill sync leaked its temporary root environment'
         Write-Host 'PASS: skill sync handles spaces and apostrophes as literal path data'
+        # A successful sync that moved a folder aside must say where it went.
+        Assert (@($script:warnings | Where-Object { $_ -match '^\s*BACKUP   alpha: .*kept at .*alpha-test$' }).Count -eq 1) "A successful sync hid its BACKUP line: $($script:warnings -join ' | ')"
+        Assert (@($script:warnings | Where-Object { $_ -match 'SYNCED' }).Count -eq 0) 'A successful sync echoed more than its BACKUP and RESTORED lines'
+        function Write-Warn { param($Msg) }
+        Write-Host 'PASS: a successful sync shows its BACKUP line'
         Remove-Item -LiteralPath $sourceSkill -Force
         $DeployFailed = @()
         Invoke-Expression $skillsBlock

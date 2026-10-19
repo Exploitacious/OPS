@@ -20,7 +20,13 @@
 #     folder back, in both engines
 #   - a failed rsync or tar copy leaves an owned mirror exactly as it was (the
 #     new mirror is built in a temp dir and swapped in)
-#   - the BACKUP line is printed even when a later step fails
+#   - the BACKUP line is printed even when a later step fails, and a RESTORED
+#     line follows it when a failed install moves the folder back
+#   - no mv -T: a PATH mv that rejects -T (as BSD/macOS mv does) still syncs
+#   - stale SKILLS/.vendor.XXXXXX dirs from an interrupted run are cleaned at
+#     the start of a sync; a mirror a kill left aside between the two renames
+#     is moved back first (with its GUI-local files); other names are untouched;
+#     .gitignore keeps the staging dirs out of the backup
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/skills-vendor-test.sh
 # Exit: 0 = all pass; non-zero on first failure.
@@ -202,7 +208,7 @@ for broken in mv tar find cp chmod diff; do
   if [ "$broken" = mv ]; then
     cat > "$TDIR/bin-$broken/$broken" <<'STUB'
 #!/usr/bin/env bash
-case "${2:-}" in */tree) exit 71 ;; esac
+for a in "$@"; do case "$a" in */tree) exit 71 ;; esac; done
 exec "$REAL_MV" "$@"
 STUB
   else
@@ -336,7 +342,7 @@ export REAL_RSYNC
 mkdir -p "$TDIR/bin-install"
 cat > "$TDIR/bin-install/mv" <<'STUB'
 #!/usr/bin/env bash
-case "${2:-}" in */tree) exit 71 ;; esac
+for a in "$@"; do case "$a" in */tree) exit 71 ;; esac; done
 exec "$REAL_MV" "$@"
 STUB
 cat > "$TDIR/bin-install/rsync" <<'STUB'
@@ -358,8 +364,11 @@ for engine in "${engines[@]}"; do
     || fail "engine $engine: the local folder was not restored after a failed install"
   [ "$(backups "$o")" = 0 ] || fail "engine $engine: a restored folder also left a backup"
   printf '%s\n' "$out" | grep -q 'restored' || fail "engine $engine: the restore was not reported: $out"
+  # The BACKUP line named a path that is gone now; stdout must say so too.
+  printf '%s\n' "$out" | grep -A100 '^BACKUP   gamma: ' | grep -q "^RESTORED gamma: the install failed, so the folder is back at $o/SKILLS/gamma" \
+    || fail "engine $engine: no RESTORED line after the BACKUP line: $out"
 done
-pass "a failed install moves the local folder back and exits 3"
+pass "a failed install moves the local folder back, says so after the BACKUP line, and exits 3"
 
 # A failed or interrupted rsync must not leave an owned mirror half-updated
 # (2026-10-19: rsync --delete ran in place, so a failure left a mirror that
@@ -417,5 +426,48 @@ for engine in "${engines[@]}"; do
   diff -r --no-dereference "$TDIR/late-gamma-$engine" "${line##* kept at }" >/dev/null || fail "engine $engine: the named backup does not hold the folder"
 done
 pass "the BACKUP line is printed before a later failure"
+
+# --- No mv -T: BSD and macOS mv reject it, and every swap failed there. --------
+mkdir -p "$TDIR/bin-bsdmv"
+cat > "$TDIR/bin-bsdmv/mv" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = -T ] && { echo "mv: illegal option -- T" >&2; exit 64; }; done
+exec "$REAL_MV" "$@"
+STUB
+chmod +x "$TDIR/bin-bsdmv/mv"
+for engine in "${engines[@]}"; do
+  o="$TDIR/bsd-$engine"
+  make_tree "$o"
+  out="$(PATH="$TDIR/bin-bsdmv:$PATH" SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)" || fail "engine $engine: sync with a BSD-style mv failed: $out"
+  printf '%s\n' "$out" | grep -q '^SYNCED   alpha$' || fail "engine $engine: alpha not SYNCED with a BSD-style mv: $out"
+  check_mirror "$o" "engine $engine, BSD-style mv"
+done
+pass "sync never passes mv -T: a mv that rejects it (BSD, macOS) still swaps mirrors in"
+
+# --- Stale staging dirs from an interrupted run are cleaned. -------------------
+o="$TDIR/stale"
+make_tree "$o"
+run_sv "$o" sync >/dev/null || fail "stale fixture sync failed"
+printf 'gui setup\n' > "$o/SKILLS/alpha/SETUP.md"
+mkdir -p "$o/SKILLS/.vendor.Ab12Cd/tree" "$o/SKILLS/.vendor.keep-me" "$o/SKILLS/.vendor.Zz9"
+printf 'half copy\n' > "$o/SKILLS/.vendor.Ab12Cd/tree/SKILL.md"
+# The state a kill between the two renames leaves: the mirror in previous/,
+# the new tree beside it, and SKILLS/alpha missing.
+mkdir -p "$o/SKILLS/.vendor.Qw34Er"; printf 'alpha\n' > "$o/SKILLS/.vendor.Qw34Er/name"
+mv "$o/SKILLS/alpha" "$o/SKILLS/.vendor.Qw34Er/previous"; mkdir "$o/SKILLS/.vendor.Qw34Er/tree"
+# A leftover from an earlier release, with no record of its skill.
+mkdir -p "$o/SKILLS/.vendor.Ty56Ui/previous"; printf 'orphan\n' > "$o/SKILLS/.vendor.Ty56Ui/previous/SKILL.md"
+out="$(run_sv "$o" sync 2>&1)" || fail "sync over stale staging dirs failed: $out"
+printf '%s\n' "$out" | grep -q '^RESTORED alpha: an interrupted sync had left it in .vendor.Qw34Er' || fail "the mirror a kill left aside was not restored: $out"
+[ "$(cat "$o/SKILLS/alpha/SETUP.md" 2>/dev/null)" = "gui setup" ] || fail "the restored mirror lost its GUI-local file"
+line="$(printf '%s\n' "$out" | grep '^BACKUP   .vendor.Ty56Ui: ')" || fail "an unplaceable leftover was not kept in the backup: $out"
+[ "$(cat "${line##* kept at }/SKILL.md")" = orphan ] || fail "the leftover's backup lost its content"
+[ -z "$(find "$o/SKILLS" -maxdepth 1 -name '.vendor.??????' -print -quit)" ] || fail "a stale staging dir survived: $(ls -a "$o/SKILLS")"
+[ -d "$o/SKILLS/.vendor.keep-me" ] && [ -d "$o/SKILLS/.vendor.Zz9" ] || fail "a dir not named like a staging dir was removed"
+printf '%s\n' "$out" | grep -q '^UNCHANGED alpha$' || fail "the restored mirror was not recognized as owned: $out"
+g="$TDIR/ignore-check"; git init -q "$g" && cp "$(cd "$(dirname "$SV")/../.." && pwd)/.gitignore" "$g/.gitignore"
+mkdir -p "$g/SKILLS/.vendor.Ab12Cd"; : > "$g/SKILLS/.vendor.Ab12Cd/x"
+git -C "$g" check-ignore -q SKILLS/.vendor.Ab12Cd/x || fail ".gitignore does not keep SKILLS/.vendor.*/ out of the backup"
+pass "stale staging dirs are cleaned (a mirror a kill left aside comes back first); .gitignore keeps them out of git"
 
 echo "ALL PASS"
