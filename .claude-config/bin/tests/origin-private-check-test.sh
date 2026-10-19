@@ -126,6 +126,7 @@ pass "the public template is refused in every URL form without asking gh"
 origin git@github.com:acme/ops-copy.git
 run_check "$WORK/nogh"; expect 2 "gh missing" "gh (GitHub CLI) is not installed"
 GH_STUB=error; run_check; expect 2 "gh error" "gh could not read github.com/acme/ops-copy"
+case "$ERR" in *"gh auth login"*ops.pushVerified*) ;; *) fail "gh error: the fix does not name gh sign-in and the opt-in: $ERR" ;; esac
 GH_STUB=odd; run_check; expect 2 "gh odd answer" "unexpected answer"
 GH_STUB=unauth; run_check; expect 2 "gh not signed in" "exit 4"
 pass "gh missing, failing, unauthenticated, or answering oddly exits 2"
@@ -142,6 +143,7 @@ for url in \
   origin "$url"
   no_optin
   run_check; expect 2 "unverifiable $url" "ops.pushVerified"
+  case "$ERR" in *"gh auth login"*) fail "unverifiable $url: suggests gh for a host gh cannot vouch for: $ERR" ;; esac
   gh_not_called "unverifiable $url"
   optin true
   run_check; expect 0 "opt-in $url" "private by opt-in"

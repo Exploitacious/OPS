@@ -131,12 +131,14 @@ printf '%s\n' "$GH_STUB"
     Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 2 'gh missing' 'gh (GitHub CLI) is not installed'
     $env:PATH = $withGh
     $env:GH_STUB = 'error'
-    Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 2 'gh error' 'gh could not read github.com/acme/ops-copy'
+    Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 2 'gh error' 'gh auth login'
     $env:GH_STUB = 'true'
     foreach ($url in @('https://git.example.com/acme/ops.git', 'git@git.example.com:acme/ops.git', (Join-Path $fixture 'bare.git'))) {
         Set-Origin $url
         & git -C $gateRepo config --unset ops.pushVerified
-        Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 2 "unverifiable $url" 'ops.pushVerified'
+        $r = Test-OriginPrivate -Dir $gateRepo
+        Assert-Gate $r 2 "unverifiable $url" 'ops.pushVerified'
+        if ($r.Reason.Contains('gh auth login')) { throw "unverifiable ${url}: suggests gh for a host gh cannot vouch for: $($r.Reason)" }
         & git -C $gateRepo config ops.pushVerified true
         Assert-Gate (Test-OriginPrivate -Dir $gateRepo) 0 "opt-in $url" 'private by opt-in'
     }

@@ -98,6 +98,7 @@ function Test-OriginPrivate {
 
     $oks = New-Object System.Collections.Generic.List[string]
     $unverified = New-Object System.Collections.Generic.List[string]
+    $ghBlocked = $false
     foreach ($url in $urls) {
         # Parse to host, owner/repo, and transport; credentials are dropped.
         $h = ''; $path = ''; $ssh = $false
@@ -134,23 +135,26 @@ function Test-OriginPrivate {
             return (& $result 1 "public: origin is the public OPS template (github.com/$path); create your own private copy from it (README.md, Spin-up) and point origin at that copy")
         }
         $gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $gh) { $unverified.Add("gh (GitHub CLI) is not installed, so github.com/$path cannot be checked"); continue }
+        if (-not $gh) { $ghBlocked = $true; $unverified.Add("gh (GitHub CLI) is not installed, so github.com/$path cannot be checked"); continue }
         # --hostname pins github.com: a GH_HOST for an Enterprise server must not
         # answer for a github.com URL.
         $prevPrompt = $env:GH_PROMPT_DISABLED
         $env:GH_PROMPT_DISABLED = '1'
         try { $answer = "$(& $gh.Source api --hostname github.com "repos/$path" --jq .private 2>$null)".Trim(); $ghRc = $LASTEXITCODE }
         finally { if ($null -eq $prevPrompt) { Remove-Item Env:\GH_PROMPT_DISABLED -ErrorAction SilentlyContinue } else { $env:GH_PROMPT_DISABLED = $prevPrompt } }
-        if ($ghRc -ne 0) { $unverified.Add("gh could not read github.com/$path (exit ${ghRc}: not signed in, no access, or offline)"); continue }
+        if ($ghRc -ne 0) { $ghBlocked = $true; $unverified.Add("gh could not read github.com/$path (exit ${ghRc}: not signed in, no access, or offline)"); continue }
         switch ($answer) {
             'true'  { $oks.Add("github.com/$path is private") }
             'false' { return (& $result 1 "public: github.com/$path is public; make it private (gh repo edit $path --visibility private --accept-visibility-change-consequences) or point origin at a private copy") }
-            default { $unverified.Add("gh gave an unexpected answer for github.com/$path") }
+            default { $ghBlocked = $true; $unverified.Add("gh gave an unexpected answer for github.com/$path") }
         }
     }
     if ($unverified.Count) {
         if ($optIn) { return (& $result 0 ("private by opt-in (ops.pushVerified=true): " + ($unverified -join '; '))) }
-        return (& $result 2 ("unverified: " + ($unverified -join '; ') + "; run gh auth login, or confirm the repo is private and run: git -C `"$Dir`" config ops.pushVerified true"))
+        # Suggest gh only when gh was the blocker: it cannot vouch for another host.
+        $fix = "confirm the repo is private, then run: git -C `"$Dir`" config ops.pushVerified true"
+        if ($ghBlocked) { $fix = "sign gh in to an account that can read it (install gh, then gh auth login), or $fix" }
+        return (& $result 2 ("unverified: " + ($unverified -join '; ') + "; $fix"))
     }
     return (& $result 0 ("private: " + ($oks -join '; ')))
 }

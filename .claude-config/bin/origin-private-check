@@ -136,7 +136,7 @@ check_url() {
     return
   fi
   if ! command -v gh >/dev/null 2>&1; then
-    U_RC=2; U_WHY="gh (GitHub CLI) is not installed, so github.com/$P_PATH cannot be checked"; return
+    U_RC=2; GH_BLOCKED=1; U_WHY="gh (GitHub CLI) is not installed, so github.com/$P_PATH cannot be checked"; return
   fi
   # --hostname pins github.com: a GH_HOST pointing at an Enterprise server
   # must not answer for a github.com URL.
@@ -145,13 +145,13 @@ check_url() {
     gh api --hostname github.com "repos/$P_PATH" --jq .private 2>/dev/null)" || rc=$?
   out="${out%$'\r'}"
   if (( rc != 0 )); then
-    U_RC=2; U_WHY="gh could not read github.com/$P_PATH (exit $rc: not signed in, no access, or offline)"; return
+    U_RC=2; GH_BLOCKED=1; U_WHY="gh could not read github.com/$P_PATH (exit $rc: not signed in, no access, or offline)"; return
   fi
   case "$out" in
     true)  U_RC=0; U_WHY="github.com/$P_PATH is private" ;;
     false) U_RC=1
            U_WHY="github.com/$P_PATH is public; make it private (gh repo edit $P_PATH --visibility private --accept-visibility-change-consequences) or point origin at a private copy" ;;
-    *)     U_RC=2; U_WHY="gh gave an unexpected answer for github.com/$P_PATH" ;;
+    *)     U_RC=2; GH_BLOCKED=1; U_WHY="gh gave an unexpected answer for github.com/$P_PATH" ;;
   esac
 }
 
@@ -169,6 +169,7 @@ optin=0
 [[ "$(git -C "$DIR" config --local --bool --get ops.pushVerified 2>/dev/null)" == true ]] && optin=1
 
 oks=() unverified=()
+GH_BLOCKED=0
 while IFS= read -r url; do
   url="${url%$'\r'}"
   [[ -n "$url" ]] || continue
@@ -187,7 +188,10 @@ if (( ${#unverified[@]} )); then
     say "private by opt-in (ops.pushVerified=true): $(joined "${unverified[@]}")"
     exit 0
   fi
-  say "unverified: $(joined "${unverified[@]}"); run gh auth login, or confirm the repo is private and run: git -C \"$DIR\" config ops.pushVerified true"
+  # Suggest gh only when gh was the blocker: it cannot vouch for another host.
+  fix="confirm the repo is private, then run: git -C \"$DIR\" config ops.pushVerified true"
+  (( GH_BLOCKED )) && fix="sign gh in to an account that can read it (install gh, then gh auth login), or $fix"
+  say "unverified: $(joined "${unverified[@]}"); $fix"
   exit 2
 fi
 say "private: $(joined "${oks[@]}")"

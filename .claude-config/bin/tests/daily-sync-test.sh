@@ -97,7 +97,8 @@ printf 'third note\n' > "$OPS/note3.md"
 GH_ANSWER=error run_sync
 grep -q 'OPS: WARN push skipped, commit kept locally: origin-private-check: unverified: gh could not read github.com/acme/ops-copy' "$LOG" \
   || fail "unverifiable origin skip not logged"
-grep -q 'config ops.pushVerified true' "$LOG" || fail "the opt-in fix is not in the log"
+grep -q 'gh auth login), or confirm the repo is private, then run: git -C ".*" config ops.pushVerified true' "$LOG" \
+  || fail "the gh sign-in and opt-in fix is not in the log"
 [ "$(remote_head)" = "$before" ] || fail "pushed to an unverified origin"
 pass "unverifiable origin: commit kept locally, the log names gh auth and the opt-in"
 
