@@ -173,9 +173,12 @@ mount_skills() {
       msg_bad "Could not clone $SKILLS_SOURCE_URL (network?). Re-run deploy to retry."
       return 1
     fi
-    # -T prevents copying into a concurrently created directory; -n preserves
-    # it. GNU mv can return zero when -n skips, so also require the temp gone.
-    if ! mv -Tn -- "$clone_tmp" "$SKILLS_SOURCE_DIR" || [[ -e "$clone_tmp" ]]; then
+    # Rename onto a name that does not exist: plain mv does that identically on
+    # GNU and BSD/macOS (mv -T is GNU-only and broke every macOS deploy). A
+    # source that appeared during cloning is refused, never merged into; the
+    # temp must be gone afterward, or the rename did not happen.
+    if [[ -e "$SKILLS_SOURCE_DIR" || -L "$SKILLS_SOURCE_DIR" ]] \
+       || ! mv -- "$clone_tmp" "$SKILLS_SOURCE_DIR" || [[ -e "$clone_tmp" ]]; then
       rm -rf -- "$clone_tmp"
       msg_bad "Skill source appeared during cloning: left $SKILLS_SOURCE_DIR unchanged. Re-run deploy."
       return 1

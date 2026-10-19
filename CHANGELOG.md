@@ -309,6 +309,12 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   folder went back to its place, the earlier `BACKUP` line still named a
   backup path that no longer existed. A `RESTORED` line on stdout now says
   the folder is back where it was. New case.
+- **macOS deploy and a steadier skill sync.** Deploy publishes the cloned
+  skill source with a plain rename onto a free name, not GNU-only `mv -Tn`,
+  which failed every macOS deploy before the skills even synced. The rsync
+  engine ignores time-only itemize lines when deciding UNCHANGED, so a mirror
+  whose directory time moved no longer flips between SYNCED and UNCHANGED; a
+  mode or content change still syncs.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

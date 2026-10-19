@@ -345,8 +345,8 @@ function Init-OneEncoded {
         }
     }
 
-    # --- keep the pool in git (see memory-init: an empty pool vanished after
-    # the daily backup's stash, leaving the memory link dangling) ------------
+    # --- keep the pool in git (see memory-init: git does not track an empty
+    # pool, so it vanished and left the memory link dangling) ----------------
     if (-not $DryRun -and (Test-Path -LiteralPath $source)) {
         if (-not (Test-Path -LiteralPath $target)) {
             New-Item -ItemType Directory -Force -Path $target | Out-Null

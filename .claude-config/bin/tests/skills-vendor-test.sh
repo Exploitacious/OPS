@@ -465,6 +465,25 @@ line="$(printf '%s\n' "$out" | grep '^BACKUP   .vendor.Ty56Ui: ')" || fail "an u
 [ -z "$(find "$o/SKILLS" -maxdepth 1 -name '.vendor.??????' -print -quit)" ] || fail "a stale staging dir survived: $(ls -a "$o/SKILLS")"
 [ -d "$o/SKILLS/.vendor.keep-me" ] && [ -d "$o/SKILLS/.vendor.Zz9" ] || fail "a dir not named like a staging dir was removed"
 printf '%s\n' "$out" | grep -q '^UNCHANGED alpha$' || fail "the restored mirror was not recognized as owned: $out"
+# --- A time-only difference is not a change (2026-10-19 flake: rsync -i also
+# itemizes ".d..t......", so the result flipped with the clock). A mode change
+# still syncs. Both engines.
+for eng in "" 1; do
+  o="$TDIR/timeonly-${eng:-rsync}"
+  make_tree "$o"
+  SKILLS_VENDOR_NO_RSYNC="$eng" run_sv "$o" sync >/dev/null || fail "time-only fixture sync failed"
+  touch -d '2001-01-01 00:00:00' "$o/SKILLS/alpha" "$o/SKILLS/alpha/refs"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$eng" run_sv "$o" sync 2>&1)" || fail "time-only resync failed: $out"
+  printf '%s\n' "$out" | grep -q '^UNCHANGED alpha$' || fail "engine ${eng:-rsync}: a time-only difference read as a change: $out"
+  chmod +x "$o/PROJECTS/src/skills/alpha/refs/a.md"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$eng" run_sv "$o" sync 2>&1)" || fail "mode resync failed: $out"
+  if [ -z "$eng" ]; then
+    printf '%s\n' "$out" | grep -q '^SYNCED   alpha$' || fail "rsync engine: a mode change upstream was not synced: $out"
+    [ -x "$o/SKILLS/alpha/refs/a.md" ] || fail "rsync engine: the mirror did not take the upstream mode"
+  fi
+done
+pass "a time-only difference is not a change; a mode change upstream still syncs (rsync)"
+
 g="$TDIR/ignore-check"; git init -q "$g" && cp "$(cd "$(dirname "$SV")/../.." && pwd)/.gitignore" "$g/.gitignore"
 mkdir -p "$g/SKILLS/.vendor.Ab12Cd"; : > "$g/SKILLS/.vendor.Ab12Cd/x"
 git -C "$g" check-ignore -q SKILLS/.vendor.Ab12Cd/x || fail ".gitignore does not keep SKILLS/.vendor.*/ out of the backup"

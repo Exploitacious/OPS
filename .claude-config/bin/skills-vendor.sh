@@ -197,7 +197,7 @@ gui_parent_dirs() {
 #   tar: the source minus the excludes, plus <dst>'s own GUI-local files, and
 #   a content compare against <dst>.
 stage_mirror() {
-  local src="$1" dst="$2" tmp rel rc out
+  local src="$1" dst="$2" tmp rel rc out content
   tmp="$(mktemp -d "$SKILLS/.vendor.XXXXXX")" || return 1
   # The skill this staging dir belongs to, so a later run can put back a
   # mirror a kill left in $tmp/previous (clean_stale).
@@ -219,7 +219,14 @@ stage_mirror() {
       [ -n "$out" ] && echo "$out" >&2
       rm -rf "$tmp"; return 1
     fi
-    if [ -d "$dst" ] && [ -z "$out" ]; then
+    # -i also itemizes time-only updates (".d..t......", ".f..t......"): a
+    # mirror whose directory mtime moved (a GUI-local file written into it, a
+    # restore) read as changed or not depending on which second the steps fell
+    # in, so the sync result flipped between SYNCED and UNCHANGED (seen
+    # 2026-10-19 as a 2-in-12 test flake). Only those lines are ignored; a mode,
+    # owner or content change still counts.
+    content="$(printf '%s\n' "$out" | grep -v -E '^\.[a-zA-Z]\.\.[tT]\.{6}( |$)' | grep -v '^$' || true)"
+    if [ -d "$dst" ] && [ -z "$content" ]; then
       rm -rf "$tmp" || return 1; echo same; return 0
     fi
   else

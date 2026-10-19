@@ -125,8 +125,9 @@ no_identity() {
 git -C "$OPS_DIR" reset -q -- "$POOL/no-ident.md"; rm -f "$POOL/no-ident.md"
 echo "PASS: a failed commit shows git's own stderr, not a guess"
 
-# An empty pool stays in git through the daily backup's stash, and a pool an
-# earlier backup removed is recreated (2026-10-19: git stash -u dropped the
+# An empty pool stays in git (a stash -u / pop round trip is the probe: git
+# drops untracked empty directories), and a removed pool is recreated
+# (2026-10-19: the old stash-based backup dropped the
 # empty pool directory and left the memory link dangling).
 EMPTYH="$WORK/empty"
 (

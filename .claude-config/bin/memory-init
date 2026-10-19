@@ -303,12 +303,11 @@ init_one_encoded() {
   fi
 
   # --- keep the pool in git ---
-  # A new pool is an empty directory, which git does not track. The daily
-  # backup's `git stash push -u` drops untracked empty directories and `stash
-  # pop` does not bring them back, so the memory symlink dangled after the first
-  # backup (seen 2026-10-19 on a fresh Debian install). A placeholder file keeps
-  # the pool in the tree, and recreating a missing target heals a pool an
-  # earlier backup already removed.
+  # A new pool is an empty directory, which git does not track: a clone never
+  # gets it, and the old stash-based daily backup dropped it from the working
+  # tree, leaving the memory symlink dangling (seen 2026-10-19 on a fresh
+  # Debian install). A placeholder file keeps the pool in the tree, and
+  # recreating a missing target heals a pool an earlier backup already removed.
   if (( ! DRY )) && [[ -L "$SOURCE" ]]; then
     if [[ ! -d "$TARGET" ]]; then
       mkdir -p "$TARGET" && log "[$ENCODED] pool directory was missing: recreated"

@@ -24,6 +24,16 @@ msg_warn() { :; }
 msg_bad() { :; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 eval "$(awk '/^mount_skills\(\) \{/ {p=1} p {print} p && /^}/ {exit}' "$DEPLOY")"
+# BSD/macOS mv has no -T. Every case below runs with an mv that rejects it,
+# so a GNU-only publish step fails here instead of on a Mac (2026-10-19).
+mv() {
+  local a
+  for a in "$@"; do
+    [[ "$a" == -- ]] && break
+    [[ "$a" == -*T* ]] && { printf 'mv: illegal option -- T\n' >&2; return 1; }
+  done
+  command mv "$@"
+}
 GIT_MODE=fail
 git() {
   printf '%s\n' "$*" >> "$LOG"
@@ -65,4 +75,4 @@ if mount_skills; then fail 'concurrent destination creation reported success'; f
 [[ "$(cat "$SKILLS_SOURCE_DIR/sentinel")" == 'user data' ]] || fail 'publication overwrote a concurrent destination'
 [[ ! -e "$SKILLS_SOURCE_DIR/complete" ]] || fail 'publication copied into a concurrent destination'
 [[ -z "$(find "$WORK" -name 'agent-skills.clone.*' -print -quit)" ]] || fail 'publication conflict leaked a temporary tree'
-printf 'PASS: clone failure, retry, redeploy, incomplete clone and publication collision\n'
+printf 'PASS: clone failure, retry, redeploy, incomplete clone and publication collision (BSD-style mv)\n'

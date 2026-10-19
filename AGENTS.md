@@ -38,8 +38,9 @@ current task allows.
   yours, push and reconcile with a merge, never a rebase over another
   session's commits.
 - This copy pushes only to its own private origin. The git-guard hook runs
-  `.claude-config/bin/origin-private-check` on every agent `git push` here and
-  blocks a push it cannot verify, or one to another remote.
+  `.claude-config/bin/origin-private-check` on the agent pushes it can parse
+  here and blocks one it cannot verify, or one to another remote. It is a
+  seatbelt, not a sandbox: DEPLOYMENT.md "Push gate" lists its limits.
 - Contributions to the public template go by PR and follow
   [CONTRIBUTING.md](CONTRIBUTING.md): port the mechanic, never paste the file.
 
