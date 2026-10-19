@@ -171,25 +171,38 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install bubblewrap, zsh and rsync, and prove bubblewrap can build a sandbox
+      - name: Install bubblewrap, zsh, rsync and a current git, and prove bubblewrap can build a sandbox
         # sandbox-run needs a root-owned bwrap. One root-wrapper case runs in zsh
         # (it prints SKIP without it), and the skill-mount tests exercise the
-        # rsync engine as well as the tar fallback. Ubuntu 24.04 can restrict
-        # unprivileged user namespaces through AppArmor; if the probe fails,
-        # lift that restriction for this runner and probe again. The probe uses
-        # the namespaces and mounts sandbox-run itself asks for (a new PID and
-        # network namespace, /dev and a fresh /proc). The last probe is not
-        # optional: without a working sandbox the destructive-tool suites cannot
-        # run, and skipping them would hide a broken gate.
+        # rsync engine as well as the tar fallback. branch-gc reads `git rev-parse
+        # --show-ref-format` (git 2.45) and skips every repository without it;
+        # Ubuntu 24.04's own git is 2.43, so an older git is upgraded from the
+        # git-core PPA (the runner image normally ships a newer one already).
+        # Ubuntu 24.04 can restrict unprivileged user namespaces through
+        # AppArmor; if the probe fails, lift that restriction for this runner and
+        # probe again. The probe uses the namespaces and mounts sandbox-run itself
+        # asks for (a new PID and network namespace, /dev and a fresh /proc). The
+        # last probe is not optional: without a working sandbox the
+        # destructive-tool suites cannot run, and skipping them would hide a
+        # broken gate.
         run: |
           need=()
           for pkg in bubblewrap:bwrap zsh:zsh rsync:rsync; do
             command -v "${pkg#*:}" >/dev/null 2>&1 || need+=("${pkg%%:*}")
           done
-          if [ "${#need[@]}" -gt 0 ]; then
+          git_ok() { [ "$(printf '%s\n2.45\n' "$(git --version | awk '{print $3}')" | sort -V | head -n 1)" = 2.45 ]; }
+          if [ "${#need[@]}" -gt 0 ] || ! git_ok; then
             sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends "${need[@]}"
+            [ "${#need[@]}" -eq 0 ] || sudo apt-get install -y --no-install-recommends "${need[@]}"
           fi
+          if ! git_ok; then
+            sudo apt-get install -y --no-install-recommends software-properties-common
+            sudo add-apt-repository -y ppa:git-core/ppa
+            sudo apt-get update -qq
+            sudo apt-get install -y git
+          fi
+          git --version
+          git_ok || { echo "::error::git 2.45 or newer is required (branch-gc reads --show-ref-format)"; exit 1; }
           bwrap --version
           probe() { bwrap --die-with-parent --unshare-pid --unshare-net --new-session --ro-bind / / --dev /dev --proc /proc true; }
           if ! probe 2>/dev/null; then
