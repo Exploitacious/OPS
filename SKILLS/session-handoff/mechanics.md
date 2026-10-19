@@ -67,7 +67,7 @@ project_handoff: <repo-relative path to SESSION_HANDOFF.md, or null>
 tasks. Skip what is durable elsewhere.>
 
 ## Reading order for pickup
-1. OPS global doctrine: `CONTEXT/operating-doctrine.md` (15 principles) plus `working-preferences.md`, the standing layer, re-ground here first
+1. OPS global doctrine: `CONTEXT/how-i-work.md` (15 principles plus the standing orders; `core.md` is already loaded), the standing layer, re-ground here first
 2. this baton
 3. <project SESSION_HANDOFF.md / specific files / specific memory>
 4. ...
