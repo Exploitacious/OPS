@@ -179,6 +179,10 @@ deleter on `/` and `$HOME` and wiped most of a home directory. A throwaway
   PR and add it to `SKILLS/THIRD_PARTY_NOTICES.md` with its license, in the
   same change.
 - CI (`.github/workflows/gate.yml`) must be green before a merge. A failing job
-  is a defect in the change, or in the gate; do not merge around it.
+  is a defect in the change, or in the gate; do not merge around it. The jobs
+  run only on the template repository, so a push to your fork starts nothing:
+  the run begins when you open the PR (GitHub may hold a first-time
+  contributor's run until a maintainer approves it), which is why the checks
+  above come first.
 - This is a no-SLA repo (see README § Posture). PRs are welcome; response
   time isn't promised.
