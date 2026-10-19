@@ -273,6 +273,20 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   into place, so a local symlink is replaced rather than written through,
   and the scan can update itself while it runs. A local path that cannot be
   hashed is a CONFLICT, never NEW. New case.
+- **The daily backup never moves the Operator's work.** `daily-sync.sh`
+  stashed the tree, pulled, then popped: a run killed between stash and pop
+  (a cron timeout, a reboot) left the work in a stash that later runs never
+  mentioned, and stash and pop dropped empty directories and reset file
+  modes on every dirty day. It now commits the day's work where it stands,
+  then runs `git pull --rebase --no-autostash`; a failed pull aborts the
+  rebase so the local commit and the tree stay exactly as they were, and is
+  logged as an ERROR. A rebase over a remote that moved re-creates the day's
+  files at default modes (git keeps only the exec bit), so their permission
+  bits are recorded before the pull and put back after it. A rebase left in
+  progress is reported, never committed on top of. New cases in
+  `daily-sync-test.sh`: the tree byte for byte (modes and empty directories)
+  after an unreachable origin, a conflicting rebase and a killed run, no
+  stash ever created, and modes kept through a rebase.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

@@ -13,9 +13,15 @@
 #   - private origin, new changes: committed and pushed
 #   - unverifiable origin: skipped with the opt-in fix in the log
 #   - an empty or truncated gate (both exit 0) is not a verdict: nothing pushed
-#   - a failed pull (unreachable origin, or a rebase that conflicts) leaves the
-#     tree exactly as it was: tracked edits, staged changes, untracked files,
-#     HEAD, and no leftover stash or rebase
+#   - the day's work is committed before the pull, and the tree is never
+#     moved: a failed pull (unreachable origin, or a rebase that conflicts)
+#     leaves every file, mode and empty directory exactly as it was, the work
+#     in the day's commit, and no rebase in progress; so does a run killed
+#     mid-pull; a later run pushes the held commit
+#   - no run ever creates a stash (a git wrapper on PATH records every call)
+#   - empty directories and file modes survive a dirty-day run, including one
+#     whose rebase replays the day's commit over a remote that moved
+#   - a rebase left in progress is reported, not committed on top of
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/daily-sync-test.sh
 set -uo pipefail
@@ -41,13 +47,21 @@ printf '%s\n' "$GH_ANSWER"
 STUB
 cat > "$WORK/fake-ssh" <<'STUB'
 #!/usr/bin/env bash
+[ -z "${SLOW_SSH:-}" ] || sleep "$SLOW_SSH"   # a slow pull, for the killed-run case
 case "${*: -1}" in
   git-upload-pack*) exec git upload-pack "$FAKE_REMOTE" ;;
   git-receive-pack*) echo receive-pack >> "$PUSH_LOG"; exec git receive-pack "$FAKE_REMOTE" ;;
 esac
 exit 1
 STUB
-chmod +x "$WORK/bin/gh" "$WORK/fake-ssh"
+# Every git call passes through this wrapper, which records any stash.
+REAL_GIT="$(command -v git)"
+cat > "$WORK/bin/git" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = stash ] && printf '%s\n' "\$*" >> "$WORK/stash-calls"; done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$WORK/bin/gh" "$WORK/fake-ssh" "$WORK/bin/git"
 export PATH="$WORK/bin:$PATH" GIT_SSH_COMMAND="$WORK/fake-ssh" GIT_SSH_VARIANT=ssh
 
 # A minimal copy: the gate where daily-sync looks for it, the sync.log ignore
@@ -158,45 +172,107 @@ pass "an empty or truncated gate exits 0 but is not a verdict: commit kept local
 
 # --- A failed pull leaves the tree exactly as it was ----------------------------
 # (2026-10-19: a failed `git pull --rebase` returned with the work still in the
-# stash, so uncommitted and untracked files vanished from the tree, and later
-# runs saw a clean tree and never restored them.)
+# stash, so uncommitted and untracked files vanished from the tree; a run
+# killed between stash and pop stranded it the same way; and stash/pop dropped
+# empty directories and reset file modes on every dirty day. The day's work is
+# now committed first, and the tree is never moved.)
+# tree_state: every path under the copy (but .git and the log) with its type,
+# permission bits, and content hash: the working tree byte for byte.
 tree_state() {
-    (cd "$OPS" && git rev-parse HEAD && git status --porcelain=v1 -uall && git diff && git diff --cached \
-      && git stash list && find . -path ./.git -prune -o -path ./.claude-config/backup/sync.log -prune -o -type f -print0 \
-      | LC_ALL=C sort -z | xargs -0 sha256sum)
+    (cd "$OPS" && find . -path ./.git -prune -o -path ./.claude-config/backup/sync.log -prune -o -print0 \
+      | LC_ALL=C sort -z | while IFS= read -r -d '' p; do
+          if [ -L "$p" ]; then printf 'l %s -> %s\n' "$p" "$(readlink "$p")"
+          elif [ -d "$p" ]; then printf 'd %s %s\n' "$(stat -c %a "$p")" "$p"
+          else printf 'f %s %s %s\n' "$(stat -c %a "$p")" "$(sha256sum < "$p" | cut -c1-16)" "$p"; fi
+        done)
 }
 dirty_tree() {
-    printf 'edited %s\n' "$1" >> "$OPS/note.md"
-    printf 'untracked %s\n' "$1" > "$OPS/untracked-$1.md"
+    printf 'edited %s\n' "$1" >> "$OPS/note.md"; chmod 600 "$OPS/note.md"
+    printf 'untracked %s\n' "$1" > "$OPS/untracked-$1.md"; chmod 600 "$OPS/untracked-$1.md"
     printf 'staged %s\n' "$1" > "$OPS/staged-$1.md"; git -C "$OPS" add "staged-$1.md"
     printf 'staged then edited %s\n' "$1" >> "$OPS/note2.md"; git -C "$OPS" add note2.md
     printf 'unstaged on top %s\n' "$1" >> "$OPS/note2.md"
+    mkdir -p "$OPS/DELIVERABLES/client-$1/drafts" "$OPS/empty-$1"
+}
+no_stash() {
+    # The real git, so this check is not itself a recorded stash call.
+    [ -z "$("$REAL_GIT" -C "$OPS" stash list)" ] && [ ! -s "$WORK/stash-calls" ] \
+      || fail "$1: a stash was created: $("$REAL_GIT" -C "$OPS" stash list) $(cat "$WORK/stash-calls" 2>/dev/null)"
 }
 dirty_tree offline
-before_state="$(tree_state)"; before="$(remote_head)"
+before_state="$(tree_state)"; before="$(remote_head)"; head_before="$(local_head)"
 FAKE_REMOTE="$WORK/unreachable.git" GH_ANSWER=true run_sync
-grep -q 'OPS: ERROR pull --rebase failed; nothing committed or pushed' "$LOG" || fail "unreachable origin: the failed pull was not logged as an error"
-grep -q 'local changes restored to the working tree' "$LOG" || fail "unreachable origin: the restore was not logged"
+grep -q "OPS: ERROR pull --rebase failed; the day's commit is kept locally, nothing pushed" "$LOG" || fail "unreachable origin: the failed pull was not logged as an error"
 [ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "unreachable origin: the tree changed"; }
+[ "$(git -C "$OPS" rev-parse HEAD^)" = "$head_before" ] && [ -z "$(git -C "$OPS" status --porcelain)" ] \
+  && git -C "$OPS" cat-file -e HEAD:untracked-offline.md || fail "unreachable origin: the day's work is not in the day's commit"
 [ "$(remote_head)" = "$before" ] || fail "unreachable origin: something was pushed"
+no_stash "unreachable origin"
 grep -q 'projects stage ran (--auto)' "$LOG" || fail "unreachable origin: the project stage did not run"
-pass "unreachable origin: the tree is exactly as before (edits, index, untracked), no stash left, nothing committed"
+pass "unreachable origin: the tree is byte for byte as before (modes, empty dirs), the work is in the day's commit, no stash"
 
-# A pull whose rebase conflicts (a held local commit and a remote commit add the
+# A pull whose rebase conflicts (the day's commit and a remote commit add the
 # same file) is aborted, so HEAD and the tree come back too.
-git -C "$OPS" stash push -q -u -m park || fail "fixture: could not park the dirty tree"
-printf 'local side\n' > "$OPS/clash.md"; git -C "$OPS" add clash.md; git -C "$OPS" commit -q -m "local clash" || fail "fixture: local commit"
-git -C "$OPS" stash pop -q --index || fail "fixture: could not unpark the dirty tree"
+dirty_tree conflict
+printf 'local side\n' > "$OPS/clash.md"
 git clone -q "$FAKE_REMOTE" "$WORK/other" || fail "fixture: second clone"
 printf 'remote side\n' > "$WORK/other/clash.md"
 git -C "$WORK/other" add clash.md && git -C "$WORK/other" commit -q -m "remote clash" && git -C "$WORK/other" push -q origin HEAD:main \
   || fail "fixture: could not advance the remote"
-before_state="$(tree_state)"; before="$(remote_head)"
+before_state="$(tree_state)"; before="$(remote_head)"; head_before="$(local_head)"
 GH_ANSWER=true run_sync
-grep -q 'OPS: ERROR pull --rebase failed; nothing committed or pushed' "$LOG" || fail "conflicting rebase: the failed pull was not logged"
+grep -q "OPS: ERROR pull --rebase failed; the day's commit is kept locally, nothing pushed" "$LOG" || fail "conflicting rebase: the failed pull was not logged"
 [ ! -d "$OPS/.git/rebase-merge" ] && [ ! -d "$OPS/.git/rebase-apply" ] || fail "conflicting rebase: a rebase was left in progress"
-[ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "conflicting rebase: the tree or HEAD changed"; }
+[ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "conflicting rebase: the tree changed"; }
+[ "$(git -C "$OPS" rev-parse HEAD^)" = "$head_before" ] && [ "$(git -C "$OPS" rev-parse --abbrev-ref HEAD)" = main ] \
+  || fail "conflicting rebase: HEAD is not the day's commit on main"
 [ "$(remote_head)" = "$before" ] || fail "conflicting rebase: something was pushed"
-pass "conflicting rebase: aborted, and the tree and HEAD are exactly as before"
+no_stash "conflicting rebase"
+pass "conflicting rebase: aborted; the tree is byte for byte as before and HEAD is the day's commit, no stash"
+# Settle the clash by hand, keeping the remote's side, so later cases start clean.
+git -C "$OPS" pull -q --rebase -X ours origin main >/dev/null 2>&1 || fail "fixture: settle the clash"
+GH_ANSWER=true run_sync
+[ "$(remote_head)" = "$(local_head)" ] || fail "after the clash: the held commits were not pushed"
+pass "after a failed pull, the next good run rebases and pushes every held commit"
+
+# --- A dirty day keeps empty directories and modes, even through a rebase -------
+for remote_moved in no yes; do
+    dirty_tree "day-$remote_moved"
+    if [ "$remote_moved" = yes ]; then
+        git -C "$WORK/other" pull -q --rebase origin main && printf 'from another machine\n' > "$WORK/other/elsewhere-$RANDOM.md" \
+          && git -C "$WORK/other" add -A && git -C "$WORK/other" commit -q -m elsewhere && git -C "$WORK/other" push -q origin HEAD:main \
+          || fail "fixture: could not advance the remote"
+    fi
+    GH_ANSWER=true run_sync
+    [ "$(remote_head)" = "$(local_head)" ] || fail "dirty day (remote moved: $remote_moved): not pushed"
+    [ -d "$OPS/DELIVERABLES/client-day-$remote_moved/drafts" ] && [ -d "$OPS/empty-day-$remote_moved" ] \
+      || fail "dirty day (remote moved: $remote_moved): an empty directory was removed"
+    for f in note.md "untracked-day-$remote_moved.md"; do
+        [ "$(stat -c %a "$OPS/$f")" = 600 ] || fail "dirty day (remote moved: $remote_moved): $f is $(stat -c %a "$OPS/$f"), not 600"
+    done
+    no_stash "dirty day (remote moved: $remote_moved)"
+done
+pass "a dirty day keeps empty directories and file modes, also when the rebase replays over a moved remote"
+
+# --- A run killed mid-pull leaves the work in place ------------------------------
+dirty_tree killed
+before_state="$(tree_state)"
+rm -f "$LOG"
+SLOW_SSH=20 GH_ANSWER=true timeout -s TERM 3 bash "$SYNC"; rc=$?
+[ "$rc" = 124 ] || fail "killed run: the fixture did not kill the run (rc=$rc)"
+[ "$(tree_state)" = "$before_state" ] || { diff <(printf '%s\n' "$before_state") <(tree_state) >&2; fail "killed run: the tree changed"; }
+git -C "$OPS" cat-file -e HEAD:untracked-killed.md || fail "killed run: the work is not in the day's commit"
+no_stash "killed run"
+GH_ANSWER=true run_sync
+[ "$(remote_head)" = "$(local_head)" ] && git -C "$FAKE_REMOTE" cat-file -e main:untracked-killed.md || fail "killed run: the next run did not push the work"
+pass "a run killed mid-pull leaves the tree as it was, and the next run pushes the work"
+
+# --- A rebase left in progress is reported, never committed on top of -----------
+mkdir -p "$OPS/.git/rebase-merge"; printf 'more\n' >> "$OPS/note.md"; head_before="$(local_head)"
+GH_ANSWER=true run_sync
+grep -q 'OPS: ERROR a rebase or merge is in progress; nothing committed or pushed' "$LOG" || fail "rebase in progress: not reported"
+[ "$(local_head)" = "$head_before" ] || fail "rebase in progress: a commit was made"
+rmdir "$OPS/.git/rebase-merge"
+pass "a rebase left in progress is reported and nothing is committed"
 
 echo "ALL PASS"

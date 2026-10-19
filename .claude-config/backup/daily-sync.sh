@@ -6,10 +6,13 @@
 # Design:
 #   - No `set -e` at top level: one repo's failure must NOT abort the rest.
 #     Each stage is a function that logs and returns; both stages always run.
-#   - OPS stage order: stash -> pull -> unstash -> commit -> push. The old
-#     `git pull --rebase` before staging aborted on a dirty tree, i.e. the
-#     backup failed precisely when there was work to back up. A failed pull
-#     unstashes at once, so the tree is never left without the Operator's work.
+#   - OPS stage order: commit -> pull --rebase -> push. The day's work is
+#     committed where it stands, so the tree is never moved: a pull that fails
+#     (offline, a conflict) is aborted and leaves the local commit and the
+#     tree exactly as they were, and a run killed at any point leaves the work
+#     in the tree or in a commit. The earlier stash -> pull -> pop order
+#     stranded the work in a stash when a run was killed between the two, and
+#     stash/pop dropped empty directories and reset file modes every day.
 #   - Project stage delegates to PROJECTS/sync-check.sh --auto: it walks every
 #     repo, fast-forwards / rebases the clean ones, and SKIPS dirty repos
 #     (never touches uncommitted work). Pull-only: it never pushes projects.
@@ -76,15 +79,56 @@ push_ops() {
     fi
 }
 
-# git needs a usable identity to stash or commit; a fresh install may have none.
+# git needs a usable identity to commit; a fresh install may have none.
 identity_hint() {
     git var GIT_COMMITTER_IDENT >/dev/null 2>&1 && return 0
     log "     no git identity: run git config --global user.name \"Your Name\" and git config --global user.email <your-email>"
 }
 
+# git records only a file's exec bit. A rebase over a remote that moved checks
+# the remote out first and then replays the local commits, so the files those
+# commits touch are re-created at the default mode: a chmod 600 note came back
+# 644. save_modes records their permission bits before the pull, and
+# restore_modes puts them back after it, whether it succeeded or was aborted;
+# an exec bit the pull itself changed is kept.
+MODE_PATHS=() MODE_BITS=()
+file_mode() { stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' -- "$1" 2>/dev/null; }
+save_modes() {
+    local upstream="$1" p m
+    MODE_PATHS=() MODE_BITS=()
+    while IFS= read -r -d '' p; do
+        [ -f "$p" ] && [ ! -L "$p" ] || continue
+        m="$(file_mode "$p")" && [ -n "$m" ] || continue
+        MODE_PATHS+=("$p"); MODE_BITS+=("$m")
+    done < <(if git rev-parse -q --verify "$upstream" >/dev/null; then
+                 git diff --name-only -z "$upstream" HEAD
+             else
+                 git ls-files -z
+             fi)
+}
+restore_modes() {
+    local i p m now
+    for ((i = 0; i < ${#MODE_PATHS[@]}; i++)); do
+        p="${MODE_PATHS[$i]}"; m="${MODE_BITS[$i]}"
+        [ -f "$p" ] && [ ! -L "$p" ] || continue
+        now="$(file_mode "$p")" && [ -n "$now" ] && [ "$now" != "$m" ] || continue
+        chmod "$(printf '%o' $(( (8#$m & ~8#111) | (8#$now & 8#111) )))" -- "$p" \
+            || log "OPS: WARN could not restore the mode of $p (was $m)"
+    done
+}
+
 # --- Stage 1: back up the OPS repo itself ----------------------------------
 backup_ops() {
     cd "$OPS_DIR" 2>/dev/null || { log "OPS: ERROR cannot cd to $OPS_DIR"; return 1; }
+
+    # A run killed mid-pull can leave a rebase in progress; committing on top
+    # of it would land on a detached HEAD. The work is safe in the commit the
+    # rebase was replaying; say so and leave it for the Operator.
+    if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ] \
+       || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+        log "OPS: ERROR a rebase or merge is in progress; nothing committed or pushed. Finish or abort it: cd $OPS_DIR && git status"
+        return 1
+    fi
 
     # Detect the checked-out branch rather than hardcoding one: a repo created
     # from the public template can default to "main" or whatever GitHub set at
@@ -97,76 +141,56 @@ backup_ops() {
         return 1
     fi
 
-    # No local changes: still pull so the tree stays current across hosts.
-    if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
-        if git pull --ff-only origin "$branch" >/dev/null 2>&1; then
-            log "OPS: no local changes; pulled remote (or already up to date)"
-        else
-            log "OPS: WARN pull --ff-only failed with clean tree (diverged history?)"
-            return 0
-        fi
-        # Commits an earlier run held back (push gate, failed push) go out now.
-        if [ -n "$(git rev-list -n 1 "origin/$branch..HEAD" 2>/dev/null)" ]; then
-            push_ops "$branch"
-            return
-        fi
-        return 0
-    fi
-
-    # Local changes exist. Stash, pull, re-apply, commit, push.
-    local stash_label="daily-sync-auto-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
-    if ! git stash push -u -m "$stash_label" >/dev/null 2>&1; then
-        log "OPS: ERROR git stash failed; aborting OPS backup to avoid clobbering work"
-        identity_hint
+    # Commit first, where the work stands; it never leaves the tree. A commit
+    # can fail (no git identity, a hook, signing): pushing or logging "kept
+    # locally" after a failed commit reported a backup that did not exist
+    # (seen 2026-10-19 on a fresh Debian install with no git identity).
+    local committed=0 commit_err
+    if ! commit_err="$(git add -A 2>&1)"; then
+        log "OPS: ERROR git add failed; nothing committed or pushed: $(printf '%s' "$commit_err" | tail -1)"
         return 1
     fi
+    if ! git diff --cached --quiet; then
+        if ! commit_err="$(git commit -m "Daily Backup $(date '+%Y-%m-%d')" 2>&1 >/dev/null)"; then
+            log "OPS: ERROR commit failed; changes left staged, nothing pushed: $(printf '%s' "$commit_err" | tail -1)"
+            identity_hint
+            return 1
+        fi
+        committed=1
+    fi
 
-    # A failed pull (offline, no credentials under cron) used to return here
-    # with the work still in the stash, so the Operator's uncommitted and
-    # untracked files vanished from the tree, and later runs saw a clean tree
-    # and never brought them back. Put the tree back exactly as it was (abort a
-    # rebase the pull left half-done, then pop with the index) and report the
-    # failure; nothing is committed or pushed on this run.
+    # Then pull, so the tree stays current across hosts. --no-autostash: the
+    # tree is committed, and a stash is exactly what this order avoids. A
+    # failed pull (offline, no credentials under cron, a conflicting rebase)
+    # aborts the rebase it left half-done, so the local commit and the tree
+    # stay exactly as they were, and the next run retries.
     local pull_err pull_why
-    if ! pull_err="$(git pull --rebase origin "$branch" 2>&1 >/dev/null)"; then
+    save_modes "origin/$branch"
+    if ! pull_err="$(git pull --rebase --no-autostash origin "$branch" 2>&1 >/dev/null)"; then
         # git's first fatal/error line names the cause; its last line is often a hint.
-        pull_why="$(printf '%s\n' "$pull_err" | grep -m1 -E '^(fatal|error|ERROR):')" \
+        pull_why="$(printf '%s\n' "$pull_err" | grep -m1 -E '^(fatal|error|ERROR|CONFLICT)')" \
             || pull_why="$(printf '%s\n' "$pull_err" | tail -1)"
-        log "OPS: ERROR pull --rebase failed; nothing committed or pushed: $pull_why"
         if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
             git rebase --abort >/dev/null 2>&1 || log "OPS: ERROR could not abort the half-done rebase; resolve with: cd $OPS_DIR && git status"
         fi
-        if git stash pop --index >/dev/null 2>&1; then
-            log "     local changes restored to the working tree; the next run retries"
+        restore_modes
+        if [ "$committed" = 1 ]; then
+            log "OPS: ERROR pull --rebase failed; the day's commit is kept locally, nothing pushed: $pull_why"
         else
-            log "OPS: ERROR restoring the stash conflicted; local changes preserved in stash '$stash_label'"
-            log "     recover with: cd $OPS_DIR && git stash list && git stash pop"
+            log "OPS: ERROR pull --rebase failed; nothing pushed: $pull_why"
         fi
+        log "     the tree is as it was; the next run retries (if it keeps failing: cd $OPS_DIR && git pull --rebase origin $branch)"
         return 1
     fi
+    restore_modes
+    [ "$committed" = 1 ] || log "OPS: no local changes; pulled remote (or already up to date)"
 
-    if ! git stash pop >/dev/null 2>&1; then
-        log "OPS: ERROR stash pop conflicted; local changes preserved in stash '$stash_label'"
-        log "     resolve manually: cd $OPS_DIR && git status && git stash list"
-        return 1
+    # Commits an earlier run held back (push gate, failed push) go out too.
+    if [ -n "$(git rev-list -n 1 "origin/$branch..HEAD" 2>/dev/null)" ]; then
+        push_ops "$branch"
+        return
     fi
-
-    git add -A
-    if git diff --cached --quiet; then
-        log "OPS: stash pop produced no net diff; nothing to commit"
-        return 0
-    fi
-
-    # A commit can fail (no git identity, a hook, signing). Pushing or logging
-    # "kept locally" after a failed commit reported a backup that did not exist
-    # (seen 2026-10-19 on a fresh Debian install with no git identity).
-    local commit_err
-    if ! commit_err="$(git commit -m "Daily Backup $(date '+%Y-%m-%d')" 2>&1 >/dev/null)"; then
-        log "OPS: ERROR commit failed; changes left staged, nothing pushed: $(printf '%s' "$commit_err" | tail -1)"
-        identity_hint
-        return 1
-    fi
-    push_ops "$branch"
+    return 0
 }
 
 # --- Stage 2: pull every project repo under PROJECTS/ ----------------------
