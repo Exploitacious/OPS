@@ -1,6 +1,6 @@
 ---
 name: session-handoff
-description: Use when handing in-flight work from one Claude Code session to another that native `--resume` cannot reach, across profiles (your default `~/.claude` and a second `CLAUDE_CONFIG_DIR` profile, often a personal `~/.claude-personal`) or across machines. A write/read pair. WRITE ("hand off", "pass to the next session", "leave a baton", "I'm switching profiles", "/session-handoff") runs the four-artifact synthesis then writes a project-keyed baton under ~/OPS/.claude-handoffs/pending/. READ ("resume handoff", "pick up where I left off", "what was I doing", "/session-handoff resume") loads this project's baton plus its referenced files and memory, summarizes, then archives it. Reuses pre-compact-synthesis; pairs with the handoff-check.sh SessionStart notifier. This skill owns the baton DOCUMENT; creating or switching the session container itself is remote-session's job. Claude Code only.
+description: "Use to hand in-flight work across profiles or machines where --resume cannot reach. Write: hand off, leave a baton. Read: resume handoff, what was I doing."
 ---
 
 # Session handoff
@@ -32,7 +32,7 @@ A handoff write is a superset of pre-compact synthesis: the next session must re
 ## Read, arriving in a session
 
 1. Read this project's baton. Compute the key and read `pending/<key>.md`. If none is pending, check the legacy path per `mechanics.md`. If still nothing, say so: nothing to resume for this project.
-2. Re-ground in OPS global doctrine. A resuming session usually jumped straight to "resume handoff" and skipped the normal startup, so the standing layer may not be loaded. Before acting on project work, sync OPS (`git -C ~/OPS pull --ff-only`) and read `CONTEXT/operating-doctrine.md` (the 15 principles, especially P14 falsifiable conclusions and P15 classify-by-altitude) plus `working-preferences.md`, and `about-me.md` and `brand-voice.md` if not already in context. The baton carries project context; doctrine is the standing layer the baton assumes. Never resume project work without it.
+2. Re-ground in OPS global doctrine. `CONTEXT/core.md` is always loaded, but a resuming session usually jumped straight to "resume handoff" and skipped the normal startup, so the on-demand standing layer is not in context. Before acting on project work, sync OPS (`git -C ~/OPS pull --ff-only`) and read `CONTEXT/how-i-work.md` (the 15 principles, especially P14 falsifiable conclusions and P15 classify-by-altitude) and `CONTEXT/standing-orders.md`, and `USER.md` and `voice.md` if not already in context. The baton carries project context; doctrine is the standing layer the baton assumes. Never resume project work without it.
 3. Note the crossing. If `written_by` differs from the current profile, say it ("resuming a DEFAULT baton on a SECOND profile") and flag that profile-specific MCP connectors may not be available when resuming tooling on the other profile.
 4. Load the referenced context. Open the files in the baton's reading order, check git state of the named repo, and confirm HEAD matches `git_head`; if it moved, someone committed since, so reconcile before acting.
 5. Summarize in one screen: the goal, where it was left, the proposed next action. Then ask whether to proceed or adjust.

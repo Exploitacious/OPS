@@ -25,7 +25,7 @@ echo "== this session's repos: uncommitted WIP + candidate commits since t0 =="
   [ -d "$r/.git" ] || continue
   echo "-- $r"
   git -C "$r" status --short 2>/dev/null | sed 's/^/  WIP /'   # work still in the tree at close
-  # Commits since t0, with the harness's own memory-sync commits filtered out —
+  # Commits since t0, with the harness's own memory-sync commits filtered out:
   # they fire from every session's closeout and are never session labor. Declare
   # your own cron/automation commit markers in work-tracking.md and add them here.
   git -C "$r" log --since="${T0:-3 hours ago}" --pretty='  %h %s (%cr)' 2>/dev/null \
@@ -68,7 +68,8 @@ After executing the authorized writes, record the outcome and clear the session 
 ```bash
 mkdir -p ~/.local/state/ops
 printf '%s\treconciled=%s\tdeclined=%s\n' "$(date -Is)" "<n items logged>" "<reason or ->" \
+  > ~/.local/state/ops/last-reconcile
 rm -f "$RUN/session-start-$KEY" "$RUN/work-log-$KEY"
 ```
 
-The `rm` is not optional even when nothing was billable: leaving `session-start-$KEY` behind false-flags this clean close as abandoned-unreconciled at the next boot's briefing.
+`last-reconcile` is the operator's record of the last reconciliation and its outcome. The redirect is load-bearing: without it the trailing `\` makes the `rm` on the next line an argument to `printf`, so the stamp is never cleared and the next boot flags this clean close as unreconciled. The `rm` is not optional even when nothing was billable: leaving `session-start-$KEY` behind false-flags this clean close as abandoned-unreconciled at the next boot's briefing.

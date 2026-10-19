@@ -28,4 +28,4 @@ A non-image file the operator pushed arrives the same way; open it with the righ
 
 ## Deep context
 
-The receive pipeline is a screenshot tool on the operator's machine configured to Taildrop the capture here; that machine-side setup lives with the operator's own tooling. Full transfer mechanics are in the `reference-grabit-file-transfer` memory and `~/OPS/.claude-config/bin/README.md`. To send a file the other direction, off this box to the operator's machine, use the `grabit` skill.
+The receive pipeline is a screenshot tool on the operator's machine configured to Taildrop the capture here; that machine-side setup lives with the operator's own tooling. Full transfer mechanics are in `~/OPS/.claude-config/bin/README.md` under grabit. To send a file the other direction, off this box to the operator's machine, use the `grabit` skill.

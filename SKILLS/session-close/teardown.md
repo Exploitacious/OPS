@@ -1,6 +1,13 @@
 # Teardown
 
-Read at step 5, the final tool call of the close. Deregister the session and kill its tmux. This kills the session you are in, so run the receipt (step 4) first and make the teardown the last tool call.
+Read at step 5, the final tool call of the close. Deregister the session and stop its backend. Pick the branch for the backend this session runs on: tmux (`$TMUX` set), or not in tmux. The tmux branch kills the session you are in, so run the receipt (step 4) first and make the teardown the last tool call.
+
+No registry row: a session started by hand, or any tmux session nothing registered. Check with `~/OPS/.claude-config/remote-sessions/archive-remote-claude.sh sweep` (read-only; it lists every live registry row). `rc_archive` matches a name by its canonical form (case-insensitive, spaces and underscores read as hyphens), so a hand-written grep of the registry file can disagree with it; trust the command. With no row, `archive` refuses with `ERR_NOT_FOUND` before it touches anything, so skip the archive and forget commands and run only the tmux kill:
+
+```bash
+# No registry row: tear down this tmux session only. Same single-capture rule as below.
+SN="$(tmux display-message -p '#S')" && tmux kill-session -t "=$SN"
+```
 
 ## In tmux (`$TMUX` set)
 
@@ -29,9 +36,9 @@ This failure mode is structural to tmux: `display-message -p '#S'` queries a liv
 
 ## Not in tmux
 
-No `$TMUX`: there is no registry row and nothing to tear down (only tmux-hosted sessions are boot-registered). Run steps 1 through 4 (synthesis, reconciliation, decision, receipt), then tell the operator the close is complete and this terminal can be exited.
+No `$TMUX`, as in a T3 Code thread, an IDE terminal, or a plain terminal: there is no registry row and nothing for you to kill (rows come only from `new-remote-claude.sh`, which launches in tmux). Run steps 1 through 4 (synthesis, reconciliation, decision, receipt), then tell the operator the close is complete. In a terminal they can exit it; in T3 Code the thread is theirs to settle or archive in the T3 UI, and a settle stops the thread's provider session, so it comes after the receipt and only on their word.
 
 ## Guardrails
 
 - `ERR_GUARANTEED`: the name is in `RC_GUARANTEED_NAMES`, so the boot script re-seeds it and archiving would orphan its history. Do NOT force it. Report that guaranteed sessions are closed by first removing the name from `RC_GUARANTEED_NAMES` in `lib-remote-claude.sh`.
-- The auto-register hook respects the archive: reopening a tmux session with an archived name will NOT silently re-register it. Revive is always an explicit act.
+- Revive is always an explicit act (`archive-remote-claude.sh revive <Name>`); nothing re-registers an archived name on its own.

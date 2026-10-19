@@ -1,16 +1,6 @@
 ---
 name: harness-update
-description: >
-  Use when the Operator says "update the harness", "sync from the template",
-  "pull upstream OPS changes", "what's new upstream", or asks to bring in a
-  specific upstream improvement. Syncs a private, personalized OPS copy with the
-  public upstream OPS template. Template copies share no git history with upstream,
-  so plain merge is impossible; this is the supported path. Runs the scan to
-  classify every file NEW, UPDATE, CONFLICT, IDENTICAL, summarizes the upstream
-  CHANGELOG in plain terms, asks the Operator what to apply, fast-forwards the safe
-  classes, ports conflicts by pattern, runs the gates, lands one commit. Identity,
-  memory, and handoff surfaces are hard-excluded; CONFLICT is never auto-applied.
-  Claude Code only.
+description: "Use when the Operator says update the harness, sync from the template, or pull upstream OPS changes. Scans, classifies, ports conflicts, lands one commit."
 ---
 
 # Harness update
@@ -53,18 +43,18 @@ Created on the first successful sync, updated at commit time. Without it the sca
 
 4. Apply. Safe classes in one shot: `~/OPS/.claude-config/bin/harness-update-scan.sh --apply-safe`. It copies NEW + UPDATE only, never CONFLICT, never a hard-excluded file, never a deletion, never a commit. Then hand-port each approved CONFLICT: read the upstream version for structure and intent, rewrite it against the local tree's shape, leave unapproved ones alone. This is `CONTRIBUTING.md`'s porting discipline run public to private: port the pattern, do not paste the file.
 
-5. Translate paths on a renamed fork. Upstream assumes a root of `~/OPS` and `ops-*` unit and agent names. If this copy renamed itself, detected by comparing the root the local `CLAUDE.md` states against upstream's `~/OPS`, every copied and ported file needs a translation pass. After `--apply-safe`, sweep the applied files for `~/OPS`, `ops-template`, and `ops-*` names and rewrite them to the local convention. A verbatim upstream path in a renamed fork is a silent breakage.
+5. Translate paths on a renamed fork. Upstream assumes a root of `~/OPS` and `ops-*` unit and agent names. If this copy renamed itself, detected by comparing the checkout root and the local `AGENTS.md` (or `CLAUDE.md`, when present) against upstream's `~/OPS`, every copied and ported file needs a translation pass. After `--apply-safe`, sweep the applied files for `~/OPS`, `ops-template`, and `ops-*` names and rewrite them to the local convention. A verbatim upstream path in a renamed fork is a silent breakage.
 
 6. Run the gates on what changed, before committing:
 
    ```
-   ~/OPS/.claude-config/bin/verify-ops.sh          # drift gate (or local equivalent)
+   ~/OPS/.claude-config/bin/verify-ops.sh          # drift gate (a renamed copy runs its own equivalent)
    ~/OPS/.claude-config/bin/secrets-scan.sh <changed files>
    bash -n <each changed shell script>
    node --check <each changed .js>
    ```
 
-   `verify-ops.sh` is the drift gate; `secrets-scan.sh` catches a credential riding in on a ported file. All green before step 7. A red gate is a stop, not a note.
+   `verify-ops.sh` is this copy's drift gate (a renamed copy runs its renamed equivalent); `secrets-scan.sh` catches a credential riding in on a ported file. All green before step 7. A red gate is a stop, not a note.
 
 7. One commit, update the marker. Land a single Conventional Commit listing the features pulled, for example `chore(harness): sync upstream OPS (remote-session reboot-resume, secrets-scan hardening)`. In the same commit, write the marker's `last_synced` to the fetched sha (`git -C ~/OPS rev-parse ops-template/main`; the scan prints it too), creating `.claude-config/ops-upstream-ref` if this was the first sync. The marker makes the next sync a clean delta.
 
@@ -86,7 +76,7 @@ Local-only files, the Operator's own content absent upstream, are never listed. 
 
 These never sync in either direction and never appear in the report, because naming a private file is itself a boundary crossing:
 
-- `CONTEXT/` identity files: `about-me.md`, `brand-voice.md`, `working-preferences.md`, `.bootstrapped`, and everything under `CONTEXT/projects/` (per-project lessons name real projects). The doctrine files in `CONTEXT/` (`operating-doctrine.md`, `project-kata.md`, and the rest) are portable and do sync; they show up as UPDATE or CONFLICT like any template file.
+- `CONTEXT/` identity files: the operator's identity, voice, and standing-orders files, `.bootstrapped`, and everything under `CONTEXT/projects/` (per-project lessons name real projects). The authoritative list is `is_excluded` in `harness-update-scan.sh`, so read that function instead of trusting a copy of the list here: the identity files changed names when the doctrine layout moved (`USER.md`, `voice.md`, and `standing-orders.md` replace `about-me.md`, `brand-voice.md`, and `working-preferences.md`), and a copy that predates the move still carries the old names. The other doctrine files in `CONTEXT/` (`project-kata.md` and the rest) are portable and do sync; they show up as UPDATE or CONFLICT like any template file.
 - `.claude-memory/`, `.claude-handoffs/`: memory and in-flight batons.
 - `NOTES/`, `DELIVERABLES/`, `PROJECTS/`, `ARCHIVE/`: the Operator's work.
 
