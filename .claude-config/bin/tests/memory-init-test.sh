@@ -103,6 +103,28 @@ for kind in empty truncated; do
 done
 echo 'PASS: an empty or truncated gate exits 0 but is not a verdict; the commit stays local'
 
+# A failed commit shows git's own stderr (2026-10-19: "commit failed
+# (hook/signing?)" hid the real cause on a fresh install, no git identity).
+# user.useConfigOnly with no configured identity makes git refuse to guess.
+no_identity() {
+  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL EMAIL
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true
+}
+(
+  no_identity
+  printf 'note without an identity\n' > "$POOL/no-ident.md"
+  bash "$INIT" --hostname fixture --only-home --auto-commit > "$GATE/log" 2>&1 \
+    || { cat "$GATE/log" >&2; echo 'FAIL: memory-init failed outright without an identity' >&2; exit 1; }
+  grep -q 'auto-commit: commit failed, staged but uncommitted. git said:' "$GATE/log" \
+    || { cat "$GATE/log" >&2; echo 'FAIL: the failed commit was not reported' >&2; exit 1; }
+  grep -q -E '^\[memory-init\] \[[^]]*\]   Author identity unknown$' "$GATE/log" \
+    && grep -q -E '^\[memory-init\] \[[^]]*\]   fatal: no email was given' "$GATE/log" \
+    || { cat "$GATE/log" >&2; echo "FAIL: git's own stderr is not in the log" >&2; exit 1; }
+  if grep -q 'hook/signing' "$GATE/log"; then echo 'FAIL: the old guess is still printed' >&2; exit 1; fi
+) || exit 1
+git -C "$OPS_DIR" reset -q -- "$POOL/no-ident.md"; rm -f "$POOL/no-ident.md"
+echo "PASS: a failed commit shows git's own stderr, not a guess"
+
 # An empty pool stays in git through the daily backup's stash, and a pool an
 # earlier backup removed is recreated (2026-10-19: git stash -u dropped the
 # empty pool directory and left the memory link dangling).
@@ -136,6 +158,29 @@ DEPLOY_FAILED=''
 eval "$(awk '/^MEMORY_INIT=/ {p=1} p && /^# --- Daily backup/ {exit} p {print}' "$DEPLOY")"
 [[ "$DEPLOY_FAILED" == *memory-init* ]] || { echo 'FAIL: deploy swallowed memory initialization failure' >&2; exit 1; }
 echo 'PASS: deploy records memory initialization failure'
+
+# Deploy checks the git identity before memory-init commits (2026-10-19: a fresh
+# Debian user with no identity got "Deploy complete." while every commit and
+# nightly backup failed). Without one it names the fix and fails the deploy.
+IDW="$WORK/identity"; mkdir -p "$IDW"
+msg_bad() { printf 'BAD %s\n' "$*" >> "$IDW/msgs"; }
+msg_action() { printf 'ACTION %s\n' "$*" >> "$IDW/msgs"; }
+msg_ok() { printf 'OK %s\n' "$*" >> "$IDW/msgs"; }
+c_yel() { :; }
+IDENT_SLICE="$(awk '/^# --- Git identity ---/ {p=1} p && /^# --- Claude Code auto-memory git-sync ---/ {exit} p {print}' "$DEPLOY")"
+[[ "$IDENT_SLICE" == *"git"*"var GIT_COMMITTER_IDENT"* ]] || { echo 'FAIL: deploy.sh has no git identity slice' >&2; exit 1; }
+(
+  no_identity
+  : > "$IDW/msgs"; DEPLOY_FAILED=''
+  eval "$IDENT_SLICE"
+  [[ "$DEPLOY_FAILED" == *git-identity* ]] || { echo 'FAIL: deploy did not fail without a git identity' >&2; exit 1; }
+  grep -q '^BAD git has no usable identity' "$IDW/msgs" && grep -q '^ACTION .*git config --global user.name .*git config --global user.email' "$IDW/msgs" \
+    || { cat "$IDW/msgs" >&2; echo 'FAIL: the identity failure does not name the fix' >&2; exit 1; }
+) || exit 1
+: > "$IDW/msgs"; DEPLOY_FAILED=''
+eval "$IDENT_SLICE"
+[[ -z "$DEPLOY_FAILED" ]] && grep -q '^OK git identity is set' "$IDW/msgs" || { cat "$IDW/msgs" >&2; echo 'FAIL: deploy failed with a git identity set' >&2; exit 1; }
+echo 'PASS: deploy fails without a git identity and names the fix, and passes with one'
 
 # A failed crontab install fails the deploy (2026-10-19: it printed
 # "Deploy complete." and exited 0 with no backup scheduled).

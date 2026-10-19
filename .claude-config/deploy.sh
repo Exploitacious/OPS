@@ -16,7 +16,8 @@
 #   5. Wire claude-root-wrapper.sh into root's shellrcs (root permission mode
 #      + shared-host lock); needs passwordless sudo
 #   6. Write the ultracode-only claude() shim to ~/.<shell>rc.local
-#   7. Initialize Claude Code auto-memory git-sync (bin/memory-init)
+#   7. Check the git identity, then initialize Claude Code auto-memory git-sync
+#      (bin/memory-init)
 #   8. Schedule the daily backup cron entry
 #   9. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
 #  10. Seed the trust anchor
@@ -599,6 +600,25 @@ PYRC
 # A refused .local is reported above and left as it was; the deploy goes on.
 ensure_claude_localrc "$HOME/.zshrc.local" || true
 ensure_claude_localrc "$HOME/.bashrc.local" || true
+
+# --- Git identity ---
+# Every commit needs one: memory-init's auto-commit just below, the daily
+# backup, and every agent commit. A fresh Debian user often has none (an empty
+# GECOS name, no FQDN to build an email from), so those commits failed while
+# the deploy printed "Deploy complete." and each nightly backup failed into a
+# log nobody reads. Ask git directly, the same check the backup's hint uses,
+# and fail the deploy with the fix.
+echo ""
+c_yel "Checking the git identity..."
+ident_err=""
+if ident_err="$(git -C "$OPS_ROOT" var GIT_AUTHOR_IDENT 2>&1 >/dev/null)" \
+   && ident_err="$(git -C "$OPS_ROOT" var GIT_COMMITTER_IDENT 2>&1 >/dev/null)"; then
+  msg_ok "git identity is set (commits, memory sync and the daily backup can run)."
+else
+  msg_bad "git has no usable identity, so commits, memory sync and the daily backup fail: ${ident_err##*$'\n'}"
+  msg_action "Set it once, then re-run deploy: git config --global user.name \"Your Name\" && git config --global user.email you@example.com"
+  DEPLOY_FAILED="$DEPLOY_FAILED git-identity"
+fi
 
 # --- Claude Code auto-memory git-sync ---
 # bin/memory-init walks Claude's encoded cwd subdirs and symlinks each into

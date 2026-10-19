@@ -339,8 +339,15 @@ init_one_encoded() {
     fi
     local commit_msg="feat(memory): seed .claude-memory/${HOST}${ENCODED}"
     # Commit the pool path only: anything else staged in the copy is not ours.
-    if ! git -C "$OPS_ROOT" commit -m "$commit_msg" -- "$TARGET_REL" 2>/dev/null; then
-      log "[$ENCODED] auto-commit: commit failed (hook/signing?), staged but uncommitted"
+    # git's own stderr is shown on a failure; a guess ("hook/signing?") hid the
+    # usual cause on a fresh install, a missing git identity. stdout still
+    # reaches the terminal (fd 3), stderr is captured.
+    local commit_err line
+    if ! { commit_err="$(git -C "$OPS_ROOT" commit -m "$commit_msg" -- "$TARGET_REL" 2>&1 1>&3 3>&-)"; } 3>&1; then
+      log "[$ENCODED] auto-commit: commit failed, staged but uncommitted. git said:"
+      while IFS= read -r line; do
+        if [[ -n "$line" ]]; then log "[$ENCODED]   $line"; fi
+      done <<< "$commit_err"
       return 0
     fi
     log "[$ENCODED] auto-commit: committed"

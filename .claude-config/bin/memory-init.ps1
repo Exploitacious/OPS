@@ -373,8 +373,14 @@ function Init-OneEncoded {
             if ($LASTEXITCODE -ne 0) { Log "[$Encoded] auto-commit: git add failed -- leaving untracked"; return }
             $commitMsg = "feat(memory): seed .claude-memory/${Host_}-${Encoded}"
             # Commit the pool path only: anything else staged is not ours.
-            git commit -m $commitMsg -- $targetRel 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
+            # git's own stderr is shown on a failure: a guess ("hook/signing?")
+            # hid the usual cause on a fresh install, a missing git identity.
+            # Under Stop, Windows PowerShell 5.1 would raise on that stderr.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try { $commitOut = @(git commit -m $commitMsg -- $targetRel 2>&1); $commitRc = $LASTEXITCODE }
+            finally { $ErrorActionPreference = $prevEap }
+            if ($commitRc -eq 0) {
                 Log "[$Encoded] auto-commit: committed"
                 # One gate answer per run: it may call the GitHub API.
                 if ($null -eq $script:PushGate) { $script:PushGate = Test-OriginPrivate -Dir $Ops }
@@ -394,7 +400,8 @@ function Init-OneEncoded {
                 else { Log "[$Encoded] auto-commit: push failed -- commit landed locally" }
             }
             else {
-                Log "[$Encoded] auto-commit: commit failed (hook/signing?) -- staged but uncommitted"
+                Log "[$Encoded] auto-commit: commit failed, staged but uncommitted. git said:"
+                foreach ($line in $commitOut) { if ("$line".Trim()) { Log "[$Encoded]   $line" } }
             }
         } finally { Pop-Location }
     }

@@ -276,6 +276,40 @@ Write-Host ""
 Write-Status "Cleaning up the retired fleet PATH block..." "Yellow"
 Remove-SeamLines -Lines $LegacyPathLines -What "retired fleet PATH block"
 
+# --- Git identity ---
+# Every commit needs one: memory-init's auto-commit just below, the daily
+# backup, and every agent commit. A machine with no user.name or user.email
+# (git cannot guess one) made those commits fail while the deploy reported
+# success. Ask git directly, as deploy.sh does, and fail the deploy with the fix.
+# Returns $null when both identities resolve, else git's last error line.
+function Test-GitIdentity {
+    param([string]$Repo)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($var in 'GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT') {
+            $out = @(& git -C $Repo var $var 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $last = @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) | Select-Object -Last 1
+                if (-not $last) { $last = "git var $var exited $LASTEXITCODE" }
+                return $last
+            }
+        }
+        return $null
+    }
+    catch { return "git could not run: $_" }
+    finally { $ErrorActionPreference = $prevEap }
+}
+Write-Host ""
+Write-Status "Checking the git identity..." "Yellow"
+$identErr = Test-GitIdentity -Repo $OpsRoot
+if ($null -eq $identErr) { Write-Good "git identity is set (commits, memory sync and the daily backup can run)." }
+else {
+    Write-Bad "git has no usable identity, so commits, memory sync and the daily backup fail: $identErr"
+    Write-Action 'Set it once, then re-run deploy: git config --global user.name "Your Name"; git config --global user.email you@example.com'
+    $DeployFailed += 'git-identity'
+}
+
 # --- Claude Code auto-memory git-sync ---
 # bin\memory-init.ps1 walks Claude's encoded cwd subdirs and symlinks
 # each into .claude-memory/<host>-<encoded>/ so per-session memory

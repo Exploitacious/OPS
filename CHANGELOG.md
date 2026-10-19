@@ -190,6 +190,16 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   as before, logs the failure as an ERROR with git's reason, and commits and
   pushes nothing that run; a pop that conflicts still names the stash. New
   cases in `daily-sync-test.sh`.
+- **Deploy checks the git identity.** A fresh Debian user has no git
+  identity (an empty GECOS name, no FQDN for an email), so memory-init's
+  commit, the daily backup and every agent commit failed while `deploy.sh`
+  printed "Deploy complete." `deploy.sh` and `deploy.ps1` now ask `git var`
+  for the author and committer identity before memory-init runs and, when
+  either is missing, print the two `git config --global` commands and fail
+  the deploy (`git-identity`). `memory-init` and `memory-init.ps1` show
+  git's own stderr for a failed commit instead of hiding it behind a
+  "(hook/signing?)" guess. New cases in `memory-init-test.sh` and
+  `memory-init-windows-test.ps1`.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

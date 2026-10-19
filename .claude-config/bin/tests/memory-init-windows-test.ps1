@@ -7,7 +7,8 @@ $previousOps = $env:OPS_DIR
 $previousConfig = $env:CLAUDE_CONFIG_DIR
 # The push-gate cases below change these; all are restored in finally.
 $gateEnvNames = @('PATH', 'HOME', 'GH_STUB', 'GH_LOG', 'PUSH_LOG', 'FAKE_REMOTE', 'GIT_SSH_COMMAND', 'GIT_SSH_VARIANT',
-    'GIT_CONFIG_NOSYSTEM', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL')
+    'GIT_CONFIG_NOSYSTEM', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
+    'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'EMAIL')
 $previousGateEnv = @{}
 foreach ($name in $gateEnvNames) { $previousGateEnv[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -245,6 +246,57 @@ exit 1
     if (-not $out.Contains('auto-commit: pushed')) { throw "Private origin push not logged: $out" }
     if ((& git -C $env:FAKE_REMOTE rev-parse main) -ne (& git -C $env:OPS_DIR rev-parse HEAD)) { throw 'Memory not pushed to a private origin' }
     Write-Host 'PASS: -AutoCommit keeps the commit for a public origin and pushes to a private one'
+
+    # --- No git identity: memory-init shows git's stderr; deploy fails ------
+    # (2026-10-19: "commit failed (hook/signing?)" hid the real cause, and the
+    # deploy reported success.) user.useConfigOnly with no configured identity
+    # makes git refuse to guess, on any host.
+    $identityEnv = @{ GIT_AUTHOR_NAME = 't'; GIT_AUTHOR_EMAIL = 't@example.invalid'; GIT_COMMITTER_NAME = 't'; GIT_COMMITTER_EMAIL = 't@example.invalid' }
+    $emptyGitConfig = Join-Path $fixture 'empty.gitconfig'
+    [IO.File]::WriteAllText($emptyGitConfig, '')
+    function Remove-GitIdentity {
+        foreach ($n in @($identityEnv.Keys) + 'EMAIL') { Remove-Item "Env:\$n" -ErrorAction SilentlyContinue }
+        $env:GIT_CONFIG_GLOBAL = $emptyGitConfig
+        $env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'user.useConfigOnly'; $env:GIT_CONFIG_VALUE_0 = 'true'
+    }
+    function Restore-GitIdentity {
+        foreach ($n in $identityEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $identityEnv[$n]) }
+        foreach ($n in 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0') { Remove-Item "Env:\$n" -ErrorAction SilentlyContinue }
+    }
+    Remove-GitIdentity
+    [IO.File]::WriteAllText((Join-Path $env:OPS_DIR ".claude-memory/fixture-$encoded/no-ident.md"), 'note without an identity')
+    $out = & $pwsh -NoProfile -File $init -HostnameOverride fixture -OnlyHome -AutoCommit *>&1 | Out-String
+    Restore-GitIdentity
+    if ($LASTEXITCODE -ne 0) { throw "memory-init failed outright without an identity: $out" }
+    if (-not $out.Contains('auto-commit: commit failed, staged but uncommitted. git said:')) { throw "Failed commit not reported: $out" }
+    if (-not ($out -match 'Author identity unknown') -or -not ($out -match 'fatal: no email was given')) { throw "git's own stderr is not in the output: $out" }
+    if ($out.Contains('hook/signing')) { throw "The old guess is still printed: $out" }
+    Write-Host "PASS: -AutoCommit shows git's own stderr for a failed commit, not a guess"
+
+    $script:deployText = [IO.File]::ReadAllText($deploy)
+    $begin = $script:deployText.IndexOf('# --- Git identity ---')
+    $finish = $script:deployText.IndexOf('# --- Claude Code auto-memory git-sync ---', [Math]::Max($begin, 0))
+    if ($begin -lt 0 -or $finish -lt 0) { throw 'deploy.ps1 has no git identity block' }
+    $identBlock = $script:deployText.Substring($begin, $finish - $begin)
+    $script:deployMsgs = New-Object System.Collections.Generic.List[string]
+    function Write-Status { param($Msg, $Color) }
+    function Write-Good { param($Msg) $script:deployMsgs.Add("OK $Msg") }
+    function Write-Bad { param($Msg) $script:deployMsgs.Add("BAD $Msg") }
+    function Write-Action { param($Msg) $script:deployMsgs.Add("ACTION $Msg") }
+    $OpsRoot = $env:OPS_DIR
+    Remove-GitIdentity
+    $DeployFailed = @()
+    try { Invoke-Expression $identBlock } finally { Restore-GitIdentity }
+    if ($DeployFailed -notcontains 'git-identity') { throw "Deploy did not fail without a git identity: $($script:deployMsgs -join ' | ')" }
+    if (-not ($script:deployMsgs | Where-Object { $_ -like 'BAD git has no usable identity*' }) -or
+        -not ($script:deployMsgs | Where-Object { $_ -match '^ACTION .*git config --global user\.name .*git config --global user\.email' })) {
+        throw "The identity failure does not name the fix: $($script:deployMsgs -join ' | ')"
+    }
+    $script:deployMsgs.Clear()
+    $DeployFailed = @()
+    Invoke-Expression $identBlock
+    if ($DeployFailed.Count -or -not ($script:deployMsgs | Where-Object { $_ -like 'OK git identity is set*' })) { throw "Deploy failed with a git identity set: $($script:deployMsgs -join ' | ')" }
+    Write-Host 'PASS: deploy.ps1 fails without a git identity and names the fix, and passes with one'
 }
 finally {
     $env:USERPROFILE = $previousProfile
