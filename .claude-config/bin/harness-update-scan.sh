@@ -46,6 +46,10 @@ for arg in "$@"; do
   esac
 done
 
+# Self-contained by contract: copies that predate this script run it straight
+# from the template (git show ops-template/main:<this path> > tmp; bash tmp), so
+# it finds its root from the cwd and must never source a helper file from the
+# repo. tests/harness-update-scan-test.sh pins this.
 # The scan must run inside the OPS working tree: it compares the tree, not HEAD,
 # so the Operator's uncommitted personalization is part of the input.
 OPS_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -83,6 +87,61 @@ UP_REF="$REMOTE/$BRANCH"
 UP_SHA="$(git rev-parse "$UP_REF" 2>/dev/null)" || {
   echo "ERR_FETCH: $UP_REF not found after fetch (wrong branch '$BRANCH'?)" >&2; exit 5; }
 echo "OK fetched $UP_REF @ ${UP_SHA:0:12}"
+
+# --- translate a marker from before the 2026-10-19 history rewrite ---
+# The template's main was rewritten with git filter-repo on 2026-10-19 to remove
+# a private name from one old commit. Every commit got a new SHA; every tree is
+# identical except that commit's. A copy synced before then holds a last_synced
+# the template no longer has, which would drop the scan into a first-sync
+# compare (every difference a CONFLICT). Its rewritten twin has the same tree, so
+# the delta stays exact. OPS_REWRITE_MAP adds "old new" lines (tests, or a
+# future rewrite).
+REWRITE_MAP="
+  06ec12e4711fade9484c5eee13624a2ca0563a4a 90426aab098171bb9d41184b9d19b4faed8c7afa
+  13863529aca24dd367ee647fd6d049144cb5273a 904349179797cd9b35b451dcdc71275f1fdfcfb9
+  187ccb80f01d11389107a4c7c088c8dfde52871e 0fd2665eb85d7dd61fad18e9b8b7e7e2c6ad2859
+  1c4290f7053d021643624e35327ea30ecce8ba46 2f90cf1848d37e1695ebd2f5680a4c61663fc659
+  2ba5f4f67546233babf56f2efc4925b66f75e612 cc53e07fd0e28fc73d5a96711f82509a26569dae
+  34b7c5aa931789b9902aa9ccba8a387d44c69c25 7f18131fc3592dce052441d3385cf8686643d7b4
+  48da2de5e29dc64e03b8de3027456e8a709524c9 351dfcc152ab7f37237a28a065932da5790a3edd
+  493b59167647a18a3ff3f80d07302a36cc7a98da 86aecb6946fba7e63e933c670be89ae40b321f2f
+  4c8e095542903f1c76baaa4ed69f9bda89b5aa01 7965a9c1a552f2b8919b90e77a6744fa9b78bd3f
+  4d5bf0e3d3ea92728d7f8bc2b570eb0dadbf1a48 f441bc9a543e03c885b0c6fd9b8d2ae45a9683f1
+  55b60bbe08de529dbc4e5297b1c8f79063e89332 899200cc5f491b9a76bb7358800c1972f82e3c46
+  59187502c614ef0c9433be3ad1f94789d273c0d2 b7348e397939f0061383cc4d61c574b9087666a4
+  5ee76b9f3aa4d7ede7bdf73ae21774c5451ab845 d0fbde9fe2f533ce2abdc0677f9b7227f00880f6
+  737268f3797ed4b059aa8b82f1ff895b99b12ae6 a0c4ebd124bc39caa09489523b474076fbce8d51
+  7a12c51f3367faba92bb699fcc22c6ce10063dac 659bf415e8db70474361dc5356a3b393f9f098eb
+  7f78b62f16a6d20080a3b32fadb37c6a7d79e648 73916c876fe9567bdfd26044805df133bf9946a0
+  84e48b0b3d5c18bc8a1df1912fc49d169fff29e1 d53c3b1d25a375ce4eef393f12f6eaef909f0548
+  96e7976ea32a590efc844cb0ce741e7e12968bd3 06646490e71c1127e7c42e693c29feb0cf9d9ba5
+  a01ab68bb43313e497f14f9b11f842a241236c23 8013f9e2a045afcdb9bd65f5a6afa8ce809e9d85
+  a2ce6ea553ef4e2239741559625b7cb397e4bea9 e7a915998755962cc784eba1fc2b7b6763307d02
+  a3892f087c26b2f239bba998ee61e091086200a7 c5858b6b0372cccfc4b50acdcc62c1da4172f926
+  a4b7f2ec8657aaa734007d56c09b1b5baa57b441 ce6bbbab6a1ca2478d39eb46f87744041cd1ef47
+  a5dbc059feefec379772f2130a9d92ac77874fe1 0ed150489085537cf396e95d922b5d8a1213b96b
+  a5e0ae3c320645397f4ef50a679f7dba26d2a8fe 629efe85d09f338e28e9d2cc19300799e2efdb24
+  ac036f9cfec9f07630cd76cc66ddc5e89e2b4021 0458b3beb7c4093235bb77722b5c577860c95007
+  aca18753e1bb9ebf911aa6ee6d8385acc5436c0d 480450a315883d6a3df3da564e954869e3d2823b
+  ad8c20d60008aafc32664f490c95f23ee45411c1 7834e4c2ba9ebecf84027b3ff16ee784d9fc259f
+  b1ceefeef70afae5a8f5134a51880e83d876d621 4bdfb7d71edc3783d36ff9abb12ade324ae5211d
+  b7c0977570dcd977cc5485758993b1a0d25a4ff9 f63a8f1d25f3c1e51906bb590133f1cb4b6053c5
+  bc462f49f324d4468cdb3666757e2c5c88490052 e1303922e1e55b728a1f9bf9d9281bef69d6c6ad
+  ce25ccfdc66949de2f3c6160e7cd829837476298 7ee78297700f540acf0496a220463a8a09e7d2b5
+  cfcde73f3fc80115639ec5e4adb4955e765daa02 da991d6e528a77d5fe99859c40d1b1dd64a6cca2
+  d987ffedfa4d474a025691eb9322fb837ab3b07e 9bcd1499ac64f70b384e1f56f80dc8805fbc2b27
+  db76b1d68aa16e3a4a209f860fcc016cd699bca8 01dc15ee34a94dc066e6ce845659d4cf0a859d7f
+  eb92f3767b7a677ad4397e42e1f9ed58dc06147b 1b288f3cf3bbd7761be5e4c8a8e742b9d7a2e484
+  f87bd96b034dd8529d67d7220f4735634881669f d771aae7ae447d0d713e1ed56c00a1eec4135efc
+${OPS_REWRITE_MAP:-}"
+if [ -n "$LAST_SYNCED" ] && [ "${#LAST_SYNCED}" -ge 7 ]; then
+  TWIN="$(printf '%s\n' "$REWRITE_MAP" | awk -v want="$LAST_SYNCED" \
+    'NF==2 && index($1, want)==1 {print $2; exit}')"
+  if [ -n "$TWIN" ]; then
+    echo "NOTE: last_synced ${LAST_SYNCED:0:12} predates the 2026-10-19 history rewrite; using its rewritten twin ${TWIN:0:12} (same tree). The marker gets the new sha at the next sync commit." >&2
+    LAST_SYNCED="$TWIN"
+  fi
+fi
 
 # --- pick the mode: delta needs a marker sha that is a real, fetched commit ---
 MODE="first-sync"

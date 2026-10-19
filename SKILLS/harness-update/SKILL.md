@@ -26,6 +26,22 @@ last_synced=<sha of the upstream commit last pulled>
 
 Created on the first successful sync, updated at commit time. Without it the scan runs first-sync mode: a full tree compare with no baseline, so every difference is CONFLICT and UPDATE is not computable. With it, the scan diffs only what upstream changed since `last_synced` and tells an untouched-local UPDATE from a diverged-local CONFLICT. It lives under `.claude-config/` because the repo root is canonical-file-gated (`CONTEXT/project-kata.md` rule 1).
 
+A marker written before 2026-10-19 names a commit from before the template's history rewrite (a private name removed from one old commit). The scan translates it to its rewritten twin, which has the same tree, prints a NOTE, and stays in delta mode; step 7 then writes the new sha.
+
+## Updating a copy that predates this skill
+
+An older copy may have no marker, no `harness-update-scan.sh`, and none of this skill. Run everything straight from the template, from inside the copy:
+
+```
+git -C ~/OPS remote add ops-template https://github.com/Exploitacious/OPS.git   # once
+git -C ~/OPS fetch ops-template
+git -C ~/OPS show ops-template/main:SKILLS/harness-update/SKILL.md              # this procedure
+f=$(mktemp); git -C ~/OPS show ops-template/main:.claude-config/bin/harness-update-scan.sh > "$f"
+(cd ~/OPS && bash "$f")                                                          # report only
+```
+
+The scanner is self-contained by contract (it finds its root from the working directory and loads no helper file), so a temp copy works in any layout. With no marker it runs a first sync: every file that differs is CONFLICT, so nothing applies itself, and the walk through the flow below is per feature, with the Operator deciding bring in, adapt, or defer. `--apply-safe` from the temp copy only copies NEW files on a first sync. Step 7 writes the first marker, and from then on scans are deltas.
+
 ## The flow
 
 1. Scan, report-only. Run `~/OPS/.claude-config/bin/harness-update-scan.sh`. It ensures the `ops-template` remote exists (HTTPS, no SSH key needed to read a public template), fetches it, and prints a classified report plus a summary line. It touches and commits nothing. Add `--verbose` to list IDENTICAL files too.

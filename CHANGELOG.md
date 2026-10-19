@@ -106,6 +106,19 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   with a `BACKUP` line naming the path; a failed install moves it back.
   Mirrors of the six earlier rows, and mirrors already equal to their source,
   update in place as before.
+- **Template sync for older copies.** `harness-update-scan.sh` is self-contained
+  by contract (it finds its root from the working directory and loads no helper
+  file), so a copy that predates it runs it straight from the template; the
+  harness-update skill gains "Updating a copy that predates this skill" with the
+  commands. The template's history was rewritten on 2026-10-19 to remove a
+  private name from one old commit, so a `last_synced` marker written before
+  then names a commit the template no longer has: the scan now translates it to
+  its rewritten twin (same tree) and stays in delta mode instead of falling back
+  to a first-sync compare. New `harness-update-scan-test.sh`.
+- **Agents push memory and batons only to a private origin.** The
+  pre-compact-synthesis and session-handoff skills run `origin-private-check`
+  before their additive-sync push, the same gate `memory-init` and the daily
+  backup use.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
