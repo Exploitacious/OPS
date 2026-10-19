@@ -1,6 +1,6 @@
 # OPS
 
-**Operator's Shell** — an opinionated, battle-tested Claude Code harness.
+**Operator's Shell**: an opinionated, battle-tested Claude Code harness.
 
 OPS is the configuration layer one operator actually runs Claude Code inside,
 extracted as a public template. It is not a starter kit or a demo. It is a
@@ -10,6 +10,9 @@ out so you can adopt it as your own.
 
 What it gives you, out of the box:
 
+- **One always-loaded core.** `CONTEXT/core.md` is the rule set every session
+  and every lane carries, on every launch path: terminal, T3 Code, IDE, and
+  `claude -p`. Everything else loads on demand.
 - **Foreman-by-default orchestration.** Every session boots as a foreman, not a
   solo engineer. Plan hard up front, then delegate parallelizable work to
   worktree-isolated sub-agents and review their diffs. The posture, the brief
@@ -21,11 +24,8 @@ What it gives you, out of the box:
   synthesis, cross-session handoff batons, and post-compact re-orientation hooks
   keep durable state on disk *before* a `/compact` runs, so a fresh context can
   self-recover from files alone.
-- **A fleet coordination layer.** A full multi-agent system (`WORKFORCE/`):
-  Coordinator + Agent personalities, a messaging/lifecycle protocol, and an
-  `ac-*` toolbelt for spawning, tasking, and reorienting agents.
 - **A skills system.** Local Claude Code Skills (and their Claude.ai GUI Project
-  twins) for the recurring work that binds to OPS's own hooks and layout — memory
+  twins) for the recurring work that binds to OPS's own hooks and layout: memory
   pruning, pre-compact synthesis, session lifecycle, file transfer, and more. The
   portable technique skills (delegation, skill authoring) aren't vendored here:
   OPS *mounts* them from a shared skill source rather than carrying a copy that
@@ -75,7 +75,7 @@ because these defaults decide what Claude Code may do without asking you:
 - **Auto-compaction on** (`autoCompactEnabled: true`, `DISABLE_AUTO_COMPACT`
   `"0"`; idle compaction off). It is a backstop near the end of the context
   window; the harness still compacts by hand at natural breaks
-  (`working-preferences.md` Standing Orders). Haiku 5.5 gets a 100K
+  (`CONTEXT/core.md` § "Rhythm and context"). Haiku 5.5 gets a 100K
   compaction window so its lanes stay cheap.
 
 The same file also pins the model tiers above, sets effort to `xhigh`, empties
@@ -90,7 +90,7 @@ your linuxploitacious checkout, so a local edit (including a `/config` or
 ## Spin-up
 
 **OPS is a template repo, not something you clone-and-run in place.** Your copy
-becomes your memory and your identity — it will hold your context files, your
+becomes your memory and your identity: it will hold your context files, your
 project map, your auto-memory. Set it up correctly the first time.
 
 ### 1. Create your OWN PRIVATE repo from this template
@@ -101,7 +101,7 @@ Use GitHub's **"Use this template"** button, or the CLI:
 gh repo create <you>/<your-name> --template Exploitacious/OPS --private --clone
 ```
 
-**Never fork this repo** — forks of a public repo cannot be made private, and
+**Never fork this repo**: forks of a public repo cannot be made private, and
 **never run your copy public.** Your OPS repo accumulates who you are and what
 you're working on. It has to be private.
 
@@ -128,115 +128,106 @@ Both paths are idempotent. Full procedure, both stages, both OSes: see
 
 ### 3. Open Claude Code in the repo and let it bootstrap
 
-On the first launch in a fresh copy, `CLAUDE.md`'s startup gate finds no
-`CONTEXT/.bootstrapped` marker, so instead of the normal session it reads
-`BOOTSTRAP.md` and runs the first-launch bootstrap: an interview about who you
-are and how you work, plus machine reconnaissance, which together create your
-`CONTEXT/` identity files (`about-me.md`, `brand-voice.md`), tune the generic
-`working-preferences.md` to your knobs, and drop the marker. The doctrine files
-already ship — bootstrap fills in the *who*, not the *how*. On a fresh copy, the
-bootstrap *is* the session. After that, OPS knows you, and every session behaves
-like the original — it just started out not knowing anything about you.
+On the first launch in a fresh copy, the gate in `AGENTS.md` (also named in
+`CONTEXT/core.md`) finds no `CONTEXT/.bootstrapped` marker, so instead of a
+normal session it runs `BOOTSTRAP.md`: an interview about who you are and how
+you work, plus machine reconnaissance. Together they write your identity
+(`CONTEXT/USER.md`), a starter voice profile (`CONTEXT/voice.md`), your rulings
+(`CONTEXT/standing-orders.md`), and the work-tracking, team, and tools slots,
+then drop the marker. The doctrine already ships; bootstrap fills in the *who*,
+never the *how*. On a fresh copy, the bootstrap *is* the session. Under T3 Code,
+open a thread on the `~/OPS` project and say "run the bootstrap"; T3 Code hosts
+also get a one-time browser setup step (`DEPLOYMENT.md` § "T3 Code hosts").
 
 ## What's inside
 
 ```
 OPS/
-├── CLAUDE.md              # how AI sessions work here (startup, activation, standing rules)
-├── README.md              # this file — what OPS is + spin-up
-├── DEPLOYMENT.md          # the two-stage deploy (linuxploitacious -> deploy.sh)
-├── BOOTSTRAP.md           # first-launch interview + machine recon (populates CONTEXT/)
+├── AGENTS.md              # how sessions work in this repo (the first-launch gate, build/test/land)
+├── README.md              # this file: what OPS is + spin-up
+├── DEPLOYMENT.md          # the two-stage deploy (linuxploitacious -> deploy.sh), migration, T3 hosts
+├── BOOTSTRAP.md           # first-launch interview + machine recon (writes your identity files)
 ├── LICENSE                # MIT
-├── CONTRIBUTING.md        # the porting discipline — how private-harness improvements land here
-├── CONTEXT/               # doctrine + your identity (the boot digest rides the system prompt; the rest load on demand)
-│   ├── operating-doctrine.md   #   the universal principles (P1-P15) any session follows
-│   ├── foreman-charter.md      #   always-on foreman posture (rides the cached system prompt via the launch shim)
-│   ├── boot-digest.md          #   identity slot template — rides the system prompt with the charter; BOOTSTRAP fills it
-│   ├── model-roles.md          #   the model-tier policy (foreman / lanes / retired / banned), one source
-│   ├── slots.md                #   context-slot registry (voice, team, tools, work-tracking, doctrine)
-│   ├── fleet-doctrine.md       #   multi-agent coordination rules (loaded on ACTIVATE)
-│   ├── worker-digest.md        #   ~2KB doctrine distillation for spawned sub-agents
+├── CONTRIBUTING.md        # the porting discipline: how private-harness improvements land here
+├── CONTEXT/               # core.md always loaded; everything else on demand
+│   ├── core.md                 #   the always-loaded rules (linked into ~/.claude/rules/ops-core.md)
+│   ├── how-i-work.md           #   principles P1-P15 + situational rules (the why behind core.md)
+│   ├── model-roles.md          #   the model-tier policy, one source
 │   ├── project-kata.md         #   repo shape + documentation discipline
-│   ├── working-preferences.md  #   how you like work run day-to-day (ships generic, tuned by BOOTSTRAP)
-│   ├── about-me.md / brand-voice.md   #   the who layer — ship as templates; BOOTSTRAP fills them in
+│   ├── slots.md                #   context-slot registry (voice, team, tools, work-tracking, doctrine)
+│   ├── USER.md / voice.md / standing-orders.md   #   your identity, voice, rulings: templates BOOTSTRAP fills, never synced
+│   ├── work-tracking.md / team.md / tools.md / doctrine.md   #   the context slots
 │   └── projects/               #   per-project lessons, loaded only when on that project
 ├── SKILLS/                # Claude Code Skills + GUI Project twins (symlinked -> ~/.claude/skills/)
-├── WORKFORCE/             # the fleet: personalities, protocol, and the ac-* toolbelt
-│   ├── personalities/          #   Coordinator + Agent role definitions
-│   ├── protocol/               #   messaging, lifecycle, escalation, closeout, lessons/
-│   └── bin/                    #   ac-* helpers (spawn, task, msg, reorient, memory-sync, ...)
 ├── .claude-config/        # Stage 2 deploy + the machinery it does not itself install
-│   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (symlinks, PATH, memory-sync, plugin retirement, ...)
+│   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (links, core rule, skill mounts, memory sync, ...)
 │   ├── hooks/                  #   SessionStart briefing, pre-compact snapshot, secrets/git guards
-│   ├── systemd/                #   ops-verify + ops-memory-gc timers (nightly drift gate, weekly GC)
+│   ├── systemd/                #   ops-verify timer (nightly drift gate) + optional tmux-main
+│   ├── remote-sessions/        #   hand-run tmux sessions you remote-control (see its README)
 │   ├── agents/ + workflows/    #   sub-agent definitions + multi-lane workflow scripts
-│   └── bin/                    #   operator utilities (grabit file transfer, secrets scan, verify)
-├── .claude-memory/        # per-machine Claude auto-memory dirs (git-synced via ac-memory-init)
+│   └── bin/                    #   memory-index/-init, root wrapper, skills-vendor, verify-ops, grabit, tests/
+├── .claude-memory/        # per-machine Claude auto-memory dirs (git-synced via bin/memory-init)
 ├── .claude-handoffs/      # cross-session / cross-machine handoff batons
 ├── PROJECTS/              # your working repos (2nd-level subdirs are their own repos, gitignored)
 ├── DELIVERABLES/          # cross-cutting one-off outputs not tied to a single project
-├── ARCHIVE/               # closed-project tarballs (ac-close-project --archive)
+├── ARCHIVE/               # machine-local archives kept out of git
 └── NOTES/                 # an Obsidian vault for personal knowledge
 ```
 
 The memory pattern is the load-bearing idea: durable state (doctrine, identity,
 project lessons, auto-memory, handoff batons) lives in tracked files, so a fresh
-context — after a compaction, a new machine, or a profile switch — recovers by
+context (after a compaction, a new machine, or a profile switch) recovers by
 reading the repo, not by remembering.
 
 ## Boot surface
 
-What rides your system prompt, and why. A SessionStart hook can only print a
-short preview to the model (hook stdout above ~8KB is truncated to a ~2KB
-preview), so the old "inject the charter through a hook" approach silently lost
-most of a long charter. OPS instead rides the boot surface through the cached
-system prompt: the `claude()` launch shim (written by `deploy.sh` into the
-untracked `~/.<shell>rc.local` seam) appends the whole `CONTEXT/foreman-charter.md`
-plus `CONTEXT/boot-digest.md` via `--append-system-prompt`, pinned with
-`--system-prompt-snapshot on` so it lands whole every launch and survives resume
-and compact verbatim. The session briefing prints a `Boot:` line with the
-content sha, so you can see the exact version that booted. `foreman-charter.sh`
-is retired for Claude Code because of this (it stays only as an adapter seam for
-a non-Claude-Code agent).
+What every session carries, and why. `CONTEXT/core.md` is one file under
+15,360 bytes with the rules every session and lane needs on every turn.
+`deploy.sh` links it into `~/.claude/rules/ops-core.md`, and Claude Code loads
+every user rule file at launch on every launch path, with no prompt: the
+terminal, T3 Code threads, IDE extensions, `claude -p`, and the lanes they
+spawn. The session briefing's `Boot:` line says whether the link is in place.
+
+This replaces an earlier boot that appended a foreman charter and an identity
+digest to the system prompt through a `claude()` shell function. Only launches
+typed into an interactive shell ever ran that function, so T3 Code and IDE
+sessions booted without doctrine. The `claude()` function remains, but only to
+add ultracode to terminal launches.
 
 For a forker, this means:
 
-- **Author your digest.** `CONTEXT/boot-digest.md` ships as a slot template
-  (the "Example Corp" flavor, like `about-me.md`). Replace every EXAMPLE line
-  with your own facts and remove the `BOOT-DIGEST-TEMPLATE: unfilled` canary
-  line at the top; BOOTSTRAP does this on first launch. It is hard-excluded from
-  `harness-update`, so a template refresh never clobbers your filled copy.
-- **Context loads on demand.** With the digest grounding every session, the full
-  `about-me.md` / `working-preferences.md` / `operating-doctrine.md` load only
-  when a task needs them, routed by the thin context skills (`operator-voice`,
-  `harness-readme`, `harness-deploy`, `project-kata`, `projects-map`, `machines`,
-  `fleet-doctrine`).
-- **Rest-stop cadence.** Compaction is a rest stop, not a scarcity response.
-  `context-watch.sh`'s readout is calm and boundary-aware (a closed task, a
-  landed push/merge, a branch switch, a >2h gap), and the compact cadence is a
-  shipped standing order (`working-preferences.md` § Standing Orders).
-- **Mount portable skills.** `.claude-config/bin/skills-vendor.sh` +
-  `SKILLS/VENDORED.tsv` mirror the shared skill source into `SKILLS/`; see
-  `SKILLS/README.md`.
-- **The drift gate checks it.** `verify-ops.sh` fails if the shim loses a boot
-  flag, if the digest is missing or still the unfilled template on a bootstrapped
-  copy, if `context-watch` grows scarcity vocabulary, or if the digest is not
-  excluded from `harness-update`.
+- **Your identity is not in the boot.** `USER.md`, `voice.md`, and
+  `standing-orders.md` load on demand, through the core's "Where to look" table
+  and the context skills (`operator-voice`, `harness-readme`, `harness-deploy`,
+  `project-kata`, `projects-map`, `machines`). BOOTSTRAP fills them, and
+  `harness-update` never syncs them, so a template refresh never clobbers them.
+- **Keep the core small and generic.** It is paid on every turn of every
+  session and lane, and the template sync updates it. Put your rulings in
+  `standing-orders.md`, never in `core.md`.
+- **Rest-stop cadence.** Compaction is a rest stop, not a scarcity response:
+  compact by hand at natural breaks (core.md § "Rhythm and context");
+  auto-compaction is the backstop.
+- **Mount portable skills.** `deploy.sh` clones the public skill source and
+  runs `.claude-config/bin/skills-vendor.sh sync`; see `SKILLS/README.md`.
+- **The drift gate checks it.** `verify-ops.sh` fails if the core is missing,
+  over budget, or not linked (check 16), if a root `CLAUDE.md` would hide
+  `AGENTS.md` (1b), if `USER.md` is still the template on a bootstrapped copy
+  (21), or if `harness-update` stops excluding an identity file (23).
 
 ## Posture
 
 This is a working shell, published as-is. It's occasionally updated when the
 author's own setup changes. There is **no support promise and no SLA.** Issues
 are open; treat them as a place to compare notes, not a help desk. It ships MIT,
-so reuse the mechanics in your own harness freely — just don't run *this
+so reuse the mechanics in your own harness freely; just don't run *this
 template's* lineage as a public repo of your own life.
 
 ## A note on the name
 
 OPS ("Operator's Shell") is unrelated to Anthropic's "Claude Cowork" desktop
-app. Same broad space, different thing — this is a self-hosted configuration
+app. Same broad space, different thing: this is a self-hosted configuration
 layer for the Claude Code CLI, not a desktop product.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT; see [`LICENSE`](LICENSE).

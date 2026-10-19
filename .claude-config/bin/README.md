@@ -1,16 +1,16 @@
-# `.claude-config/bin/` — operator utilities
+# `.claude-config/bin/`: operator utilities
 
 Small, tracked helper scripts that ship with OPS and sync to every machine.
 
-## `compact-cycle.sh` — automated /compact for a Claude session in tmux
+## `compact-cycle.sh`: automated /compact for a Claude session in tmux
 
 The deterministic half of the automated compact ritual (the judgment half is
 the `pre-compact-synthesis` skill, which runs the synthesis and writes the
-resume baton BEFORE spawning this). A session cannot fire `/compact` on itself
-— this spawns a detached `Compactor-<Key>` tmux session (plain bash, no Claude)
+resume baton BEFORE spawning this). A session cannot fire `/compact` on itself,
+so this spawns a detached `Compactor-<Key>` tmux session (plain bash, no Claude)
 that waits for the target pane to go idle, types `/compact`, watches until
 compaction completes, types the baton (or `--resume` text) as the next user
-message, and self-destructs. On error/timeout it never types the resume — the
+message, and self-destructs. On error/timeout it never types the resume: the
 target stays paused with synthesis already on disk.
 
 ```
@@ -20,18 +20,18 @@ compact-cycle.sh --target <Session|Session:win.pane> [--baton FILE] [--resume "T
 
 Runtime state (locks, logs, status, batons): `~/.claude-compact-cycle/`.
 Consumers: the skill's self-compact exit, the `[context-watch]` escalation
-ladder (`hooks/context-watch.sh` — Stop nags at 65/78/86/92% of the window
+ladder (`hooks/context-watch.sh`: Stop nags at 65/78/86/92% of the window
 plus mid-turn PostToolUse injections from 86%; both registered in the Stage 1
-`settings.json` template), and `WORKFORCE/bin/ac-compact-peer` (fleet,
-`--no-resume`). tmux gotcha baked in: targets use the `=Name:` exact form —
+`settings.json` template); `--no-resume` serves a session that re-wakes on
+its own. tmux gotcha baked in: targets use the `=Name:` exact form:
 bare names unique-prefix-match and pane-level commands reject bare `=Name`.
 
-## `claude-window-ping.sh` — scheduled 5h-window opener
+## `claude-window-ping.sh`: scheduled 5h-window opener
 
 Cron-fired dumb pipe: sends one headless `ping` to a brand-new Claude Code
 session per configured profile so the 5-hour usage window starts counting at
 times the Operator chooses, with nobody at the keyboard. MCP stripped
-(`--strict-mcp-config` + empty config), runs from `$HOME`, outside tmux — so
+(`--strict-mcp-config` + empty config), runs from `$HOME`, outside tmux: so
 ping sessions never enter the remote-session registry and load no project
 context.
 
@@ -44,14 +44,14 @@ context.
 Knobs: `CC_WINDOW_PING_PROFILES` (space-separated `name=config_dir` pairs,
 default `default=$HOME/.claude`; a pair without `=` is skipped loud with an
 rc=2 status row), `CC_WINDOW_PING_MODEL` (default `sonnet`),
-`CC_WINDOW_PING_TIMEOUT` (seconds per profile, default 180 — worst-case wall
+`CC_WINDOW_PING_TIMEOUT` (seconds per profile, default 180: worst-case wall
 time is N profiles x timeout). Surfaces: `~/.local/state/window-ping/ping.log`
 (append log) and `last-status.tsv` (atomic tmp+mv; rc verbatim, 124 = timeout,
 127 = binary missing, 2 = config error), which `hooks/session-briefing.sh`
 reads to flag a failed or stale (default ≥25h, `CC_WINDOW_PING_STALE_HOURS`)
 ping at next session start. Overlapping runs are serialized by a non-blocking
 flock. `claude-window-ping-selftest.sh` proves every unattended path against
-a mock binary — no real API usage. Machine-local: Stage 2 does not deploy the
+a mock binary: no real API usage. Machine-local: Stage 2 does not deploy the
 crontab; add the lines by hand per box.
 
 ## `model-probe.sh`: do the pinned models answer on this account?
@@ -106,11 +106,56 @@ retired id, on any Haiku other than `claude-haiku-5-5`, and on an
 `verify-ops-selftest.sh` sources the gate and drives those checks plus the
 SessionStart matcher check against fixture trees under a throwaway `HOME`.
 
-## `grabit` — file transfer over Tailscale
+## `memory-index`, `memory-init`, `memory-init.ps1`: auto-memory
+
+`memory-init` (bash; `memory-init.ps1` on Windows) walks Claude Code's encoded
+cwd dirs under `<config>/projects/` and links each `memory/` into
+`.claude-memory/<host>-<encoded>/`, so auto-memory is git-synced; deploy runs
+it with `--auto-commit`. `memory-index <dir>` regenerates a pool's `MEMORY.md`
+from each entry's frontmatter (atomic write; `--check` prints without writing);
+the `memory-index.sh` SessionStart hook calls it, so never hand-edit an index.
+Both moved here from the retired fleet's `WORKFORCE/bin` (formerly
+`ac-memory-*`). Test: `tests/memory-index-test.sh`.
+
+## `claude-root-wrapper.sh`: root permission mode and shared-host lock
+
+Sourced from `/root/.zshrc` and `/root/.bashrc` (deploy wires it when
+passwordless sudo exists). As root it injects `--permission-mode auto`
+(Claude Code refuses bypass mode as root); for root, or with
+`CLAUDE_SHARED_HOST` exported, it holds a `flock` on
+`<config dir>/.instance.lock` so two UIDs sharing a config dir never run at
+once, and fails closed when `flock` is missing. Your own shell is not wrapped.
+Replaces the fleet's `claude-wrapper.sh`. Test:
+`tests/claude-root-wrapper-test.sh`.
+
+## `skills-vendor.sh`: the skill mounts
+
+Mirrors each `SKILLS/VENDORED.tsv` row from its source clone under `PROJECTS/`
+into `SKILLS/<name>/` (`sync`, the default), or reports drift (`--check`: OK,
+DRIFT, MISSING; the gate behind `verify-ops.sh` check 22). Uses rsync with a
+content comparison where installed and tar otherwise. Honors `OPS_DIR`. Deploy
+clones the public source once and runs `sync`. Test:
+`tests/skills-vendor-test.sh`.
+
+## `tests/`
+
+Runnable suites for the scripts above and for deploy's rc and core-link
+wiring (`deploy-rc-wiring-test.sh`, which extracts the real functions from
+`deploy.sh` and runs them against mktemp fixtures with a `sudo` shim, never a
+live rc). Each exits 0 when every case passes:
+
+```bash
+for t in ~/OPS/.claude-config/bin/tests/*.sh; do bash "$t" || echo "FAILED: $t"; done
+```
+
+The older `*-selftest.sh` scripts beside their subjects (`verify-ops`,
+`model-probe`, `claude-window-ping`, and the hooks) work the same way.
+
+## `grabit`: file transfer over Tailscale
 
 Moves files between a (usually headless) OPS box and whatever machine you're
 driving it from, without SFTP or cloud. Everything rides the tailnet
-(WireGuard-encrypted) and is **never public** — the browser mode uses
+(WireGuard-encrypted) and is **never public**: the browser mode uses
 `tailscale serve`, not `funnel`.
 
 ```
@@ -128,7 +173,7 @@ grabit -h
 connected from and Taildrops the file straight to that machine's Tailscale
 inbox. **Windows auto-saves received files to your Downloads folder** (no tray
 prompt); on macOS/Linux run `tailscale file get ~/Downloads`. Wherever you SSH
-in from, the file comes back to you — no flags.
+in from, the file comes back to you: no flags.
 
 ### Two modes, when to use which
 - **Push (default):** one-shot, no sudo, lands in your inbox. Best for grabbing
@@ -136,7 +181,7 @@ in from, the file comes back to you — no flags.
 - **Serve (`--serve`):** stages the named files into `~/.cache/grabit-serve` and
   serves *only those* over tailnet HTTPS. Best for browsing/grabbing several
   files, or when the target isn't a Tailscale device. Needs sudo (serving a path
-  is privileged) — that's why push is the default.
+  is privileged): that's why push is the default.
 
 ### Safety
 `--serve` only ever exposes files you explicitly name (staged into a scratch
