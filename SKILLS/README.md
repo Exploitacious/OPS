@@ -98,7 +98,7 @@ Local entries live in this folder. Mounted skills are listed in the second table
 | `machines` | yes | no | Thin context skill: routes to the `CONTEXT/machines.md` slot for host topology; degrades (OPS ships no machines.md) to asking or inferring. |
 | `harness-deploy` | yes | no | Thin context skill: routes to `DEPLOYMENT.md` when changing Stage 1 / Stage 2 install. |
 | `harness-readme` | yes | no | Thin context skill: routes to `README.md` for "what exists / where does X live". |
-| `design-method` | yes | no | Design method (UI, web, landing pages, email templates) with an optional brand layer read from `design/brand.md`; free-design until the brand file is filled. |
+| `design-method` | yes | no | Design method (UI, web, landing pages, email templates) with an optional brand layer read from `design-method/brand.md`; free-design until the brand file is filled. |
 
 Mounted from [`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills) (public, MIT) through `VENDORED.tsv`. Edit these at the source, then sync; never in `SKILLS/`.
 

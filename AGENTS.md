@@ -28,9 +28,10 @@ current task allows.
 
 - Gate: `bash .claude-config/bin/verify-ops.sh` after any harness change. It
   checks `~/OPS`; set `OPS_DIR` to check another checkout. Its host checks
-  (the core link, the Stage-1 settings) still read `$HOME`, so on a machine
-  with no deployed OPS run it in a throwaway `HOME` (DEPLOYMENT.md, "Testing a
-  deploy under a throwaway HOME").
+  (the core link, the Stage-1 settings) still read `$HOME`, so for a checkout
+  other than the deployed one, or on a machine with no deployed OPS, run it in
+  a throwaway `HOME` (DEPLOYMENT.md, "Testing a deploy under a throwaway
+  HOME").
 - Tests: `.claude-config/bin/tests/*-test.{sh,py}`, `.claude-config/bin/*-selftest.*`,
   and `.claude-config/hooks/*-selftest.sh`. Run the ones covering what you
   changed. A suite that runs a tool that deletes or moves files starts with

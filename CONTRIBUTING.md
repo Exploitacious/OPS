@@ -94,8 +94,10 @@ in explicit CommonJS, then module, mode.
 
 **2. Every suite.** Run from your checkout root. This is the CI command; it
 exits non-zero if any suite fails. It needs `bwrap` (`sudo apt install
-bubblewrap`; see "Where destructive tests run" below) and, for the last loop,
-`pwsh`:
+bubblewrap`; see "Where destructive tests run" below), git 2.45 or newer and
+GNU coreutils 9.5 or newer for the four `branch-gc` suites (Ubuntu 24.04 ships
+git 2.43 and coreutils 9.4, so those suites fail there; CI runs on 26.04), and,
+for the last loop, `pwsh`:
 
 ```bash
 fails=0
@@ -134,8 +136,12 @@ settings), so on a machine with no deployed OPS, `OPS_DIR="$PWD"
 .claude-config/bin/verify-ops.sh` reports a FAIL for the missing link, which
 says nothing about your change. Run it the way CI does, in a throwaway `HOME`:
 `DEPLOYMENT.md`, "Testing a deploy under a throwaway HOME" has the commands.
-On a machine where OPS is already deployed, `OPS_DIR="$PWD"
-.claude-config/bin/verify-ops.sh` checks your checkout directly.
+On a machine where OPS is deployed, `OPS_DIR="$PWD"
+.claude-config/bin/verify-ops.sh` reads your checkout's files, but its host
+checks still read `$HOME`: the core-link check compares the deployed
+`~/.claude/rules/ops-core.md` with your checkout's `CONTEXT/core.md`, so from
+any checkout other than the deployed `~/OPS` that check FAILs whatever you
+changed. The throwaway-HOME run is the clean test.
 
 **4. Secrets and private terms.** `.claude-config/bin/secrets-scan.sh CONTEXT
 SKILLS .claude-config` is OPS's own detector (it takes a couple of minutes: it
