@@ -52,6 +52,12 @@ ports those pieces from the maintainer's private harness.
   deploy's failure summary mentions the core only when the core rule failed;
   the pre-compact-synthesis skill states the push gate's verdict rule;
   `verify-ops.sh` check 25 warns on a memory link whose pool is gone.
+- **`guard-selftest.sh` counts every failure.** Its rtk probes read their
+  JSON through a pipe, which ran each probe in a subshell: a failing rtk guard
+  printed FAIL and the selftest still exited 0 with "ALL GUARDS ENFORCE", the
+  exit code `deploy.ps1` acts on. They read a here-string now, and
+  `tests/guard-selftest-test.sh` inverts one guard verdict per probe site and
+  checks the exit code and the count.
 - **Ported:** `bin/transcript-usage.py` (token profile from transcripts) with
   a test.
 
