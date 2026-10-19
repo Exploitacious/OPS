@@ -38,7 +38,10 @@
 #   --max-kb N       refuse a packet over N KB (default 400): split the change
 #                    instead, because a reviewer that cannot hold the whole
 #                    diff reviews part of it and says nothing about the rest
-#   --timeout S      wall-clock cap on the reviewer command (default 3600)
+#   --timeout S      wall-clock cap on the reviewer command (default 3600).
+#                    Enforced by timeout or gtimeout; with neither on PATH
+#                    (stock macOS: brew install coreutils) the reviewer is
+#                    not run and the exit is 3
 #   --dry-run        build and write the packet, do not call the reviewer
 #
 # Configure: OPS_REVIEWER_CMD, a shell command that reads the packet on stdin
@@ -52,8 +55,9 @@
 # Operator's call.
 #
 # Exit: 0 reviewed (or packet written, --dry-run) · 2 usage · 3 not configured
-#       (OPS_REVIEWER_CMD unset) · 4 packet over --max-kb · 5 the reviewer
-#       failed, timed out or printed nothing · 6 git could not build the diff
+#       (OPS_REVIEWER_CMD unset, or no timeout command) · 4 packet over
+#       --max-kb · 5 the reviewer failed, timed out or printed nothing · 6 git
+#       could not build the diff
 set -uo pipefail
 
 die() { local rc="$1"; shift; printf 'second-vendor-review: %s\n' "$*" >&2; exit "$rc"; }
@@ -84,6 +88,17 @@ done
 # the optional path, and the fallback is the Opus refutation lane, not an error.
 if [ "$DRY" = 0 ] && [ -z "${OPS_REVIEWER_CMD:-}" ]; then
   die 3 "OPS_REVIEWER_CMD is not set. This reviewer is optional: without a second vendor, expensive-miss code gets an Opus 5.5 refutation lane plus the Operator's read (CONTEXT/how-i-work.md, Review pickup)."
+fi
+# The reviewer runs under a timeout command or not at all. Without one the cap
+# was skipped in silence: a hung reviewer blocked forever and a slow one was
+# written up as a review (2026-10-19). Stock macOS has no timeout; Homebrew's
+# coreutils installs GNU's as gtimeout. Both exit 124 when the cap kills.
+TOBIN=""
+if [ "$DRY" = 0 ]; then
+  for t in timeout gtimeout; do
+    command -v "$t" >/dev/null 2>&1 && { TOBIN="$t"; break; }
+  done
+  [ -n "$TOBIN" ] || die 3 "no timeout command (timeout or gtimeout) is on PATH, so --timeout cannot be enforced and the reviewer was not run. Install GNU coreutils (macOS: brew install coreutils); until then expensive-miss code gets the fallback, an Opus 5.5 refutation lane plus the Operator's read (CONTEXT/how-i-work.md, Review pickup)."
 fi
 
 REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" || die 6 "$REPO is not inside a git repository"
@@ -139,12 +154,10 @@ fi
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/second-vendor-review.XXXXXX")" || die 2 "cannot create a scratch directory"
 trap 'rm -rf "$SCRATCH"' EXIT
-TO=()
-command -v timeout >/dev/null 2>&1 && TO=(timeout -k 30 "$TIMEOUT")
 # Only the command's first word is recorded: the rest can carry a key.
 RCMD="${OPS_REVIEWER_CMD%% *}"
 rc=0
-( cd "$SCRATCH" && ${TO[@]+"${TO[@]}"} bash -c "$OPS_REVIEWER_CMD" ) < "$PACKET" > "$SCRATCH/review.out" 2> "$SCRATCH/review.err" || rc=$?
+( cd "$SCRATCH" && "$TOBIN" -k 30 "$TIMEOUT" bash -c "$OPS_REVIEWER_CMD" ) < "$PACKET" > "$SCRATCH/review.out" 2> "$SCRATCH/review.err" || rc=$?
 status=ok
 if [ "$rc" = 124 ]; then status="timed out after ${TIMEOUT}s"
 elif [ "$rc" != 0 ]; then status="reviewer exited $rc"

@@ -205,10 +205,12 @@ second-vendor-review --base REF --digest FILE [--repo DIR] [--out FILE] [--exclu
 export OPS_REVIEWER_CMD='codex exec --sandbox read-only --skip-git-repo-check -'   # one example
 ```
 
-Exit: 0 reviewed, 2 usage, 3 not configured, 4 packet over `--max-kb`
-(default 400: split the change), 5 the reviewer failed, timed out or printed
-nothing (the result file says NO REVIEW), 6 git could not build the diff, or
-it is empty. Test: `tests/second-vendor-review-test.sh`.
+Exit: 0 reviewed, 2 usage, 3 not configured (no `OPS_REVIEWER_CMD`, or no
+`timeout` or `gtimeout` on PATH to enforce `--timeout`; stock macOS needs
+`brew install coreutils`), 4 packet over `--max-kb` (default 400: split the
+change), 5 the reviewer failed, timed out or printed nothing (the result file
+says NO REVIEW), 6 git could not build the diff, or it is empty. Test:
+`tests/second-vendor-review-test.sh`.
 
 ## `transcript-usage.py`: token profile from transcripts
 

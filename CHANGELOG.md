@@ -58,6 +58,11 @@ ports those pieces from the maintainer's private harness.
   exit code `deploy.ps1` acts on. They read a here-string now, and
   `tests/guard-selftest-test.sh` inverts one guard verdict per probe site and
   checks the exit code and the count.
+- **`second-vendor-review` never runs a reviewer without its cap.** With no
+  `timeout` or `gtimeout` on PATH (stock macOS) it skipped `--timeout` in
+  silence, so a hung reviewer blocked forever and a slow one was written up as
+  a review. It now exits 3 before any git work and names the fix
+  (`brew install coreutils`); `gtimeout` alone is enough.
 - **Ported:** `bin/transcript-usage.py` (token profile from transcripts) with
   a test.
 

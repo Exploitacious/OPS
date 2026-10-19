@@ -10,6 +10,9 @@
 #     (an empty scratch dir), and its stdout lands in the result file
 #   - a reviewer that fails, times out or prints nothing is exit 5 and a
 #     result file that says NO REVIEW, never a review
+#   - with no timeout command on PATH it exits 3 and never calls the reviewer
+#     (unbounded, a hung reviewer blocked forever and a slow one was written up
+#     as a review); gtimeout alone (Homebrew coreutils) enforces the cap
 #   - a packet over --max-kb is exit 4; a bad base or an empty diff is exit 6
 #   - --dry-run writes the packet and calls nothing
 # Every repo and the reviewer itself are fixtures in this test's temp dir.
@@ -20,6 +23,14 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null TMPDIR="$T/tmp"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
 mkdir -p "$TMPDIR"
 PASS=0; FAIL=0
+# A host with no timeout command (stock macOS) gets a stand-in that runs the
+# command unbounded (the tool passes -k 30 S), so the cases that do not test
+# the cap still run there; the cases that need a real cap skip.
+HOST_TO="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)" || HOST_TO=""
+if [ -z "$HOST_TO" ]; then
+  mkdir -p "$T/shim"; printf '#!/bin/sh\nshift 3; exec "$@"\n' > "$T/shim/timeout"; chmod +x "$T/shim/timeout"
+  export PATH="$T/shim:$PATH"
+fi
 ok()  { PASS=$((PASS+1)); echo "PASS: $*"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $*"; }
 
@@ -59,9 +70,43 @@ out="$(cd "$R" && OPS_REVIEWER_CMD="$T/failing" "$TOOL" --base HEAD~1 --digest "
 printf '#!/usr/bin/env bash\ncat >/dev/null\n' > "$T/silent"; chmod +x "$T/silent"
 out="$(cd "$R" && OPS_REVIEWER_CMD="$T/silent" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --out "$T/silent.md" 2>&1)"; rc=$?
 [ "$rc" = 5 ] && grep -q 'NO REVIEW: reviewer printed nothing' "$T/silent.md" && ok "silent reviewer: exit 5" || bad "silent reviewer: rc=$rc: $out"
-printf '#!/usr/bin/env bash\ncat >/dev/null; sleep 30\n' > "$T/slow"; chmod +x "$T/slow"
-out="$(cd "$R" && OPS_REVIEWER_CMD="$T/slow" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --timeout 1 --out "$T/slow.md" 2>&1)"; rc=$?
-[ "$rc" = 5 ] && grep -q 'timed out after 1s' "$T/slow.md" && ok "slow reviewer: exit 5 on the timeout" || bad "slow reviewer: rc=$rc: $out"
+if [ -n "$HOST_TO" ]; then
+  printf '#!/usr/bin/env bash\ncat >/dev/null; sleep 30\n' > "$T/slow"; chmod +x "$T/slow"
+  out="$(cd "$R" && OPS_REVIEWER_CMD="$T/slow" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --timeout 1 --out "$T/slow.md" 2>&1)"; rc=$?
+  [ "$rc" = 5 ] && grep -q 'timed out after 1s' "$T/slow.md" && ok "slow reviewer: exit 5 on the timeout" || bad "slow reviewer: rc=$rc: $out"
+else
+  echo "SKIP: slow reviewer timeout (no timeout command)"
+fi
+
+# A PATH with everything the tool and the stub reviewer run, but no timeout
+# command. Before the fix the cap was skipped in silence there: this reviewer
+# ran its full 5 s and was written up as a review (status ok, exit 0).
+mkdir -p "$T/noto"
+for tool in bash env git cat sed wc mktemp date dirname basename mkdir rm tail head sleep; do
+  p="$(command -v "$tool")" && ln -s "$p" "$T/noto/$tool"
+done
+printf '#!/usr/bin/env bash\ncat >/dev/null; : > "%s/late-ran"; sleep 5; echo "late review"\n' "$T" > "$T/late"; chmod +x "$T/late"
+start=$SECONDS
+out="$(cd "$R" && PATH="$T/noto" OPS_REVIEWER_CMD="$T/late" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --timeout 1 --out "$T/noto.md" 2>&1)"; rc=$?
+[ "$rc" = 3 ] && grep -q 'no timeout command' <<<"$out" && grep -q 'Opus 5.5 refutation lane' <<<"$out" \
+  && [ ! -e "$T/late-ran" ] && [ ! -e "$T/noto.md" ] \
+  && ok "no timeout command: exit 3, the reviewer is never run unbounded" \
+  || bad "no timeout command: rc=$rc after $((SECONDS - start)) s, reviewer ran: $([ -e "$T/late-ran" ] && echo yes || echo no): $out"
+rm -f "$T/late-ran"
+out="$(cd "$R" && PATH="$T/noto" OPS_REVIEWER_CMD="$T/late" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --dry-run --out "$T/noto-dry.md" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -s "$T/noto-dry.md.packet.md" ] && [ ! -e "$T/late-ran" ] \
+  && ok "no timeout command: --dry-run still writes the packet" || bad "no timeout command, dry run: rc=$rc: $out"
+if [ -n "$HOST_TO" ]; then
+  mkdir -p "$T/gto"; cp -P "$T/noto"/* "$T/gto/"
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$HOST_TO" > "$T/gto/gtimeout"; chmod +x "$T/gto/gtimeout"
+  start=$SECONDS
+  out="$(cd "$R" && PATH="$T/gto" OPS_REVIEWER_CMD="$T/late" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --timeout 1 --out "$T/gto.md" 2>&1)"; rc=$?
+  [ "$rc" = 5 ] && grep -q 'timed out after 1s' "$T/gto.md" && ! grep -q 'late review' "$T/gto.md" \
+    && ok "gtimeout alone (Homebrew coreutils) enforces --timeout: exit 5" \
+    || bad "gtimeout alone: rc=$rc after $((SECONDS - start)) s: $out"
+else
+  echo "SKIP: gtimeout enforces the cap (no timeout command)"
+fi
 
 head -c 300000 /dev/urandom | base64 > "$R/big.txt"; git -C "$R" add big.txt; git -C "$R" commit -q -m big
 out="$(cd "$R" && OPS_REVIEWER_CMD="$T/reviewer" "$TOOL" --base HEAD~2 --digest "$T/digest.md" --out "$T/big.md" 2>&1)"; rc=$?
