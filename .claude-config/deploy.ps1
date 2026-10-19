@@ -9,13 +9,21 @@
 
     What this script does (in order):
       1. Symlink ~/.claude/{skills,commands,agents,workflows}/ -> OPS sources
-      2. Wire WORKFORCE/bin PATH onto the untracked profile.local.ps1 seam
-      3. Initialize Claude Code auto-memory git-sync (ac-memory-init.ps1)
-      4. Seed the trust anchor ($HOME trusted, no folder-trust prompt)
-      5. Emit the always-on ultracode shim to the profile.local.ps1 seam
-      6. Register the daily backup scheduled task (dynamic bash + WorkingDirectory)
-      7. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
-      8. Pin CLAUDE_CODE_GIT_BASH_PATH + run the security-guard self-test
+      2. Link the always-loaded core: ~/.claude/rules/ops-core.md ->
+         CONTEXT/core.md (a symlink; where Windows refuses one without
+         Developer Mode, a rule file importing the core)
+      3. Strip the retired fleet PATH block from the profile.local.ps1 seam
+      4. Initialize Claude Code auto-memory git-sync (bin/memory-init.ps1)
+      5. Seed the trust anchor ($HOME trusted, no folder-trust prompt)
+      6. Emit the always-on ultracode shim to the profile.local.ps1 seam
+      7. Register the daily backup scheduled task (dynamic bash + WorkingDirectory)
+      8. Mount the shared skills: clone the public skill source under
+         PROJECTS/ when absent, then run bin/skills-vendor.sh sync in Git Bash
+      9. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
+     10. Pin CLAUDE_CODE_GIT_BASH_PATH + run the security-guard self-test
+
+    -NoSystem skips the scheduled task (a system-wide registration), for test
+    installs; deploy.sh's --no-system is the Linux counterpart.
 
     Never writes settings.json or the model pin: Stage 1 owns that file, and
     bin/model-probe.sh only reports whether the pinned models answer.
@@ -23,14 +31,18 @@
     All host-specific content goes to the untracked profile.local.ps1 seam, never
     $PROFILE (a shim/symlink tied to the PUBLIC linuxploitacious repo).
 
-    Note: claude-wrapper (root/user flock) is Linux-only -- Windows
+    Note: claude-root-wrapper.sh (root permission mode, shared-host lock) is Linux-only -- Windows
     runs single-user so the wrapper isn't needed here.
 
     Idempotent -- safe to re-run after any OPS git pull.
     Full procedure: see ~/OPS/DEPLOYMENT.md.
 #>
 
+param([switch]$NoSystem)
+
 $ErrorActionPreference = "Stop"
+# Steps that must not abort the rest record a failure here; the summary says so.
+$DeployFailed = @()
 
 # --- Colors & Helpers ---
 function Write-Status  { param([string]$Msg, [string]$Color = "White") Write-Host $Msg -ForegroundColor $Color }
@@ -48,7 +60,7 @@ $BackupDir  = Join-Path $ConfigDir "backup"
 # linuxploitacious -- deploy.ps1 must NOT deploy them.
 
 # --- Untracked machine-local profile seam ---
-# OPS-specific, host-specific content (WORKFORCE/bin PATH, ultracode shim) is
+# OPS-specific, host-specific content (the ultracode shim) is
 # written to profile.local.ps1 -- an UNTRACKED file the tracked
 # linuxploitacious profile sources at its end -- NEVER to $PROFILE.
 # $PROFILE is a symlink/shim tied to the PUBLIC linuxploitacious repo;
@@ -175,39 +187,92 @@ foreach ($entry in $LinkMap) {
     }
 }
 
-# --- WORKFORCE/bin (multi-agent helpers) ---
+# --- The always-loaded core: ~/.claude/rules/ops-core.md -> CONTEXT/core.md ---
+# Claude Code loads every user rule file at launch on every launch path, so the
+# core needs no launch flag (deploy.sh explains the choice). Prefer a symlink;
+# Windows refuses one without Developer Mode or elevation, so fall back to a
+# small rule file that imports the core by absolute path. UNVERIFIED on Windows:
+# that Claude Code resolves a drive-letter import; run /context once to confirm.
 Write-Host ""
-Write-Status "Wiring WORKFORCE/bin..." "Yellow"
-
-$WorkforceBin = Join-Path $OpsRoot "WORKFORCE\bin"
-
-if (Test-Path $WorkforceBin) {
-    $pathTag = "# --- OPS WORKFORCE/bin PATH (localrc seam) ---"
-    # Single-quoted here-string: resolved at RUNTIME (user-agnostic), never at
-    # deploy time -- no hardcoded absolute path lands in the seam.
-    $pathBody = @'
-# --- OPS WORKFORCE/bin PATH (localrc seam) ---
-$env:Path = "$(Join-Path $env:USERPROFILE 'OPS\WORKFORCE\bin');$env:Path"
-'@
-    if (Add-SeamBlock -Marker $pathTag -Body $pathBody -MatchLine 'WORKFORCE\bin') {
-        Write-Good "WORKFORCE/bin wired onto PATH via profile.local.ps1 seam."
+Write-Status "Linking the always-loaded core..." "Yellow"
+$CoreSrc     = Join-Path $OpsRoot "CONTEXT\core.md"
+$CoreRuleDir = Join-Path $ClaudeHome "rules"
+$CoreRule    = Join-Path $CoreRuleDir "ops-core.md"
+$CoreImport  = "@" + ($CoreSrc -replace '\\', '/')
+function Set-CoreRule {
+    if (-not (Test-Path $CoreSrc)) { Write-Bad "CONTEXT\core.md missing at $CoreSrc -- sessions would boot without the core."; return $false }
+    if (Test-Path $CoreRuleDir) {
+        if ((Get-Item $CoreRuleDir -Force).LinkType) { Write-Bad "$CoreRuleDir is a link -- refusing to write into it."; return $false }
+    } else { New-Item -ItemType Directory -Path $CoreRuleDir -Force | Out-Null }
+    if (Test-Path $CoreRule) {
+        $it = Get-Item $CoreRule -Force
+        if ($it.LinkType -eq 'SymbolicLink') {
+            $t = (@($it.Target)[0]) -replace '^\\\\\?\\', ''
+            if ($t -eq $CoreSrc) { Write-Good "Core already linked: $CoreRule"; return $true }
+            Remove-Item $CoreRule -Force
+        }
+        elseif (([IO.File]::ReadAllText($CoreRule)).Trim() -eq $CoreImport) { Write-Good "Core already imported: $CoreRule"; return $true }
+        else {
+            $backup = "$CoreRule.backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+            Move-Item $CoreRule $backup
+            Write-Warn "Backed up existing $CoreRule to $backup"
+        }
     }
-    else {
-        Write-Warn "Could not write WORKFORCE/bin PATH to any profile seam."
+    try {
+        New-Item -ItemType SymbolicLink -Path $CoreRule -Target $CoreSrc -ErrorAction Stop | Out-Null
+        Write-Good "Linked core: $CoreRule -> $CoreSrc"
+    }
+    catch {
+        # No BOM: a byte-order mark before the @ would break the import line.
+        [IO.File]::WriteAllText($CoreRule, "$CoreImport`n", (New-Object System.Text.UTF8Encoding $false))
+        Write-Good "Core imported through $CoreRule ($CoreImport); symlinks need Developer Mode here"
+    }
+    return $true
+}
+if (-not (Set-CoreRule)) { $DeployFailed += 'core-rule' }
+
+# --- Legacy cleanup: the retired fleet PATH block in profile.local.ps1 ---
+# Earlier deploys appended a marker + PATH line for WORKFORCE\bin, which is
+# gone. Remove exactly those two lines (and the blank line written before them)
+# from every seam; anything the operator wrote stays. Case-sensitive exact
+# matches (-ccontains), so a near-miss line is never touched.
+$LegacyPathLines = @(
+    '# --- OPS WORKFORCE/bin PATH (localrc seam) ---',
+    '$env:Path = "$(Join-Path $env:USERPROFILE ''OPS\WORKFORCE\bin'');$env:Path"'
+)
+function Remove-SeamLines {
+    param([string[]]$Lines, [string]$What)
+    foreach ($seam in (Get-ProfileSeamPaths)) {
+        if (-not (Test-Path $seam)) { continue }
+        if ((Get-Item $seam -Force).LinkType) { Write-Warn "$seam is a link -- refusing $What cleanup."; continue }
+        $content = [IO.File]::ReadAllLines($seam)
+        if (-not ($content | Where-Object { $Lines -ccontains $_ })) { Write-Good "No $What in $(Split-Path $seam -Leaf)"; continue }
+        $out = New-Object System.Collections.Generic.List[string]
+        $held = $false
+        foreach ($l in $content) {
+            if ($l -eq '') { if ($held) { $out.Add('') }; $held = $true; continue }
+            if ($Lines -ccontains $l) { $held = $false; continue }
+            if ($held) { $out.Add('') }
+            $held = $false
+            $out.Add($l)
+        }
+        if ($held) { $out.Add('') }
+        [IO.File]::WriteAllLines($seam, $out, (New-Object System.Text.UTF8Encoding $false))
+        Write-Good "Removed $What from $seam"
     }
 }
-else {
-    Write-Warn "WORKFORCE/bin not found -- skipping PATH wiring."
-}
+Write-Host ""
+Write-Status "Cleaning up the retired fleet PATH block..." "Yellow"
+Remove-SeamLines -Lines $LegacyPathLines -What "retired fleet PATH block"
 
 # --- Claude Code auto-memory git-sync ---
-# ac-memory-init.ps1 walks Claude's encoded cwd subdirs and symlinks
+# bin\memory-init.ps1 walks Claude's encoded cwd subdirs and symlinks
 # each into .claude-memory/<host>-<encoded>/ so per-session memory
 # survives in this repo. Idempotent + safe on every machine.
 Write-Host ""
 Write-Status "Initializing Claude Code auto-memory git-sync..." "Yellow"
 
-$MemoryInit = Join-Path $OpsRoot "WORKFORCE\bin\ac-memory-init.ps1"
+$MemoryInit = Join-Path $ConfigDir "bin\memory-init.ps1"
 
 # Run the walker against an explicit config dir. Sets CLAUDE_CONFIG_DIR so the
 # result never depends on the environment deploy.ps1 was launched from, and
@@ -215,7 +280,7 @@ $MemoryInit = Join-Path $OpsRoot "WORKFORCE\bin\ac-memory-init.ps1"
 # CLAUDE_CONFIG_DIR, call this again with that dir.
 function Invoke-MemoryInit {
     param([string]$ConfigDir, [string]$Label)
-    if (-not (Test-Path $MemoryInit)) { Write-Warn "ac-memory-init.ps1 not present -- skipping $Label memory sync."; return }
+    if (-not (Test-Path $MemoryInit)) { Write-Warn "memory-init.ps1 not present -- skipping $Label memory sync."; return }
     $prev = $env:CLAUDE_CONFIG_DIR
     $env:CLAUDE_CONFIG_DIR = $ConfigDir
     try {
@@ -224,14 +289,14 @@ function Invoke-MemoryInit {
             Write-Good "Memory sync ($Label) initialized (or already in place)."
         }
         elseif ($LASTEXITCODE -eq 2) {
-            Write-Warn "ac-memory-init ($Label): .gitignore excludes target. Fix and re-run."
+            Write-Warn "memory-init ($Label): .gitignore excludes target. Fix and re-run."
         }
         else {
-            Write-Warn "ac-memory-init ($Label) exited rc=$LASTEXITCODE -- inspect manually."
+            Write-Warn "memory-init ($Label) exited rc=$LASTEXITCODE -- inspect manually."
         }
     }
     catch {
-        Write-Warn "ac-memory-init.ps1 ($Label) failed: $_"
+        Write-Warn "memory-init.ps1 ($Label) failed: $_"
     }
     finally {
         if ($null -eq $prev) { Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
@@ -339,7 +404,10 @@ function Resolve-BashExe {
 
 $BashExe = Resolve-BashExe
 
-if (-not $BashExe) {
+if ($NoSystem) {
+    Write-Warn "-NoSystem: daily backup task not registered."
+}
+elseif (-not $BashExe) {
     Write-Warn "Could not resolve bash.exe (Git Bash) -- daily backup task NOT registered."
     Write-Warn "Install Git for Windows, then re-run deploy.ps1."
 }
@@ -373,6 +441,44 @@ else {
     }
     catch {
         Write-Warn "Could not register backup task (run elevated once on a fresh box): $_"
+    }
+}
+
+# --- Mount the shared skills (clone the public source once, then sync) ---
+# Same contract as deploy.sh: clone Exploitacious/agent-skills over HTTPS only
+# when absent (never pull an existing clone on a re-deploy), then mirror
+# SKILLS/VENDORED.tsv with skills-vendor.sh in Git Bash (it falls back to tar
+# where rsync is missing, as in a stock Git Bash).
+Write-Host ""
+Write-Status "Mounting shared skills..." "Yellow"
+$SkillsSrcUrl = "https://github.com/Exploitacious/agent-skills.git"
+$SkillsSrcDir = Join-Path $OpsRoot "PROJECTS\Exploitacious\agent-skills"
+$Vendored     = Join-Path $OpsRoot "SKILLS\VENDORED.tsv"
+if (-not ((Test-Path $Vendored) -and (Select-String -Path $Vendored -Pattern '^[^#\s]\S*\s+Exploitacious/agent-skills/' -Quiet))) {
+    Write-Good "No mounted skills from Exploitacious/agent-skills in SKILLS\VENDORED.tsv"
+}
+else {
+    $cloned = Test-Path (Join-Path $SkillsSrcDir ".git")
+    if (-not $cloned -and (Test-Path $SkillsSrcDir)) {
+        Write-Bad "$SkillsSrcDir exists but is not a git clone -- move it aside, then re-run."; $DeployFailed += 'skills-mount'
+    }
+    elseif (-not $cloned) {
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        & git clone --quiet $SkillsSrcUrl $SkillsSrcDir 2>&1 | Out-Null
+        $cloned = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $SkillsSrcDir ".git"))
+        $ErrorActionPreference = $prevEap
+        if ($cloned) { Write-Good "Cloned $SkillsSrcUrl -> $SkillsSrcDir" }
+        else { Write-Warn "Could not clone $SkillsSrcUrl (network?) -- mounted skills stay MISSING; re-run to retry." }
+    }
+    else { Write-Good "Skill source already cloned: $SkillsSrcDir (not pulled)" }
+    if ($cloned) {
+        if ($BashExe) {
+            $opsUnix = (& $BashExe -lc "cygpath -u '$OpsRoot'" 2>$null).Trim()
+            $svOut = & $BashExe -lc "OPS_DIR='$opsUnix' bash '$opsUnix/.claude-config/bin/skills-vendor.sh' sync" 2>&1
+            if ($LASTEXITCODE -eq 0) { Write-Good "Mounted skills synced into SKILLS\" }
+            else { Write-Bad "skills-vendor.sh sync failed:"; $svOut | ForEach-Object { Write-Warn "  $_" }; $DeployFailed += 'skills-mount' }
+        }
+        else { Write-Warn "Git Bash not found -- mounted skills not synced (run skills-vendor.sh sync after installing Git for Windows)." }
     }
 }
 
@@ -527,10 +633,14 @@ else {
 # --- Summary ---
 Write-Host ""
 Write-Status ("-" * 50) "DarkGray"
-Write-Good "Deploy complete."
+if ($DeployFailed.Count -gt 0) {
+    Write-Bad "Deploy finished with failures: $($DeployFailed -join ', '). Fix the [XX] lines above and re-run."
+}
+else { Write-Good "Deploy complete." }
 Write-Host ""
 Write-Host "  Config source:  $ConfigDir" -ForegroundColor DarkGray
 Write-Host "  Claude home:    $ClaudeHome" -ForegroundColor DarkGray
+Write-Host "  Always loaded:  $CoreRule -> $CoreSrc" -ForegroundColor DarkGray
 Write-Host "  Memory store:   $(Join-Path $ConfigDir 'memory')" -ForegroundColor DarkGray
 Write-Host ""
 
