@@ -127,6 +127,19 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   and left the memory link dangling; `memory-init` also recreates a pool an
   earlier backup removed, and commits only the pool path. A failed crontab
   install now fails the deploy.
+- **Template sync delivers renamed and executable files.**
+  `harness-update-scan.sh` read `git diff --name-status` with git's default
+  rename detection, so a renamed file came back as one line holding two paths
+  and dropped out of the delta: never NEW, its old path never REMOVED, and the
+  next sync commit moved `last_synced` past it for good (against the public
+  main of 2026-10-19 that lost `memory-init` and four more files). The delta
+  now runs with `--no-renames`, so a rename is a REMOVED plus a NEW.
+  `--apply-safe` sets each file's mode from the upstream tree entry: NEW files
+  were written at the umask mode, so `memory-init` arrived non-executable and
+  the migration's re-deploy failed. A marker whose last line has no trailing
+  newline is read again; before, its `last_synced` was dropped and the scan
+  fell back to a first-sync compare without a warning. New cases in
+  `harness-update-scan-test.sh`.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 

@@ -62,7 +62,10 @@ MARKER=".claude-config/ops-upstream-ref"
 UPSTREAM="$DEFAULT_UPSTREAM"
 LAST_SYNCED=""
 if [ -f "$MARKER" ]; then
-  while IFS='=' read -r k v; do
+  # `|| [ -n "$k" ]` keeps a last line with no trailing newline (Notepad, a
+  # printf without \n): plain `read` returns 1 on it and the loop would drop
+  # last_synced, silently turning a delta scan into a first-sync compare.
+  while IFS='=' read -r k v || [ -n "$k" ]; do
     v="${v%$'\r'}"   # tolerate a CRLF marker on Windows checkouts
     case "$k" in
       upstream)    [ -n "$v" ] && UPSTREAM="$v" ;;
@@ -183,12 +186,17 @@ base_blob() { git rev-parse -q --verify "$LAST_SYNCED:$1" 2>/dev/null; }  # blob
 # as a false CONFLICT against the LF-normalized upstream blob.
 loc_blob()  { [ -f "$OPS_ROOT/$1" ] && git hash-object --path "$1" -- "$OPS_ROOT/$1" 2>/dev/null; }
 
-candidates_delta() {  # only files upstream changed since last sync (renames decompose to D+A, no -M)
-  git diff --name-status "$LAST_SYNCED..$UP_REF" | while IFS=$'\t' read -r _status path; do
-    [ -n "$path" ] && printf '%s\n' "$path"
-  done
+# Only files upstream changed since last sync. --no-renames is required: git
+# diff detects renames by default (diff.renames, git 2.9+), and a rename line
+# carries two paths, so the renamed file dropped out of the delta (never NEW,
+# old path never REMOVED) and the next sync commit advanced last_synced past it
+# for good. With --no-renames a rename is a D (old path, REMOVED) plus an A (new
+# path, NEW). --name-only drops the status column, and -z stops git C-quoting
+# unusual paths, which would match no blob.
+candidates_delta() {
+  git diff --no-renames --name-only -z "$LAST_SYNCED..$UP_REF" | tr '\0' '\n'
 }
-candidates_first() { git ls-tree -r --name-only "$UP_REF"; }  # every upstream file (local-only paths never enter here)
+candidates_first() { git ls-tree -r --name-only -z "$UP_REF" | tr '\0' '\n'; }  # every upstream file (local-only paths never enter here)
 
 gen_candidates() { if [ "$MODE" = delta ]; then candidates_delta; else candidates_first; fi; }
 
@@ -224,16 +232,26 @@ classify_one() {
   echo "CONFLICT  $path"; CON=$((CON+1)); return 0
 }
 
+# The mode comes from the upstream tree entry, not the redirect: `> dest`
+# creates a NEW file at the umask mode (no exec bit) and keeps an UPDATE file's
+# old mode, so a template script arrived non-executable and deploy.sh's
+# `[[ -x memory-init ]]` failed the migration. 100755 means executable; any
+# other blob mode clears the bit, as a checkout would.
 apply_safe() {
-  local path dest rc=0
+  local path dest mode rc=0
   for path in "${APPLY_LIST[@]}"; do
     dest="$OPS_ROOT/$path"
     mkdir -p "$(dirname "$dest")" || { echo "ERR_APPLY: mkdir failed for $path" >&2; rc=1; continue; }
-    if git cat-file -p "$UP_REF:$path" > "$dest" 2>/dev/null; then
-      echo "OK applied $path"
-    else
-      echo "ERR_APPLY: could not write $path" >&2; rc=1
+    mode="$(git ls-tree "$UP_REF" -- "$path" 2>/dev/null | awk '{print $1; exit}')"
+    if [ -z "$mode" ]; then
+      echo "ERR_APPLY: no tree entry for $path in $UP_REF" >&2; rc=1; continue
     fi
+    if ! git cat-file -p "$UP_REF:$path" > "$dest" 2>/dev/null; then
+      echo "ERR_APPLY: could not write $path" >&2; rc=1; continue
+    fi
+    if [ "$mode" = 100755 ]; then chmod +x "$dest"; else chmod -x "$dest"; fi \
+      || { echo "ERR_APPLY: wrote $path but could not set mode $mode" >&2; rc=1; continue; }
+    echo "OK applied $path"
   done
   return $rc
 }
