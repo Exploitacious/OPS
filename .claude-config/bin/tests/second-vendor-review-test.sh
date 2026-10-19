@@ -15,7 +15,12 @@
 #     as a review); gtimeout alone (Homebrew coreutils) enforces the cap
 #   - a packet over --max-kb is exit 4; a bad base or an empty diff is exit 6
 #   - --dry-run writes the packet and calls nothing
+#   - packet/result files are private, default paths never collide, command
+#     credentials stay out of metadata, and a digest read failure stops review
 # Every repo and the reviewer itself are fixtures in this test's temp dir.
+# Verdict chains intentionally count a failed condition or reporting function
+# through bad(); they are not assignments that need if/else semantics.
+# shellcheck disable=SC2015
 set -uo pipefail
 TOOL="$(cd "$(dirname "$0")/.." && pwd)/second-vendor-review"
 T="$(mktemp -d "${TMPDIR:-/tmp}/svr-test.XXXXXX")"; trap 'rm -rf "$T"' EXIT
@@ -63,6 +68,46 @@ grep -q 'Changes add(); decided: keep the name' "$T/seen-packet" && grep -q 'ret
   && ok "reviewer ran in a scratch dir, not the repo" || bad "reviewer cwd: $(cat "$T/seen-cwd")"
 grep -q "^- head: $(git -C "$R" rev-parse HEAD)$" "$T/res.md" && ok "result header names the head" || bad "header: $(head -8 "$T/res.md")"
 
+# Shell commands often begin with a credential assignment. Recording even the
+# first word leaks that credential into the durable review result.
+out="$(cd "$R" && OPS_REVIEWER_CMD="SVR_TEST_SECRET=header-test-canary $T/reviewer" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --out "$T/secret.md" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'subtracts instead of adding' "$T/secret.md" && ! grep -q 'header-test-canary' "$T/secret.md" \
+  && ok "review header never records a credential assignment from the command" || bad "command metadata: rc=$rc (result must omit the command credential)"
+
+# A public existing result must be replaced with private files, even under the
+# usual umask. The packet has the whole diff and the Operator's digest in it.
+printf 'old result\n' > "$T/private.md"; printf 'old packet\n' > "$T/private.md.packet.md"
+chmod 644 "$T/private.md" "$T/private.md.packet.md"
+out="$(umask 022; cd "$R" && OPS_REVIEWER_CMD="$T/reviewer" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --out "$T/private.md" 2>&1)"; rc=$?
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+[ "$rc" = 0 ] && [ "$(file_mode "$T/private.md")" = 600 ] && [ "$(file_mode "$T/private.md.packet.md")" = 600 ] \
+  && ok "packet and result are private, including when replacing public files" || bad "output permissions: rc=$rc: $out"
+
+# Pin the timestamp to reproduce simultaneous default invocations reliably.
+mkdir -p "$T/stamp"
+printf '#!/bin/sh\nprintf "20261019T000000Z\\n"\n' > "$T/stamp/date"; chmod +x "$T/stamp/date"
+packets=()
+for run in 1 2; do
+  out="$(cd "$R" && PATH="$T/stamp:$PATH" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --dry-run 2>&1)"; rc=$?
+  packets+=("${out##*: }")
+  [ "$rc" = 0 ] || bad "default packet $run: rc=$rc: $out"
+done
+[ "${packets[0]}" != "${packets[1]}" ] && [ -s "${packets[0]}" ] && [ -s "${packets[1]}" ] \
+  && ok "default packet paths differ even with the same repo and timestamp" || bad "default packet paths collide or were not written"
+
+# The digest can become unreadable after the initial file check. A later
+# successful printf must not hide cat's error and send an incomplete packet.
+mkdir -p "$T/failcat"; REAL_CAT="$(command -v cat)"
+cat > "$T/failcat/cat" <<STUB
+#!/bin/sh
+if [ "\${1:-}" = "\$SVR_BROKEN_DIGEST" ]; then echo 'simulated digest read failure' >&2; exit 1; fi
+exec "$REAL_CAT" "\$@"
+STUB
+chmod +x "$T/failcat/cat"; rm -f "$T/seen-packet"
+out="$(cd "$R" && PATH="$T/failcat:$PATH" SVR_BROKEN_DIGEST="$T/digest.md" OPS_REVIEWER_CMD="$T/reviewer" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --out "$T/digest-failed.md" 2>&1)"; rc=$?
+[ "$rc" = 2 ] && grep -q 'cannot read the digest' <<< "$out" && [ ! -e "$T/seen-packet" ] && [ ! -e "$T/digest-failed.md" ] \
+  && ok "digest read failure: no reviewer is run and no review is reported" || bad "digest read failure: rc=$rc: $out"
+
 printf '#!/usr/bin/env bash\ncat >/dev/null; echo "partial" ; echo boom >&2; exit 7\n' > "$T/failing"; chmod +x "$T/failing"
 out="$(cd "$R" && OPS_REVIEWER_CMD="$T/failing" "$TOOL" --base HEAD~1 --digest "$T/digest.md" --out "$T/fail.md" 2>&1)"; rc=$?
 [ "$rc" = 5 ] && grep -q 'NO REVIEW: reviewer exited 7' "$T/fail.md" && ! grep -q '^partial$' "$T/fail.md" \
@@ -82,7 +127,7 @@ fi
 # command. Before the fix the cap was skipped in silence there: this reviewer
 # ran its full 5 s and was written up as a review (status ok, exit 0).
 mkdir -p "$T/noto"
-for tool in bash env git cat sed wc mktemp date dirname basename mkdir rm tail head sleep; do
+for tool in bash env git cat sed wc mktemp date dirname basename mkdir rm mv tail head sleep; do
   p="$(command -v "$tool")" && ln -s "$p" "$T/noto/$tool"
 done
 printf '#!/usr/bin/env bash\ncat >/dev/null; : > "%s/late-ran"; sleep 5; echo "late review"\n' "$T" > "$T/late"; chmod +x "$T/late"

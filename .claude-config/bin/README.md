@@ -147,7 +147,7 @@ uncommitted edit).
 
 Limits. bwrap cannot nest where AppArmor's `unpriv_bwrap` profile denies a
 second user namespace (Ubuntu 23.10 and later), so a sandboxed suite cannot
-start `sandbox-run`; `tests/sandbox-run-test.sh` starts it and runs outside,
+start `sandbox-run`; `tests/sandbox-run-test.sh` and `tests/sandbox-run-fd-test.py` start it and run outside,
 safe by construction (it writes and deletes only in its own scratch dir). The
 sandbox stops writes, not reads. Files: `sandbox-run`, `sandbox-guard.sh`,
 `sandbox_guard.py`, `sandbox-lint`. Tests: `tests/sandbox-run-test.sh`
@@ -295,8 +295,8 @@ bare):
 ```bash
 cd ~/OPS
 for t in .claude-config/bin/tests/*-test.sh .claude-config/bin/tests/*-test.py; do
-  case "$t" in */sandbox-run-test.sh) bash "$t" || echo "FAILED: $t"; continue ;; esac
   case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
+  case "$t" in */sandbox-run-test.sh|*/sandbox-run-fd-test.py) "${run[@]}" "$t" || echo "FAILED: $t"; continue ;; esac
   .claude-config/bin/sandbox-run --no-bind --no-net --ro-bind "$PWD" -- "${run[@]}" "$t" || echo "FAILED: $t"
 done
 ```

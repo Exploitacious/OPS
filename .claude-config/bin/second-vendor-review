@@ -15,8 +15,9 @@
 # diff stat, and `git diff <base>...HEAD`), pipes it on stdin to the command in
 # OPS_REVIEWER_CMD, and writes a result file holding a header (repo, base,
 # head, packet size, exit status) and everything the command printed on
-# stdout. The command runs in an empty scratch directory, never in the repo:
-# the reviewer sees the packet, not your tree, and cannot edit it.
+# stdout. The command runs in a scratch directory, never in the repo. Its own
+# permissions govern filesystem access; configure a read-only reviewer as in
+# the Codex example below.
 #
 # Usage:
 #   second-vendor-review --base REF --digest FILE [--repo DIR] [--out FILE]
@@ -30,9 +31,9 @@
 #                    and known failures to ignore. It describes; it does not
 #                    steer, so no list of claims to confirm.
 #   --repo DIR       the repository (default: the current directory)
-#   --out FILE       the result file (default: $TMPDIR/second-vendor-review-
-#                    <repo>-<UTC>.md); the packet is written beside it as
-#                    <out>.packet.md
+#   --out FILE       the result file (default: review.md in a unique private
+#                    $TMPDIR/second-vendor-review-<repo>-<UTC>.* directory);
+#                    the packet is written beside it as <out>.packet.md
 #   --exclude SPEC   keep a pathspec out of the diff (repeatable): generated
 #                    files, fixtures, docs. Lock files are always out.
 #   --max-kb N       refuse a packet over N KB (default 400): split the change
@@ -59,6 +60,9 @@
 #       --max-kb · 5 the reviewer failed, timed out or printed nothing · 6 git
 #       could not build the diff
 set -uo pipefail
+# A private copy's diff and digest can contain its Operator's notes. Neither
+# the packet nor the returned review belongs in a world-readable temp file.
+umask 077
 
 die() { local rc="$1"; shift; printf 'second-vendor-review: %s\n' "$*" >&2; exit "$rc"; }
 usage() { sed -n '2,/^set -uo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
@@ -106,9 +110,6 @@ HEAD_SHA="$(git -C "$REPO" rev-parse --verify -q HEAD)" || die 6 "cannot resolve
 BASE_SHA="$(git -C "$REPO" rev-parse --verify -q "$BASE^{commit}")" || die 6 "--base $BASE is not a commit in $REPO"
 NAME="$(basename "$REPO")"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-[ -n "$OUT" ] || OUT="${TMPDIR:-/tmp}/second-vendor-review-$NAME-$STAMP.md"
-PACKET="$OUT.packet.md"
-mkdir -p "$(dirname "$OUT")" || die 2 "cannot create the directory for $OUT"
 
 # Lock files are never reviewable code; the operator's excludes add to them.
 SPECS=(. ':(exclude,glob)**/*.lock' ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/pnpm-lock.yaml'
@@ -127,6 +128,23 @@ DIFF="$(git -C "$REPO" diff --no-ext-diff --no-textconv --no-color "$BASE_SHA...
   || die 6 "git diff failed: $(printf '%s' "$DIFF" | tail -n 1)"
 [ -n "$DIFF" ] || die 6 "no reviewable changes between $BASE and HEAD (after excludes)"
 
+if [ -z "$OUT" ]; then
+  # A timestamp alone collides across simultaneous reviews of the same repo:
+  # one reviewer could read another run's packet under the wrong head header.
+  OUTPUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/second-vendor-review-$NAME-$STAMP.XXXXXX")" \
+    || die 2 "cannot create a private output directory"
+  OUT="$OUTPUT_DIR/review.md"
+fi
+PACKET="$OUT.packet.md"
+mkdir -p "$(dirname "$OUT")" || die 2 "cannot create the directory for $OUT"
+[ ! -d "$OUT" ] && [ ! -d "$PACKET" ] || die 2 "--out and its packet path must not be directories"
+# Stage beside the destination so publication replaces old files and symlinks
+# atomically with mode 600, rather than retaining an existing file's public mode.
+STAGE="$(mktemp -d "$(dirname "$OUT")/.second-vendor-review.XXXXXX")" \
+  || die 2 "cannot create private output staging"
+SCRATCH=""
+trap 'rm -rf -- "$STAGE"; [ -z "$SCRATCH" ] || rm -rf -- "$SCRATCH"' EXIT
+
 {
   cat <<'PREAMBLE'
 You are the second-vendor reviewer for one finished change. Read the digest,
@@ -141,10 +159,13 @@ this is the whole review.
 
 PREAMBLE
   printf '## Digest\n\n'
-  cat "$DIGEST"
+  cat "$DIGEST" || die 2 "cannot read the digest from $DIGEST"
+  # Markdown fences are literal, not shell command substitutions.
+  # shellcheck disable=SC2016
   printf '\n\n## Change\n\nRepository: %s\nBase: %s (%s)\nHead: %s\n\n```\n%s\n```\n\n## Diff\n\n```diff\n%s\n```\n' \
     "$NAME" "$BASE" "$BASE_SHA" "$HEAD_SHA" "$STAT" "$DIFF"
-} > "$PACKET" || die 2 "cannot write the packet to $PACKET"
+} > "$STAGE/packet" || die 2 "cannot write the packet to $PACKET"
+mv -f -- "$STAGE/packet" "$PACKET" || die 2 "cannot publish the packet to $PACKET"
 
 KB=$(( ($(wc -c < "$PACKET") + 1023) / 1024 ))
 if [ "$KB" -gt "$MAXKB" ]; then
@@ -156,9 +177,8 @@ if [ "$DRY" = 1 ]; then
 fi
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/second-vendor-review.XXXXXX")" || die 2 "cannot create a scratch directory"
-trap 'rm -rf "$SCRATCH"' EXIT
-# Only the command's first word is recorded: the rest can carry a key.
-RCMD="${OPS_REVIEWER_CMD%% *}"
+# Do not record any of the shell command: even its first word can be an
+# environment assignment carrying a key (TOKEN=... reviewer).
 rc=0
 ( cd "$SCRATCH" && "$TOBIN" -k 30 "$TIMEOUT" bash -c "$OPS_REVIEWER_CMD" ) < "$PACKET" > "$SCRATCH/review.out" 2> "$SCRATCH/review.err" || rc=$?
 status=ok
@@ -169,7 +189,7 @@ fi
 {
   printf '# Second-vendor review: %s\n\n' "$NAME"
   printf -- '- base: %s (%s)\n- head: %s\n- reviewer: %s\n- packet: %s (%s KB)\n- status: %s\n- written: %s\n\n' \
-    "$BASE" "$BASE_SHA" "$HEAD_SHA" "$RCMD" "$PACKET" "$KB" "$status" "$STAMP"
+    "$BASE" "$BASE_SHA" "$HEAD_SHA" 'OPS_REVIEWER_CMD (configured command)' "$PACKET" "$KB" "$status" "$STAMP"
   if [ "$status" = ok ]; then
     cat "$SCRATCH/review.out"
   else
@@ -177,7 +197,8 @@ fi
     tail -n 20 "$SCRATCH/review.err"
     printf '```\n'
   fi
-} > "$OUT" || die 2 "cannot write the result to $OUT"
+} > "$STAGE/result" || die 2 "cannot write the result to $OUT"
+mv -f -- "$STAGE/result" "$OUT" || die 2 "cannot publish the result to $OUT"
 if [ "$status" != ok ]; then
   die 5 "$status; nothing was reviewed (details in $OUT)"
 fi

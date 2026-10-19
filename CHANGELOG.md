@@ -65,6 +65,13 @@ ports those pieces from the maintainer's private harness.
   (`brew install coreutils`); `gtimeout` alone is enough.
 - **Ported:** `bin/transcript-usage.py` (token profile from transcripts) with
   a test.
+- **Review hardening.** `sandbox-run` passes only an allowlisted set of open
+  file descriptors into bubblewrap: an inherited descriptor (fd 255 included)
+  let a suite write to the host behind the read-only mounts. `second-vendor-review`
+  writes its packet and result to private, unique paths published atomically,
+  stops when the digest cannot be read, and no longer records the reviewer
+  command, whose inline assignments could carry a credential. New
+  `sandbox-run-fd-test.py`, which runs outside the sandbox like `sandbox-run-test.sh`.
 
 ## 2026-10-19: one always-loaded core, and the fleet retired
 

@@ -297,7 +297,25 @@ args+=(--chdir "$chdir")
 # Set-up check first, so a sandbox that cannot be built is reported as that and
 # never mistaken for the command's own failure. The command itself only ever
 # runs as bwrap's child: there is no path that runs it without the sandbox.
-"$BWRAP_REAL" "${args[@]}" -- /bin/true 3<<< "$nonce"
+# bwrap preserves unrelated inherited descriptors. A host file or directory
+# descriptor can write through the read-only mounts, including openat through
+# a directory. Pass only stdio and our validated bind sources. Close the rest
+# in a parsed child so bash's script reader can be closed too (an inherited
+# descriptor 255 can otherwise be restored when bash launches bwrap).
+run_bwrap() (
+  local fd path
+  local -A keep=([0]=1 [1]=1 [2]=1)
+  for fd in "${source_fds[@]}"; do keep[$fd]=1; done
+  [ -r "/proc/$BASHPID/fd" ] || die 125 "cannot enumerate inherited descriptors; the command was not run"
+  for path in "/proc/$BASHPID/fd/"*; do
+    fd="${path##*/}"
+    case "$fd" in ''|*[!0-9]*) continue ;; esac
+    [ -z "${keep[$fd]:-}" ] || continue
+    exec {fd}>&- || die 125 "cannot close inherited descriptor $fd; the command was not run"
+  done
+  exec "$BWRAP_REAL" "${args[@]}" -- "$@" 3<<< "$nonce"
+)
+run_bwrap /bin/true
 _rc=$?
 [ "$_rc" = 0 ] || die 125 "bwrap could not set up the sandbox (exit $_rc); the command was not run"
-exec "$BWRAP_REAL" "${args[@]}" -- "$@" 3<<< "$nonce"
+run_bwrap "$@"
