@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-compact.sh — PreCompact hook for Claude Code.
+# pre-compact.sh: PreCompact hook for Claude Code.
 #
 # Fires before every auto- or manual-compaction. Reads the PreCompact
 # JSON payload on stdin ({trigger, reason, estimated_tokens_removed}).
@@ -8,35 +8,29 @@
 # defaults to ~/.claude; a different dir if you run a second profile via that
 # env var) so post-compact self-recovery has something to read.
 #
-# This is the SAFETY-NET layer — fires no matter what, even if the
+# This is the SAFETY-NET layer: fires no matter what, even if the
 # user never says "compact". The thoughtful AI synthesis lives in the
 # `pre-compact-synthesis` skill (~/OPS/SKILLS/), which Claude
 # invokes when the user signals wrap-up.
 #
-# Implements operating-doctrine Principle 2 ("Compaction is a pause,
-# not death") as automation. Pairs with the existing SessionStart
-# hook (ac-reorient) for post-compact re-anchoring.
-#
-# Fleet dispatch: if AC_ROOT + AC_NAME are set AND the fleet
-# ac-pre-compact script exists, this hook delegates to it (the fleet
-# version writes a richer journal anchor). Solo sessions fall through
-# to the local snapshot path.
+# Implements how-i-work.md P2 ("Compaction is a pause, not death") as
+# automation. Pairs with the post-compact-resume.sh SessionStart hook for
+# post-compact re-anchoring. (The retired fleet's journal dispatch is gone
+# with the fleet.)
 #
 # Exit semantics (per Claude Code hook spec):
 # - Stdout JSON `{"decision": "allow"}` allows the compaction to
 #   proceed. We never block; the hook is for record-keeping, not
 #   policy.
 # - Stderr is shown to the operator if exit code 2; we exit 0 on
-#   success and on any internal failure (best-effort — a hook crash
+#   success and on any internal failure (best-effort: a hook crash
 #   must not block the user's /compact).
 #
 # Diagnostic env vars:
-#   PRE_COMPACT_DEBUG=1   — verbose logging to stderr
-#   PRE_COMPACT_NO_FLEET=1 — skip fleet dispatch even if AC_ROOT set
-#                           (useful for testing the solo path)
+#   PRE_COMPACT_DEBUG=1   verbose logging to stderr
 
 set -uo pipefail
-# Note: NO `set -e` — we want partial-success behavior. A failed
+# Note: NO `set -e`: we want partial-success behavior. A failed
 # subcommand should log + continue, not abort the whole hook.
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -53,7 +47,7 @@ dbg() {
   return 0
 }
 
-# Read the PreCompact JSON payload on stdin (non-blocking — if the
+# Read the PreCompact JSON payload on stdin (non-blocking: if the
 # payload is missing or malformed, treat the hook as a manual probe).
 PAYLOAD=""
 if [[ ! -t 0 ]]; then
@@ -62,7 +56,7 @@ fi
 
 # Best-effort payload parse via the portable extractor (jq -> python). The old
 # `python3 -c` never ran on Windows Git Bash (no python3 shim), leaving
-# TRIGGER/REASON stuck at their defaults. This is telemetry, not a gate —
+# TRIGGER/REASON stuck at their defaults. This is telemetry, not a gate:
 # degrade quietly when no parser exists.
 TRIGGER="unknown"
 REASON="-"
@@ -75,19 +69,6 @@ if [[ -n "$PAYLOAD" ]]; then
 fi
 
 dbg "trigger=$TRIGGER reason=$REASON est_tokens=$EST_TOKENS"
-
-# ── Fleet dispatch ──────────────────────────────────────────────────────
-# If we're in a fleet session (AC_ROOT + AC_NAME set + fleet
-# ac-pre-compact installed), the fleet script does the richer
-# journal-anchor rewrite. We still record a local snapshot below as
-# a belt-and-suspenders trail.
-if [[ "${PRE_COMPACT_NO_FLEET:-0}" != "1" ]] \
-   && [[ -n "${AC_ROOT:-}" ]] \
-   && [[ -n "${AC_NAME:-}" ]] \
-   && [[ -x "$HOME/OPS/WORKFORCE/bin/ac-pre-compact" ]]; then
-  dbg "dispatching to fleet ac-pre-compact"
-  "$HOME/OPS/WORKFORCE/bin/ac-pre-compact" --silent 2>/dev/null || true
-fi
 
 # ── Local snapshot (always) ─────────────────────────────────────────────
 mkdir -p "$SNAPSHOT_DIR" 2>/dev/null || true
@@ -102,7 +83,7 @@ GIT_DIFFSTAT="(not a git repo)"
 
 if [[ -n "$GIT_ROOT" ]]; then
   GIT_BRANCH="$(git -C "$GIT_ROOT" branch --show-current 2>/dev/null || echo '(detached)')"
-  # ahead/behind vs upstream — quietly degrade if no upstream tracked
+  # ahead/behind vs upstream: quietly degrade if no upstream tracked
   GIT_AHEAD_BEHIND="$(git -C "$GIT_ROOT" rev-list --left-right --count '@{upstream}'...HEAD 2>/dev/null | awk '{print "behind="$1" ahead="$2}' || echo '(no upstream)')"
   GIT_STATUS="$(git -C "$GIT_ROOT" status --short 2>/dev/null | head -40 || echo '(unavailable)')"
   [[ -z "$GIT_STATUS" ]] && GIT_STATUS="(clean)"
@@ -113,7 +94,7 @@ fi
 
 # Write the snapshot.
 {
-  echo "# Pre-compact snapshot — $NOW"
+  echo "# Pre-compact snapshot: $NOW"
   echo ""
   echo "Captured by \`~/OPS/.claude-config/hooks/pre-compact.sh\` (PreCompact hook)."
   echo "Local time: $NOW_LOCAL"
@@ -124,8 +105,6 @@ fi
   echo "- reason: $REASON"
   echo "- estimated_tokens_removed: $EST_TOKENS"
   echo "- cwd: \`$(pwd)\`"
-  echo "- AC_ROOT: \`${AC_ROOT:-(unset — solo session)}\`"
-  echo "- AC_NAME: \`${AC_NAME:-(unset)}\`"
   echo ""
   echo "## Git state"
   echo ""
@@ -154,12 +133,12 @@ fi
   echo "## Post-compact reading order"
   echo ""
   echo "1. This snapshot (you are here)."
-  echo "2. \`SESSION_HANDOFF.md\` at the project root if present — the durable narrative anchor."
-  echo "3. \`MEMORY.md\` under \`$CLAUDE_CFG/projects/<workspace>/memory/\` — saved lessons."
+  echo "2. \`SESSION_HANDOFF.md\` at the project root if present: the durable narrative anchor."
+  echo "3. \`MEMORY.md\` under \`$CLAUDE_CFG/projects/<workspace>/memory/\`: saved lessons."
   echo "4. \`git log --oneline -20\` if more context is needed."
   echo ""
-  echo "Per operating-doctrine Principle 2 (Compaction is a pause, not death):"
-  echo "continuity is not a handoff to a new entity — it is self-recovery via durable storage."
+  echo "Per how-i-work.md P2 (Compaction is a pause, not death):"
+  echo "continuity is not a handoff to a new entity: it is self-recovery via durable storage."
 } > "$SNAPSHOT_FILE" 2>/dev/null
 
 dbg "snapshot written: $SNAPSHOT_FILE"
@@ -168,7 +147,7 @@ dbg "snapshot written: $SNAPSHOT_FILE"
 # Append a compact-time segment so a multi-compact session's full activity is
 # reconstructable at CLOSE for time entry. This is the MECHANICAL spine (git
 # delta + elapsed since session start); the pre-compact-synthesis skill adds a
-# narrative line separately. Best-effort — a failure here never blocks the
+# narrative line separately. Best-effort: a failure here never blocks the
 # compact. NOTE: this only records; it never reconciles. WIP/work-tracking
 # reconciliation is a session-CLOSE act (session-close skill), never a compact.
 command -v work_session_key >/dev/null 2>&1 \
@@ -191,7 +170,7 @@ if [[ -n "$WORK_KEY" ]]; then
     fi
   fi
   {
-    echo "## segment $NOW_LOCAL — trigger=$TRIGGER elapsed=$ELAPSED"
+    echo "## segment $NOW_LOCAL: trigger=$TRIGGER elapsed=$ELAPSED"
     echo "repo=${GIT_ROOT:--} branch=$GIT_BRANCH cwd=$(pwd)"
     echo "recent_commits:"
     printf '%s\n' "$GIT_LAST_COMMITS" | sed 's/^/  /'
@@ -212,7 +191,7 @@ fi
 # Long-running workspaces accumulate one snapshot per compaction
 # forever. Cap at the newest N so the projects dir doesn't grow
 # unbounded across weeks of use. Newest 10 is plenty for any sane
-# recovery scenario — the resume hook only reads the latest.
+# recovery scenario: the resume hook only reads the latest.
 RETENTION_KEEP="${PRE_COMPACT_RETENTION:-10}"
 if [[ "$RETENTION_KEEP" =~ ^[0-9]+$ ]] && (( RETENTION_KEEP > 0 )); then
   # Sort by mtime, skip the newest N, delete the rest. Defensive on
@@ -226,7 +205,7 @@ fi
 
 # Always allow the compaction. The hook is record-keeping, never policy.
 # Per the Claude Code hook schema, PreCompact has no documented
-# "allow" channel — `decision` only accepts "approve"|"block", and
+# "allow" channel: `decision` only accepts "approve"|"block", and
 # the canonical pass-through is to exit 0 with no JSON. Empty exit
 # lets Claude Code proceed with the compaction.
 exit 0

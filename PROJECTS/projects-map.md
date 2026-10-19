@@ -7,10 +7,10 @@
 >
 > Read this file when a task involves a specific project repo, when
 > deciding which repo a request belongs to, or when scaffolding a
-> new project. Skip it for pure CONTEXT / WORKFORCE / NOTES work.
+> new project. Skip it for pure CONTEXT / NOTES work.
 >
 > Source of truth for the project layout. Per-repo internals live
-> inside each repo's own `README.md` / `CLAUDE.md` / `ARCHITECTURE.md`.
+> inside each repo's own `README.md` / `AGENTS.md` / `ARCHITECTURE.md`.
 
 > **This shipped copy is a starter template.** It carries one synthetic
 > cluster (`ExampleOrg`) with placeholder repos so the layout, the
@@ -24,7 +24,7 @@
 ## Organization layout
 
 All project repos live under `~/OPS/PROJECTS/<organization>/<repo>`.
-The organization layer is mandatory — never drop a repo directly
+The organization layer is mandatory: never drop a repo directly
 under `PROJECTS/`. Loose files at `PROJECTS/` root are reserved for
 cross-cluster tooling (sync scripts, this map, a cross-cluster
 backlog).
@@ -35,7 +35,7 @@ PROJECTS/
 ├── sync-check.sh              # cross-repo sync verify (Linux/macOS)
 ├── Sync-Check.ps1             # cross-repo sync verify (Windows)
 ├── IDEAS.md                   # (optional) cross-cluster portfolio backlog
-├── ExampleOrg/                # a cluster — one organization / body of work
+├── ExampleOrg/                # a cluster: one organization / body of work
 │   ├── IDEAS.md               #   (optional) cluster-wide backlog
 │   └── <repo>/                #   one git repo per subdir (gitignored)
 └── AnotherOrg/                # a second cluster, added the same way
@@ -43,7 +43,7 @@ PROJECTS/
     └── <repo>/
 ```
 
-**Adding a new organization.** Future-flexible — when a side project,
+**Adding a new organization.** Future-flexible: when a side project,
 client engagement, or third-party collab gets enough repos to warrant
 its own cluster, create `PROJECTS/<NewOrg>/` and add a section to this
 file. Single one-off scripts/scratchpads belong in an existing cluster,
@@ -53,13 +53,13 @@ not a new top-level org folder.
 one at `~/OPS/IDEAS.md`, a portfolio one at `PROJECTS/IDEAS.md`, a
 cluster one at `PROJECTS/<org>/IDEAS.md`, and repo-scoped work inside
 each repo's own git. Each level declares its scope and routes narrower
-work down. These files are optional — create a level when it has
+work down. These files are optional: create a level when it has
 backlog worth tracking. For where a backlog file belongs *inside* a
 repo, follow `CONTEXT/project-kata.md` § A note on backlogs (repo
 backlogs live in `docs/`, not at the repo root).
 
 **Gitignore behavior** (see `OPS/.gitignore`): `PROJECTS/*/*/` is
-gitignored — only repo subdirs (2nd level deep) are ignored. Cluster
+gitignored: only repo subdirs (2nd level deep) are ignored. Cluster
 folders (`ExampleOrg/`, `AnotherOrg/`, …) and loose files at any level
 are tracked. Each project repo (`<org>/<repo>/`) manages its own git.
 
@@ -69,7 +69,7 @@ are tracked. Each project repo (`<org>/<repo>/`) manages its own git.
 
 | Cluster | Purpose |
 |---------|---------|
-| `ExampleOrg/` | *(example)* your primary body of work — swap for your real org. |
+| `ExampleOrg/` | *(example)* your primary body of work: swap for your real org. |
 | `AnotherOrg/` | *(example)* a second cluster, added when a distinct body of work earns one. |
 
 On a fresh copy there is one example cluster. Add rows here as you
@@ -86,9 +86,9 @@ own.*
 
 | Repo | Role | Stack | Deploys to |
 |------|------|-------|------------|
-| `sample-app/` | Example application — API + web UI | *(your stack)* | *(your target)* |
-| `sample-infra/` | Example infrastructure — IaC provisioning the hosts the app runs on | *(your IaC)* | *(your cloud)* |
-| `sample-data/` | Example data layer — DB schema + sync workers the app reads | *(your DB)* | *(your host)* |
+| `sample-app/` | Example application: API + web UI | *(your stack)* | *(your target)* |
+| `sample-infra/` | Example infrastructure: IaC provisioning the hosts the app runs on | *(your IaC)* | *(your cloud)* |
+| `sample-data/` | Example data layer: DB schema + sync workers the app reads | *(your DB)* | *(your host)* |
 
 ### How these repos relate
 
@@ -102,12 +102,12 @@ cross-cutting changes in paired PRs that reference each other.
 ### Cluster conventions
 
 A cluster can layer its own conventions on top of the universal ones in
-`CONTEXT/working-preferences.md` and `CONTEXT/operating-doctrine.md`.
+`CONTEXT/core.md` and `CONTEXT/how-i-work.md`.
 Record them here so every session applies them. Examples of what a real
 cluster might pin:
 
 - **CHANGELOG.md mandatory** on the deployable repos.
-- **Secrets backed up to a single source of truth** (name it) — not
+- **Secrets backed up to a single source of truth** (name it): not
   scattered across files or password managers.
 - **PR autonomy:** open and merge minor PRs on this cluster's repos
   without asking; escalate only on major or directional changes.
@@ -118,7 +118,7 @@ cluster might pin:
 
 When the task description doesn't name a repo, use the keyword hints
 below to pick the right one. If two match, ask before crossing repo
-boundaries — infra and app changes belong in different PRs.
+boundaries: infra and app changes belong in different PRs.
 
 This table is illustrative; build it out to match your real portfolio
 so ambiguous requests route correctly.
@@ -135,7 +135,7 @@ so ambiguous requests route correctly.
 
 ## External to the PROJECTS/ tree
 
-Some repos must live outside `PROJECTS/` — for example a dotfiles repo
+Some repos must live outside `PROJECTS/`: for example a dotfiles repo
 whose files symlink into `$HOME`, where moving the directory would break
 the symlink graph. Those aren't listed in the cluster tables above; note
 them here for portfolio completeness, with their real location and why
@@ -151,15 +151,15 @@ per-repo docs take over:
 0. **Sync first.** Run `git fetch && git pull --ff-only` on first
    entry into the repo each session. Repos are multi-machine;
    out-of-date clones cause silent rework. Same rules as the OPS sync
-   in `~/OPS/CLAUDE.md` — `--ff-only` only, flag failures, don't
-   auto-resolve.
-1. Read the repo's `CLAUDE.md` (or `CONTRIBUTING.md` / `AGENTS.md`)
+   in `CONTEXT/core.md` § "Land the work": `--ff-only` only, flag
+   failures, don't auto-resolve.
+1. Read the repo's `AGENTS.md` (or `CLAUDE.md` / `CONTRIBUTING.md`)
    for workflow + conventions.
 2. Read the repo's `README.md` for the infrastructure surface.
 3. Read the repo's `ARCHITECTURE.md` / `RULEBOOK.md` / `SPEC.md`
    when changes touch the spec.
 
-If a per-repo doc disagrees with this map, the per-repo doc wins —
+If a per-repo doc disagrees with this map, the per-repo doc wins:
 this map is the index, not the rulebook for any single repo.
 
 ---
@@ -172,12 +172,12 @@ joins a cluster, update this map in the same PR (or follow up with a
 dated TODO at the top + a tracked task).
 
 Common drift sources:
-- New repos added to a cluster — add a row, add a keyword routing
+- New repos added to a cluster: add a row, add a keyword routing
   entry.
-- Repos archived or merged — remove from the stack table, leave a
+- Repos archived or merged: remove from the stack table, leave a
   one-line note if non-obvious.
-- Deploy-target changes — update the table column.
-- Relationship changes (new credential flow, new tool consumer) —
+- Deploy-target changes: update the table column.
+- Relationship changes (new credential flow, new tool consumer):
   update the "How these repos relate" section.
 
 When a cross-cutting refactor lands, prefer updating this map *before*

@@ -1,12 +1,12 @@
 # ARCHIVE/
 
-Holding pen for **machine-local project archives** — the compressed
-tarballs written by `WORKFORCE/bin/ac-close-project --archive` when a
-fleet project is wound down (Phase G of the close-out). Each archive
-captures a retired project's fleet runtime (manifest, tasks, decisions,
-closeout note) so it can be pulled back for reference without keeping
-the live `WORKFORCE/FLEETPROJECTS/<slug>/` directory around. The
-contents are a per-machine audit trail, so this folder is gitignored
-(`ARCHIVE/` in `.gitignore`) — the tarballs stay on the machine that
-produced them and are not synced across the fleet. This README is the
-only tracked file here.
+Holding pen for **machine-local archives** you want to keep on this machine
+but out of git: a tarball of a closed project's working tree, an exported
+transcript, a snapshot taken before a risky migration. The contents are
+gitignored (`ARCHIVE/*` in `.gitignore`, with this README the only tracked
+file), so nothing here syncs to your other machines, and `harness-update`
+never touches the folder.
+
+Nothing in the harness writes here on its own any more: the retired
+multi-agent fleet's close-out tool did, and it is gone. If you never use the
+folder, it costs nothing.

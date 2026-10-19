@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# compact-cycle.sh — automated /compact cycle for a Claude Code session in tmux.
+# compact-cycle.sh: automated /compact cycle for a Claude Code session in tmux.
 #
 # A Claude session cannot fire /compact on itself (it is a UI command). This
 # script is the deterministic "compactor": it types /compact into the target
 # pane, waits for compaction to finish, then types a resume message (the baton)
-# so the session continues autonomously. Plain bash — no Claude tokens, no
+# so the session continues autonomously. Plain bash: no Claude tokens, no
 # nondeterminism. Pairs with the pre-compact-synthesis skill (which does the
 # thoughtful synthesis + writes the baton BEFORE spawning this).
 #
@@ -14,7 +14,7 @@
 # Modes:
 #   (default)  spawn a detached tmux session "Compactor-<Key>" running the
 #              worker, print one status line, return immediately. The CALLER
-#              MUST END ITS TURN right after spawning — the worker waits for
+#              MUST END ITS TURN right after spawning: the worker waits for
 #              the target pane to go idle before typing anything.
 #   --worker   run the cycle inline (what the spawned session executes).
 #
@@ -22,16 +22,16 @@
 #   --baton <file>     resume text file. Default: $RUNDIR/resume-<Key>.txt if
 #                      present. Renamed to *.sent-<ts> after typing (one-shot).
 #   --resume "<text>"  inline resume text (overrides --baton).
-#   --no-resume        fire + wait only; never type a resume. Fleet mode —
-#                      fleet agents re-wake via their /loop cron.
+#   --no-resume        fire + wait only; never type a resume (for a session
+#                      that re-wakes on its own, e.g. a /loop cron).
 #   --grace <s>        initial wait so the caller's turn can end. Default 20.
 #   --idle-timeout <s> max wait for the target to go idle before firing.
 #                      Default 300. Past it, fire anyway (Claude Code queues
-#                      typed input; same precedent as ac-compact-peer).
+#                      typed input; same precedent as the retired fleet's compact-peer tool).
 #   --timeout <s>      max wait for compaction to complete. Default 900.
 #
 # Runtime dir: ~/.claude-compact-cycle/  (locks, logs, status files, batons).
-# On failure/timeout the resume is NEVER typed — the session stays paused with
+# On failure/timeout the resume is NEVER typed: the session stays paused with
 # synthesis already on disk; a pane snapshot lands in the log.
 #
 # Exit codes: 0 ok · 2 usage · 3 target/claude missing · 4 lock held · 5 compact failed
@@ -66,7 +66,7 @@ done
 
 # KEY: filesystem/tmux-safe identity for lock, log, compactor session name.
 KEY="$(printf '%s' "$TARGET" | tr ':. ' '---' | tr -cd 'A-Za-z0-9-')"
-# Exact-match tmux target — bare names unique-prefix-match (a bare "Alpha"
+# Exact-match tmux target: bare names unique-prefix-match (a bare "Alpha"
 # also hits "Alpha2"). Pane-level commands (capture-pane, send-keys) reject a
 # bare "=Name"; the "=Name:" form (exact session, current window, active pane)
 # works for every command, so normalize to it when the caller gave a bare
@@ -97,7 +97,7 @@ claude_in_pane() {
 }
 capture() { tmux capture-pane -p -t "$T" 2>/dev/null | tail -40; }
 # Busy = the definitive run indicator, or a spinner line STARTING with
-# "Compacting" — never a bare word-match ("compacting" can appear in normal
+# "Compacting": never a bare word-match ("compacting" can appear in normal
 # conversation text and would wedge the detector).
 busy()    { capture | grep -qiE '(esc to interrupt)|^[^a-z]{0,4}compacting'; }
 
@@ -116,7 +116,7 @@ if [ "$WORKER" -eq 0 ]; then
   [ "$NO_RESUME" -eq 1 ] && CMD="$CMD --no-resume"
   tmux new-session -d -s "$CSESS" "$CMD" || { echo "ERR_SPAWN: could not start $CSESS" >&2; exit 3; }
   echo "OK compactor spawned session=$CSESS target=$TARGET grace=${GRACE}s log=$RUNDIR/$KEY-*.log"
-  echo "   (caller: END YOUR TURN NOW — the worker waits for idle, fires /compact, then types the resume)"
+  echo "   (caller: END YOUR TURN NOW: the worker waits for idle, fires /compact, then types the resume)"
   exit 0
 fi
 
@@ -135,7 +135,7 @@ sleep "$GRACE"
 
 tmux list-panes -t "$T" >/dev/null 2>&1 || { result gone; say "ERR_TARGET gone"; exit 3; }
 if ! claude_in_pane; then
-  result no-claude; say "ERR_NO_CLAUDE: no claude process in target pane — refusing to type into it"
+  result no-claude; say "ERR_NO_CLAUDE: no claude process in target pane: refusing to type into it"
   exit 3
 fi
 
@@ -146,8 +146,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   [ "$IDLE" -ge 3 ] && break
   sleep 2
 done
-[ "$IDLE" -ge 3 ] && say "target idle — firing /compact" \
-                  || say "WARN: target still busy after ${IDLE_TIMEOUT}s — firing anyway (/compact will queue)"
+[ "$IDLE" -ge 3 ] && say "target idle: firing /compact" \
+                  || say "WARN: target still busy after ${IDLE_TIMEOUT}s: firing anyway (/compact will queue)"
 
 tmux send-keys -t "$T" "/compact $PRESERVE"
 sleep 0.6                       # let the slash-command menu settle before submit
@@ -155,14 +155,14 @@ tmux send-keys -t "$T" Enter
 log "/compact sent"
 
 # Completion: busy (or 'Compacting') must clear and STAY clear for 3 polls.
-# Errors: known failure strings in the tail — then we do NOT resume.
+# Errors: known failure strings in the tail: then we do NOT resume.
 DEADLINE=$(( $(date +%s) + TIMEOUT )); CLEAR=0; OK=0
 sleep 5
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   TAIL="$(capture)"
   if printf '%s' "$TAIL" | tail -15 | grep -qiE 'error (during|while) compact|compaction failed|not enough messages|conversation too small|api error'; then
     result compact-error
-    say "ERR_COMPACT: failure marker in pane — no resume typed. Pane tail follows:"
+    say "ERR_COMPACT: failure marker in pane: no resume typed. Pane tail follows:"
     printf '%s\n' "$TAIL" >>"$LOG"
     exit 5
   fi
@@ -172,13 +172,13 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 done
 if [ "$OK" -ne 1 ]; then
   result timeout
-  say "ERR_TIMEOUT: compaction not confirmed within ${TIMEOUT}s — no resume typed. Pane tail follows:"
+  say "ERR_TIMEOUT: compaction not confirmed within ${TIMEOUT}s: no resume typed. Pane tail follows:"
   capture >>"$LOG"
   exit 5
 fi
 say "compaction complete"
 
-if [ "$NO_RESUME" -eq 1 ]; then result ok-no-resume; say "done (fleet mode, no resume)"; exit 0; fi
+if [ "$NO_RESUME" -eq 1 ]; then result ok-no-resume; say "done (no-resume mode)"; exit 0; fi
 
 # Resume: baton file > inline text > default continuation nudge.
 TMPMSG="$(mktemp)"
@@ -187,7 +187,7 @@ if [ -n "$RESUME_TEXT" ]; then
 elif [ -n "$BATON" ] && [ -f "$BATON" ]; then
   cat "$BATON" >"$TMPMSG"
 else
-  printf '%s\n' "Continue the standing work. Read the freshest durable anchor (SESSION_HANDOFF.md / fleet journal / handoff baton) and the task list, then execute NEXT ACTION. This is a continuation of one body of work, not a new session." >"$TMPMSG"
+  printf '%s\n' "Continue the standing work. Read the freshest durable anchor (SESSION_HANDOFF.md / handoff baton) and the task list, then execute NEXT ACTION. This is a continuation of one body of work, not a new session." >"$TMPMSG"
 fi
 BUF="cc-resume-$KEY-$$"
 tmux load-buffer -b "$BUF" "$TMPMSG"
@@ -200,5 +200,5 @@ tmux delete-buffer -b "$BUF" 2>/dev/null || true
 rm -f "$TMPMSG"
 [ -n "$BATON" ] && [ -f "$BATON" ] && mv "$BATON" "$BATON.sent-$(date +%Y%m%dT%H%M%S)"
 result ok
-say "resume typed — cycle complete. Compactor self-destructs now."
+say "resume typed: cycle complete. Compactor self-destructs now."
 exit 0

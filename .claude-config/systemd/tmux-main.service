@@ -1,12 +1,12 @@
-# tmux-main.service — ensure a base "main" tmux session exists at login/boot.
+# tmux-main.service: ensure a base "main" tmux session exists at login/boot.
 #
-# This unit must NEVER own the tmux server lifecycle. The remote-sessions
-# registry (@reboot start-remote-claude.sh) is the single owner of Claude
-# session persistence; this unit only guarantees a "main" session exists.
+# This unit must NEVER own the tmux server lifecycle. Claude sessions are
+# started and ended by hand (.claude-config/remote-sessions); nothing brings
+# them back at boot. This unit only guarantees a "main" session exists.
 # The earlier Type=forking + Restart=on-failure shape tracked the tmux SERVER
 # as MainPID: killing the last tmux session exits the server, systemd
 # "repairs" it, and anything wired to server start (e.g. a resurrect plugin)
-# respawns sessions that were deliberately closed — the close-one-session-
+# respawns sessions that were deliberately closed: the close-one-session-
 # kills-or-resurrects-others cascade. Hence:
 #   - Type=oneshot + RemainAfterExit: run once, stay "active", track nothing.
 #   - KillMode=process (and no ExecStop): stopping the unit never kills tmux.

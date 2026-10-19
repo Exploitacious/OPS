@@ -1,11 +1,11 @@
-# --- Secrets — never commit ---
+# --- Secrets: never commit ---
 .env
 *.key
 credentials.*
 *.pem
 *.pfx
 
-# --- Build tooling — never ships ---
+# --- Build tooling: never ships ---
 # GENERALIZATION-RULES.md is deleted before the first commit into the
 # public template; this entry is a defensive backstop in case a fresh
 # export still has it sitting in the working tree.
@@ -25,13 +25,13 @@ desktop.ini
 .aider/
 
 # NOTE: .claude-memory/ is intentionally NOT listed above. It looks like
-# it belongs next to .claude/ but it's git-synced auto-memory — tracking
+# it belongs next to .claude/ but it's git-synced auto-memory: tracking
 # it across machines is a feature, not local churn. Don't fold it in.
 
 # --- OPS machine-local churn ---
 .claude-config/backup/sync.log
 
-# --- PROJECTS — repo subdirs (2nd-level) are their own repos (ignored).
+# --- PROJECTS: repo subdirs (2nd-level) are their own repos (ignored).
 # Cluster folders (1st-level: ExampleOrg/, AnotherOrg/, etc.)
 # AND loose files at any level are tracked. Each cluster carries its
 # own IDEAS.md and any other cluster-scoped notes. ---
@@ -39,7 +39,7 @@ PROJECTS/*/*/
 
 NOTES/
 
-# --- NOTES / Obsidian vault — vault content ignored; loose top-level files tracked ---
+# --- NOTES / Obsidian vault: vault content ignored; loose top-level files tracked ---
 # Vault syncs from Windows. Linux side just drops scratch notes / READMEs here.
 !NOTES/
 NOTES/*/
@@ -68,7 +68,7 @@ NOTES/MASTER/.obsidian/plugins/*/*
 
 # Re-ignore high-churn plugin data.json (last-match-wins).
 # `recent-files-obsidian` rewrites its data.json on every file open
-# in Obsidian — would create commit churn on every note browse. The
+# in Obsidian: would create commit churn on every note browse. The
 # plugin still works without git-syncing this state; "recent files"
 # resets per machine. Same pattern would apply to other high-churn
 # data.json files; explicitly listed here rather than blanket-ignored
@@ -80,18 +80,11 @@ NOTES/MASTER/.obsidian/workspace.json
 NOTES/MASTER/.obsidian/graph.json
 NOTES/MASTER/.obsidian/types.json
 
-# --- WORKFORCE — fleet system at root tracked; per-project runtime
-# subdirs under FLEETPROJECTS/ are ignored. Fleet system =
-# personalities, protocol, bin, README (the doctrine + tooling
-# identical across machines). Per-project runtime = manifest, tasks,
-# decisions, archive, log, journal, inbox (machine-local audit trail).
-WORKFORCE/FLEETPROJECTS/*/
-
 # Legacy AGENTS symlink path.
 AGENTS/
-# Python bytecode cache (from running ac-memory-index etc.)
+# Python bytecode cache (from running bin/memory-index etc.)
 __pycache__/
 
-# Fleet project archives (machine-local tarballs from ac-close-project)
+# Machine-local archives (see ARCHIVE/README.md)
 ARCHIVE/*
 !ARCHIVE/README.md
