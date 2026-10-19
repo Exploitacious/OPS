@@ -175,7 +175,13 @@ In order:
    was. The ultracode default is an operator choice kept out of the public
    Stage-1 files on purpose.
 
-7. **Initialize Claude Code auto-memory git-sync.** Runs
+7. **Check the git identity, then initialize Claude Code auto-memory
+   git-sync.** Deploy first asks `git var` for your author and committer
+   identity. A fresh account often has none (an empty name field and no
+   FQDN to build an email from), and then every commit fails: memory-init's,
+   the daily backup's, and every agent's. Without one, deploy prints the two
+   `git config --global user.name` / `user.email` commands and finishes with
+   a failure (`git-identity`). Then it runs
    `.claude-config/bin/memory-init --auto-commit`, which walks Claude's encoded
    cwd subdirs under `~/.claude/projects/` and symlinks each `memory/` into
    `.claude-memory/<host>-<encoded>/` so per-session memory survives in this
@@ -202,6 +208,8 @@ In order:
    opt-in is per repo, covers only what cannot be verified, and never
    overrides a public answer. `memory-init.ps1` applies the same rule on
    Windows, and the Windows backup task runs this same script in Git Bash.
+   Agent pushes meet the same gate: the git-guard hook runs it on every
+   `git push` an agent makes from this copy and blocks one it cannot verify.
 
 9. **Retire the caveman and ponytail plugins.** Runs
    `claude plugin uninstall <name>@<name>` and
@@ -242,7 +250,8 @@ UNVERIFIED that Claude Code resolves a drive-letter import, so run `/context`
 once to confirm); removal of the retired `WORKFORCE\bin` PATH block from the
 untracked `profile.local.ps1` seams (one per PowerShell edition, under
 `Documents/PowerShell` and `Documents/WindowsPowerShell`; never `$PROFILE`,
-which is tied to the public linuxploitacious repo); auto-memory git-sync
+which is tied to the public linuxploitacious repo); the git identity check
+(step 7); auto-memory git-sync
 (`bin\memory-init.ps1`, behind the same push gate as step 8); the trust
 anchor; the ultracode shim in the seam; an `OPS Daily Backup` scheduled task
 that runs `daily-sync.sh` in Git Bash (skipped with `-NoSystem`); the skill mount
@@ -475,6 +484,18 @@ and re-run Stage 2:
 5. **Decide on the permission defaults.** README "Opinionated by design" now
    discloses what Stage 1 sets; `BOOTSTRAP.md` Round F shows how to keep them
    or switch to normal permission prompts without editing the Stage-1 file.
+
+## Known limits
+
+- **The nightly backup pulls the public skill source.** The backup's project
+  stage runs `PROJECTS/sync-check.sh --auto`, which fast-forwards every clean
+  clone under `PROJECTS/`, including `PROJECTS/Exploitacious/agent-skills`.
+  Deploy never pulls that clone (step 2), but once the backup has pulled an
+  upstream change to a mounted skill, `verify-ops.sh` reports one fail,
+  `skills mirror DRIFT`, until the mirror is synced, and the next `deploy.sh`
+  syncs whatever the backup pulled, reviewed or not. Read what changed
+  (`git -C ~/OPS/PROJECTS/Exploitacious/agent-skills log -p` over the new
+  commits), then run `~/OPS/.claude-config/bin/skills-vendor.sh sync`.
 
 ## What stays out of these scripts
 
