@@ -11,6 +11,12 @@
 #   - a rerun reports UNCHANGED; --check reports OK, MISSING, and DRIFT with
 #     exit codes 0, 2, and 1
 #   - OPS_DIR selects the checkout, so HOME is irrelevant
+#   - ownership: a destination sync did not write (the Operator's own folder, a
+#     hand-edited mirror, one holding a .git) is moved to
+#     .claude-config/backup/skills-replaced/ with its content intact, then
+#     replaced; a mirror sync wrote, a pre-record mirror of a legacy row, and
+#     one already equal to its source update in place with no backup; a failed
+#     install moves the folder back, in both engines
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/skills-vendor-test.sh
 # Exit: 0 = all pass; non-zero on first failure.
@@ -26,22 +32,26 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
 # make_tree <dir>: a fresh OPS fixture with one cloned source (alpha) and one
-# uncloned (beta), and a stale mirror of alpha.
+# uncloned (beta), and a stale mirror of alpha. The mirror is a real earlier
+# sync of an older source (so the ownership record knows it), plus GUI-local
+# files added to the mirror since; then the source moves on.
 make_tree() {
-  local o="$1"
-  mkdir -p "$o/SKILLS/alpha/old" "$o/PROJECTS/src/skills/alpha/refs" "$o/PROJECTS/src/skills/alpha/.git"
+  local o="$1" s="$1/PROJECTS/src/skills/alpha"
+  mkdir -p "$o/SKILLS" "$s/old" "$s/refs/"$'two\nlines' "$s/refs/gui-dir"
   printf 'alpha\tsrc/skills/alpha\nbeta\tsrc/skills/beta\n# comment row\n' > "$o/SKILLS/VENDORED.tsv"
-  printf 'new skill body\n' > "$o/PROJECTS/src/skills/alpha/SKILL.md"
-  printf 'ref\n' > "$o/PROJECTS/src/skills/alpha/refs/a.md"
-  printf 'source-side GUI file\n' > "$o/PROJECTS/src/skills/alpha/00_System_Prompt.md"
-  printf 'git internals\n' > "$o/PROJECTS/src/skills/alpha/.git/HEAD"
-  printf 'old skill body\n' > "$o/SKILLS/alpha/SKILL.md"
-  printf 'stale\n' > "$o/SKILLS/alpha/old/stale.md"
+  printf 'old skill body\n' > "$s/SKILL.md"
+  printf 'stale\n' > "$s/old/stale.md"
+  run_sv "$o" sync >/dev/null || fail "fixture: the first sync failed"
+  rm -rf "$s/old"
+  mkdir -p "$s/.git"
+  printf 'new skill body\n' > "$s/SKILL.md"
+  printf 'ref\n' > "$s/refs/a.md"
+  printf 'source-side GUI file\n' > "$s/00_System_Prompt.md"
+  printf 'git internals\n' > "$s/.git/HEAD"
   printf 'mirror-side GUI prompt\n' > "$o/SKILLS/alpha/00_System_Prompt.md"
-  mkdir -p "$o/SKILLS/alpha/refs/"$'two\nlines' "$o/PROJECTS/src/skills/alpha/refs/"$'two\nlines'
   printf 'nested GUI setup\n' > "$o/SKILLS/alpha/refs/"$'two\nlines/SETUP.md'
   ln -sf 00_System_Prompt.md "$o/SKILLS/alpha/05_gui_dual_track.md"
-  mkdir -p "$o/SKILLS/alpha/refs/gui-dir/SETUP.md" "$o/PROJECTS/src/skills/alpha/refs/gui-dir"
+  mkdir -p "$o/SKILLS/alpha/refs/gui-dir/SETUP.md"
   printf 'directory scaffold\n' > "$o/SKILLS/alpha/refs/gui-dir/SETUP.md/private.txt"
 }
 
@@ -59,8 +69,10 @@ check_mirror() {
   [ -L "$m/05_gui_dual_track.md" ] && [ "$(readlink "$m/05_gui_dual_track.md")" = 00_System_Prompt.md ] || fail "$label: a GUI-local symlink was lost or followed"
   [ "$(cat "$m/refs/gui-dir/SETUP.md/private.txt")" = "directory scaffold" ] || fail "$label: a GUI-local directory was lost"
   [ -d "$1/SKILLS/beta" ] && fail "$label: an uncloned source produced a mirror dir"
-  [ -z "$(find "$1/SKILLS" -maxdepth 1 -name '.vendor.*' -print -quit)" ] \
+  [ -z "$(find "$1/SKILLS" -maxdepth 1 -name '.vendor*.*' ! -name .vendored-state.tsv -print -quit)" ] \
     || fail "$label: a temp dir was left in SKILLS"
+  [ ! -e "$1/.claude-config/backup/skills-replaced" ] || fail "$label: a mirror sync wrote was moved aside"
+  grep -q "^alpha	sha256:" "$1/SKILLS/.vendored-state.tsv" || fail "$label: the mirror was not recorded"
   return 0
 }
 
@@ -208,5 +220,129 @@ out="$(run_sv "$TDIR/dangling-link" --check)"; rc=$?
 [ "$rc" -eq 2 ] || fail "--check should compare the dangling symlink itself (exit $rc): $out"
 printf '%s\n' "$out" | grep -q '^OK       alpha$' || fail "dangling symlink did not compare cleanly: $out"
 pass "drift checks compare symlinks without following their targets"
+
+# --- Ownership: never delete a folder sync did not write. ----------------------
+# add_local <tree> <name>: a manifest row whose destination already holds the
+# Operator's own skill folder (no record, not a legacy row).
+add_local() {
+  local o="$1" n="$2"
+  mkdir -p "$o/PROJECTS/src/skills/$n" "$o/SKILLS/$n/notes"
+  printf '%s\tsrc/skills/%s\n' "$n" "$n" >> "$o/SKILLS/VENDORED.tsv"
+  printf 'vendored %s\n' "$n" > "$o/PROJECTS/src/skills/$n/SKILL.md"
+  printf 'my own %s skill\n' "$n" > "$o/SKILLS/$n/SKILL.md"
+  printf 'local-only notes\n' > "$o/SKILLS/$n/notes/private.md"
+  printf 'my GUI prompt\n' > "$o/SKILLS/$n/00_System_Prompt.md"
+}
+backups() { find "$1/.claude-config/backup/skills-replaced" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '; }
+
+engines=(1)
+command -v rsync >/dev/null 2>&1 && engines+=(0)
+for engine in "${engines[@]}"; do
+  o="$TDIR/own-$engine"
+  make_tree "$o"
+  add_local "$o" gamma
+  cp -a "$o/SKILLS/gamma" "$TDIR/gamma-before-$engine"
+  out="$(run_sv "$o" --check)"; rc=$?
+  [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '^DRIFT    gamma$' \
+    || fail "engine $engine: --check did not report the local folder as DRIFT (exit $rc): $out"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync)" || fail "engine $engine: sync over a local folder failed: $out"
+  line="$(printf '%s\n' "$out" | grep '^BACKUP   gamma: ')" || fail "engine $engine: no BACKUP line for gamma: $out"
+  [ "$(printf '%s\n' "$out" | grep -c '^BACKUP')" = 1 ] || fail "engine $engine: a mirror sync wrote was moved aside: $out"
+  backup="${line##* kept at }"
+  case "$backup" in */.claude-config/backup/skills-replaced/gamma-*Z) ;; *) fail "engine $engine: backup outside the backup dir: $backup" ;; esac
+  diff -r --no-dereference "$TDIR/gamma-before-$engine" "$backup" >/dev/null || fail "engine $engine: the backup lost the local folder's content"
+  [ "$(cat "$o/SKILLS/gamma/SKILL.md")" = "vendored gamma" ] || fail "engine $engine: gamma was not installed"
+  [ ! -e "$o/SKILLS/gamma/notes" ] && [ ! -e "$o/SKILLS/gamma/00_System_Prompt.md" ] || fail "engine $engine: local content stayed in the mirror"
+  printf '%s\n' "$out" | grep -q '^SYNCED   gamma$' || fail "engine $engine: gamma not SYNCED: $out"
+  out="$(run_sv "$o" --check)"; rc=$?
+  [ "$rc" -eq 2 ] && printf '%s\n' "$out" | grep -q '^OK       gamma$' || fail "engine $engine: --check after the sync (exit $rc): $out"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync)" || fail "engine $engine: rerun failed"
+  printf '%s\n' "$out" | grep -q '^UNCHANGED gamma$' || fail "engine $engine: rerun not UNCHANGED: $out"
+  printf 'vendored gamma v2\n' > "$o/PROJECTS/src/skills/gamma/SKILL.md"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync)" || fail "engine $engine: update failed"
+  printf '%s\n' "$out" | grep -q '^SYNCED   gamma$' || fail "engine $engine: update not SYNCED: $out"
+  printf '%s\n' "$out" | grep -q '^BACKUP' && fail "engine $engine: updating a recorded mirror made a backup: $out"
+  [ "$(backups "$o")" = 1 ] || fail "engine $engine: expected exactly one backup, found $(backups "$o")"
+  [ "$(cat "$o/SKILLS/gamma/SKILL.md")" = "vendored gamma v2" ] || fail "engine $engine: recorded mirror not updated"
+done
+pass "a local folder under a mounted name is kept in the backup intact, then replaced; --check reports it"
+
+# A hand-edited mirror, and a destination holding a .git, are not mirrors sync
+# wrote either.
+o="$TDIR/own-edits"
+make_tree "$o"
+run_sv "$o" sync >/dev/null || fail "hand-edit fixture sync failed"
+printf 'my local edit\n' >> "$o/SKILLS/alpha/SKILL.md"
+printf 'edited at the source\n' >> "$o/PROJECTS/src/skills/alpha/refs/a.md"
+out="$(run_sv "$o" sync)" || fail "sync over a hand-edited mirror failed: $out"
+line="$(printf '%s\n' "$out" | grep '^BACKUP   alpha: ')" || fail "hand-edited mirror not moved aside: $out"
+grep -q 'my local edit' "${line##* kept at }/SKILL.md" || fail "the backup lost the hand edit"
+mkdir -p "$o/PROJECTS/src/skills/delta" "$o/SKILLS/delta/.git"
+printf 'delta\tsrc/skills/delta\n' >> "$o/SKILLS/VENDORED.tsv"
+printf 'delta\n' > "$o/PROJECTS/src/skills/delta/SKILL.md"
+printf 'delta\n' > "$o/SKILLS/delta/SKILL.md"
+printf 'ref: refs/heads/main\n' > "$o/SKILLS/delta/.git/HEAD"
+out="$(run_sv "$o" sync)" || fail "sync over a git checkout failed: $out"
+line="$(printf '%s\n' "$out" | grep '^BACKUP   delta: ')" || fail "a destination with a .git was not moved aside: $out"
+[ -f "${line##* kept at }/.git/HEAD" ] || fail "the backup lost the .git"
+pass "a hand-edited mirror and a git checkout are kept in the backup"
+
+# Mirrors that predate the record: a legacy row's stale mirror and a mirror
+# equal to its source update in place, with no backup, and get recorded.
+o="$TDIR/own-legacy"
+mkdir -p "$o/SKILLS/dynamic-workflows" "$o/SKILLS/epsilon" "$o/PROJECTS/src/skills/dynamic-workflows" "$o/PROJECTS/src/skills/epsilon"
+printf 'dynamic-workflows\tsrc/skills/dynamic-workflows\nepsilon\tsrc/skills/epsilon\n' > "$o/SKILLS/VENDORED.tsv"
+printf 'current\n' > "$o/PROJECTS/src/skills/dynamic-workflows/SKILL.md"
+printf 'older vendored copy\n' > "$o/SKILLS/dynamic-workflows/SKILL.md"
+printf 'dropped upstream\n' > "$o/SKILLS/dynamic-workflows/gone.md"
+printf 'mirror GUI prompt\n' > "$o/SKILLS/dynamic-workflows/00_System_Prompt.md"
+printf 'same\n' > "$o/PROJECTS/src/skills/epsilon/SKILL.md"
+printf 'same\n' > "$o/SKILLS/epsilon/SKILL.md"
+for engine in "${engines[@]}"; do
+  rm -rf "$TDIR/legacy-$engine"; cp -a "$o" "$TDIR/legacy-$engine"
+  out="$(SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$TDIR/legacy-$engine" sync)" || fail "engine $engine: legacy sync failed: $out"
+  printf '%s\n' "$out" | grep -q '^BACKUP' && fail "engine $engine: a pre-record mirror was moved aside: $out"
+  printf '%s\n' "$out" | grep -q '^SYNCED   dynamic-workflows$' || fail "engine $engine: legacy mirror not SYNCED: $out"
+  printf '%s\n' "$out" | grep -q '^UNCHANGED epsilon$' || fail "engine $engine: equal mirror not UNCHANGED: $out"
+  m="$TDIR/legacy-$engine/SKILLS"
+  [ "$(cat "$m/dynamic-workflows/SKILL.md")" = current ] && [ ! -e "$m/dynamic-workflows/gone.md" ] \
+    || fail "engine $engine: legacy mirror not updated in place"
+  [ "$(cat "$m/dynamic-workflows/00_System_Prompt.md")" = "mirror GUI prompt" ] || fail "engine $engine: legacy mirror lost its GUI-local file"
+  grep -q '^dynamic-workflows	sha256:' "$m/.vendored-state.tsv" && grep -q '^epsilon	sha256:' "$m/.vendored-state.tsv" \
+    || fail "engine $engine: pre-record mirrors were not recorded"
+  [ "$(backups "$TDIR/legacy-$engine")" = 0 ] || fail "engine $engine: a backup was made"
+done
+pass "pre-record mirrors (a legacy row, one equal to its source) update in place with no backup"
+
+# A failed install moves the local folder back, in both engines.
+REAL_RSYNC="$(command -v rsync || true)"
+export REAL_RSYNC
+mkdir -p "$TDIR/bin-install"
+cat > "$TDIR/bin-install/mv" <<'STUB'
+#!/usr/bin/env bash
+case "${2:-}" in */tree) exit 71 ;; esac
+exec "$REAL_MV" "$@"
+STUB
+cat > "$TDIR/bin-install/rsync" <<'STUB'
+#!/usr/bin/env bash
+dst="${*: -1}"
+case "$dst" in */gamma/) mkdir -p "$dst" && echo partial > "${dst}partial"; exit 23 ;; esac
+exec "$REAL_RSYNC" "$@"
+STUB
+chmod +x "$TDIR/bin-install/mv" "$TDIR/bin-install/rsync"
+for engine in "${engines[@]}"; do
+  o="$TDIR/restore-$engine"
+  make_tree "$o"
+  SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync >/dev/null || fail "engine $engine: restore fixture sync failed"
+  add_local "$o" gamma
+  cp -a "$o/SKILLS" "$TDIR/restore-before-$engine"
+  out="$(PATH="$TDIR/bin-install:$PATH" SKILLS_VENDOR_NO_RSYNC="$engine" run_sv "$o" sync 2>&1)"; rc=$?
+  [ "$rc" -eq 3 ] || fail "engine $engine: a failed install exited $rc, want 3: $out"
+  diff -r --no-dereference "$TDIR/restore-before-$engine" "$o/SKILLS" >/dev/null \
+    || fail "engine $engine: the local folder was not restored after a failed install"
+  [ "$(backups "$o")" = 0 ] || fail "engine $engine: a restored folder also left a backup"
+  printf '%s\n' "$out" | grep -q 'restored' || fail "engine $engine: the restore was not reported: $out"
+done
+pass "a failed install moves the local folder back and exits 3"
 
 echo "ALL PASS"

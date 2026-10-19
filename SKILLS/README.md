@@ -42,7 +42,7 @@ git clone https://github.com/Exploitacious/agent-skills.git ~/OPS/PROJECTS/Explo
 ~/OPS/.claude-config/bin/skills-vendor.sh sync
 ```
 
-Never hand-edit a mirrored `SKILLS/<name>/` dir; the sync overwrites it. On a fresh fork the source repos are not cloned, so the mounted skills (`grill-me` among them) appear only after the clone and the sync. Until you clone, `skills-vendor.sh --check` reports them MISSING (a WARN). Once the source is cloned, an un-synced mount reads as DRIFT (a FAIL) until you run `sync`.
+Never hand-edit a mirrored `SKILLS/<name>/` dir; the sync replaces it. The sync never deletes a folder it did not write: a destination that is not a mirror it recorded in `SKILLS/.vendored-state.tsv` (your own skill under a name a manifest row now mounts, or a hand-edited mirror) is moved to `.claude-config/backup/skills-replaced/<name>-<UTC>/` first, and the sync prints a `BACKUP` line naming that path. On a fresh fork the source repos are not cloned, so the mounted skills (`grill-me` among them) appear only after the clone and the sync. Until you clone, `skills-vendor.sh --check` reports them MISSING (a WARN). Once the source is cloned, an un-synced mount reads as DRIFT (a FAIL) until you run `sync`.
 
 ## How to add a new entry
 

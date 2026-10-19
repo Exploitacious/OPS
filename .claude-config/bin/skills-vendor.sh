@@ -16,7 +16,9 @@
 # Usage:
 #   skills-vendor.sh            sync (default): rsync each source dir into
 #                               SKILLS/<name>/ (rsync -a --delete). Prints one
-#                               line per skill: SYNCED / UNCHANGED / SKIP.
+#                               line per skill: SYNCED / UNCHANGED / SKIP, plus
+#                               a BACKUP line naming where a folder sync did
+#                               not write was moved (see "Ownership" below).
 #   skills-vendor.sh sync       same as above, explicit.
 #   skills-vendor.sh --check    read-only drift gate. Prints DRIFT / OK /
 #                               MISSING per skill. Exit 1 if any DRIFT, 2 if any
@@ -35,6 +37,25 @@
 # Debian container, Git Bash) syncs through tar with the same excludes and the
 # same delete semantics, so a missing package never leaves the mounts unsynced.
 # SKILLS_VENDOR_NO_RSYNC=1 forces that path (tests compare the two).
+#
+# Ownership: sync never deletes a folder it did not write. A manifest row
+# claims SKILLS/<name>, but the folder already there can be the Operator's own
+# skill (a release that adds a row, as 2026-10-19 added grill-me, tdd and
+# diagnosing-bugs, meets every existing copy that kept its own SKILLS/tdd).
+# SKILLS/.vendored-state.tsv records a content digest of each mirror sync
+# writes, and an existing destination is updated in place only when it is
+# provably a mirror:
+#   1. its digest matches the recorded one (what sync last wrote), or
+#   2. it already equals the source (the sync has nothing to remove), or
+#   3. it has no record and is one of LEGACY_MOUNTS, the rows that shipped
+#      before the record existed: sync has owned those paths since then, and
+#      their pre-record mirrors are usually behind the source.
+# Anything else, or any destination holding a .git (sync never writes one), is
+# moved to .claude-config/backup/skills-replaced/<name>-<UTC>/, outside the
+# skills index, before the install; a failed install moves it back. The digest
+# skips the GUI-local files, which sync keeps in place, so GUI authoring in a
+# mirror never reads as foreign content. A hand-edited mirror does, and is kept
+# the same way.
 
 set -uo pipefail
 
@@ -68,6 +89,10 @@ fi
 # revisit this list.
 GUI_LOCAL=('00_System_Prompt.md' '05_gui_dual_track.md' 'SETUP.md')
 
+LEDGER="$SKILLS/.vendored-state.tsv"
+BACKUP_ROOT="$ROOT/.claude-config/backup/skills-replaced"
+LEGACY_MOUNTS=" delegation-sizing briefing-subagents worktree-isolation verifying-delegated-output dynamic-workflows meta-skill-creator "
+
 [ -f "$MANIFEST" ] || { echo "skills-vendor: manifest missing: $MANIFEST" >&2; exit 3; }
 
 MODE="${1:-sync}"
@@ -82,6 +107,17 @@ if [ "${SKILLS_VENDOR_NO_RSYNC:-0}" = 1 ] || ! command -v rsync >/dev/null 2>&1;
 fi
 if [ "$MODE" = sync ] && [ "$USE_RSYNC" = 0 ]; then
   command -v tar >/dev/null 2>&1 || { echo "skills-vendor: neither rsync nor tar found" >&2; exit 3; }
+fi
+# The ownership digest. Without a hasher sync cannot tell a mirror from a local
+# folder, so it stops rather than guess.
+HASH_CMD=()
+if command -v sha256sum >/dev/null 2>&1; then
+  HASH_CMD=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+  HASH_CMD=(shasum -a 256)
+elif [ "$MODE" = sync ]; then
+  echo "skills-vendor: neither sha256sum nor shasum found: cannot tell a mirror from a local folder" >&2
+  exit 3
 fi
 
 # Build the exclude args once, in rsync, tar, and diff shapes.
@@ -186,6 +222,110 @@ tar_mirror() {
   echo changed
 }
 
+# tree_digest <dir>: a sha256 over every path, entry type, file content and
+# symlink target under <dir>, skipping the GUI-local names the way the sync
+# does. Paths are NUL-delimited and sorted in the C locale, so the value is the
+# same on every machine. Prints "sha256:<hex>"; non-zero on any failure.
+tree_digest() {
+  local dir="$1" list rel t sum out
+  list="$(mktemp "${TMPDIR:-/tmp}/skills-vendor.XXXXXX")" || return 1
+  if ! (cd "$dir" && find . \( "${GUI_FIND[@]}" \) -prune -o -print0) > "$list" \
+     || ! LC_ALL=C sort -z -o "$list" "$list"; then
+    rm -f "$list"; return 1
+  fi
+  out="$(
+    while IFS= read -r -d '' rel; do
+      if [ -L "$dir/$rel" ]; then
+        t="$(readlink "$dir/$rel")" || exit 1
+        printf 'l\0%s\0%s\0' "$rel" "$t"
+      elif [ -d "$dir/$rel" ]; then
+        printf 'd\0%s\0' "$rel"
+      elif [ -f "$dir/$rel" ]; then
+        sum="$("${HASH_CMD[@]}" < "$dir/$rel")" || exit 1
+        printf 'f\0%s\0%s\0' "$rel" "${sum%% *}"
+      else
+        printf 'o\0%s\0' "$rel"
+      fi
+    done < "$list" | "${HASH_CMD[@]}"
+  )" || { rm -f "$list"; return 1; }
+  rm -f "$list"
+  printf 'sha256:%s\n' "${out%% *}"
+}
+
+# ledger_get <name>: the recorded digest, or nothing.
+ledger_get() {
+  [ -f "$LEDGER" ] || return 0
+  awk -F'\t' -v n="$1" '$1 == n { v = $2 } END { if (v != "") print v }' "$LEDGER"
+}
+
+# ledger_set <name> <digest>: record a mirror's digest. Written whole through a
+# temp file, so an interrupted run never leaves half a ledger.
+ledger_set() {
+  local tmp
+  [ "$(ledger_get "$1")" = "$2" ] && return 0
+  tmp="$(mktemp "$SKILLS/.vendored-state.XXXXXX")" || return 1
+  {
+    printf '# skills-vendor.sh state: a content digest of each mirror it wrote.\n'
+    printf '# Generated; do not edit. A folder whose digest is not here is not\n'
+    printf '# treated as a mirror, so sync moves it aside instead of deleting it.\n'
+    (
+      if [ -f "$LEDGER" ]; then
+        awk -F'\t' -v n="$1" '!/^#/ && NF >= 2 && $1 != n' "$LEDGER" || exit 1
+      fi
+      printf '%s\t%s\n' "$1" "$2"
+    ) | LC_ALL=C sort
+  } > "$tmp" && mv -f "$tmp" "$LEDGER" || { rm -f "$tmp"; return 1; }
+}
+
+# owned_mirror <name> <src> <dst>: 0 when <dst> is a mirror sync owns (the
+# Ownership rules in the header), 1 when it is not, 2 when that cannot be
+# decided (the caller stops before changing anything).
+owned_mirror() {
+  local name="$1" src="$2" dst="$3" found recorded current rc
+  found="$(find "$dst" -name .git -print -quit)" || return 2
+  [ -z "$found" ] || return 1
+  recorded="$(ledger_get "$name")" || return 2
+  current="$(tree_digest "$dst")" || return 2
+  [ -n "$recorded" ] && [ "$recorded" = "$current" ] && return 0
+  diff -rq --no-dereference "${DIFF_EXCL[@]}" "$src" "$dst" >/dev/null 2>&1
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  if [ -z "$recorded" ]; then
+    case "$LEGACY_MOUNTS" in *" $name "*) return 0 ;; esac
+  fi
+  return 1
+}
+
+# move_aside <name> <dst>: move a folder sync does not own out of the skills
+# index. Prints the backup path.
+move_aside() {
+  local name="$1" dst="$2" stamp base path n=1
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
+  mkdir -p "$BACKUP_ROOT" || return 1
+  base="$BACKUP_ROOT/$name-$stamp"
+  path="$base"
+  while [ -e "$path" ] || [ -L "$path" ]; do n=$((n + 1)); path="$base-$n"; done
+  mv -- "$dst" "$path" || return 1
+  printf '%s\n' "$path"
+}
+
+# restore_aside <backup> <dst>: after a failed install, drop what this run
+# wrote at <dst> (nothing else was there: the folder had been moved aside) and
+# move the folder back.
+restore_aside() {
+  local backup="$1" dst="$2"
+  if rm -rf -- "$dst" && mv -- "$backup" "$dst"; then
+    rmdir "$BACKUP_ROOT" 2>/dev/null
+    echo "skills-vendor: restored $dst" >&2
+  else
+    echo "skills-vendor: could not restore $dst; your folder is kept at $backup" >&2
+  fi
+}
+
 drift=0
 missing=0
 
@@ -224,8 +364,29 @@ for i in "${!names[@]}"; do
     printf 'SKIP     %s (source repo not cloned: %s)\n' "$name" "$src"
     continue
   fi
+  # A destination sync does not own is moved aside first (Ownership, above).
+  backup=""
+  if [ -d "$dstdir" ]; then
+    owned_mirror "$name" "$srcdir" "$dstdir"
+    case "$?" in
+      0) ;;
+      1)
+        if ! backup="$(move_aside "$name" "$dstdir")"; then
+          echo "skills-vendor: could not move $dstdir aside; left it as it was" >&2
+          exit 3
+        fi
+        ;;
+      *)
+        echo "skills-vendor: could not tell whether $dstdir is a mirror sync wrote; left it as it was" >&2
+        exit 3
+        ;;
+    esac
+  fi
   if [ "$USE_RSYNC" = 1 ]; then
-    mkdir -p "$dstdir" || exit 3
+    if ! mkdir -p "$dstdir"; then
+      [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
+      exit 3
+    fi
     # --checksum: rsync's default quick check skips a file whose size and mtime
     # match, so an edit that kept the size within the same second stayed DRIFT
     # (--check compares content) while sync said UNCHANGED. Skill dirs are
@@ -235,14 +396,23 @@ for i in "${!names[@]}"; do
     if [ "$rc" -ne 0 ]; then
       echo "skills-vendor: rsync failed for $name (rc=$rc)" >&2
       [ -n "$out" ] && echo "$out" >&2
+      [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
       exit 3
     fi
   else
     if ! res="$(tar_mirror "$srcdir" "$dstdir")"; then
       echo "skills-vendor: tar copy failed for $name" >&2
+      [ -n "$backup" ] && restore_aside "$backup" "$dstdir"
       exit 3
     fi
     out=""; [ "$res" = changed ] && out="changed"
+  fi
+  if ! digest="$(tree_digest "$dstdir")" || ! ledger_set "$name" "$digest"; then
+    echo "skills-vendor: synced $name but could not record it in $LEDGER" >&2
+    exit 3
+  fi
+  if [ -n "$backup" ]; then
+    printf 'BACKUP   %s: the existing folder was not a mirror sync wrote; kept at %s\n' "$name" "$backup"
   fi
   if [ -n "$out" ]; then
     printf 'SYNCED   %s\n' "$name"

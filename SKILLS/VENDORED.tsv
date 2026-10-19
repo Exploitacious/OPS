@@ -4,7 +4,10 @@
 # each. The skill repos cloned under PROJECTS/ are the source of truth; this file
 # lists which skill dirs are mirrored into SKILLS/ and from where. Edit a vendored
 # skill at its source repo, then run `skills-vendor.sh sync` to refresh the mirror
-# here. Never hand-edit the mirrored SKILLS/<name>/ dirs; the sync overwrites them.
+# here. Never hand-edit the mirrored SKILLS/<name>/ dirs; the sync replaces them.
+# A folder the sync did not write (your own skill under a name a row mounts, or
+# a hand-edited mirror) is moved to .claude-config/backup/skills-replaced/ first,
+# never deleted; SKILLS/.vendored-state.tsv records what the sync wrote.
 #
 # Format: one row per skill, tab-separated:
 #   <name><TAB><source-dir relative to ~/OPS/PROJECTS>

@@ -96,6 +96,16 @@ by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
   config ops.pushVerified true`, which never overrides a public answer. Tests:
   `origin-private-check-test.sh`, `daily-sync-test.sh`, and new memory-init
   cases in bash and PowerShell.
+- **Skill mounts never delete a folder they did not write.** A manifest row
+  replaced whatever sat at `SKILLS/<name>`, so this release's `grill-me`,
+  `tdd`, and `diagnosing-bugs` rows would have deleted an existing copy's own
+  skill of that name. `skills-vendor.sh` now records a digest of each mirror
+  it writes (`SKILLS/.vendored-state.tsv`) and moves any other destination,
+  including a hand-edited mirror, to
+  `.claude-config/backup/skills-replaced/<name>-<UTC>/` before installing,
+  with a `BACKUP` line naming the path; a failed install moves it back.
+  Mirrors of the six earlier rows, and mirrors already equal to their source,
+  update in place as before.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
