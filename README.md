@@ -165,11 +165,11 @@ OPS/
 ├── SKILLS/                # Claude Code Skills + GUI Project twins (symlinked -> ~/.claude/skills/)
 ├── .claude-config/        # Stage 2 deploy + the machinery it does not itself install
 │   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (links, core rule, skill mounts, memory sync, ...)
-│   ├── hooks/                  #   SessionStart briefing, pre-compact snapshot, secrets/git guards
+│   ├── hooks/                  #   SessionStart briefing, pre-compact snapshot + branch-gc, context-watch, secrets/git guards
 │   ├── systemd/                #   ops-verify timer (nightly drift gate) + optional tmux-main
 │   ├── remote-sessions/        #   hand-run tmux sessions you remote-control (see its README)
 │   ├── agents/ + workflows/    #   sub-agent definitions + multi-lane workflow scripts
-│   └── bin/                    #   memory-index/-init, root wrapper, skills-vendor, verify-ops, grabit, tests/
+│   └── bin/                    #   memory-index/-init, branch-gc, sandbox-run, verify-ops, skills-vendor, tests/ (and more)
 ├── .claude-memory/        # per-machine Claude auto-memory dirs (git-synced via bin/memory-init)
 ├── .claude-handoffs/      # cross-session / cross-machine handoff batons
 ├── PROJECTS/              # your working repos (2nd-level subdirs are their own repos, gitignored)

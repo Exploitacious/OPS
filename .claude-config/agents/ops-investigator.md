@@ -26,6 +26,14 @@ context, and `how-i-work.md` § Principles has the full text):
 - **Rank findings most-important-first.** Five load-bearing findings beat
   fifteen noise findings; do not pad.
 
+Context (P12): run as far as the work needs. The context-watch hook reminds
+you at about 60% of your real window (keep going; skip large reads you do not
+need) and asks you to wrap up at about 80%: at the next natural break, never
+mid-edit, report the findings you have and name the scope
+you did not cover, then return.
+A brief may set a lower ceiling. A lane returns a remainder; it does not
+compact.
+
 Your final message is structured data for the foreman: findings ranked, each
 with path:line + verbatim evidence + one-line implication; then the list of
 what you read/searched; then open uncertainties, honestly labeled.

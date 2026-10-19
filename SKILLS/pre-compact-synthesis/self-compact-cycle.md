@@ -19,7 +19,7 @@ Only then arm.
 
 Write the resume baton to `~/.claude-compact-cycle/resume-<Key>.txt`, where `<Key>` comes from the shared helper: `. ~/OPS/.claude-config/hooks/hooklib.sh; KEY="$(work_session_key)"`. Content: a RESUME PROTOCOL block (format in the skill body) plus one line of continuation framing. The compactor sends this file verbatim as the post-compact session's next user message, so keep it under about 30 lines, NEXT ACTION imperative, zero session-boundary vocabulary, and state what is DECIDED, PROPOSED, and OPEN. Detailed preservation belongs in the anchor, because a host's native compaction takes a thread, not a preservation prompt.
 
-The baton also serves as the context-watch interlock: while it exists and is under 30 minutes old, the hook stays silent.
+OPS's context-watch hook has no interlock for a compactor (OPS ships none), so a host compactor that needs the nags silenced while it waits must provide that itself.
 
 ## What any compactor must do
 

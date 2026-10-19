@@ -2,6 +2,7 @@
 # Existing profiles can point at a prior pool while the new pool already holds
 # same-named notes. Migration must preserve both versions and fail visibly.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97
 INIT="$(cd "$(dirname "$0")/.." && pwd)/memory-init"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/memory-init-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT

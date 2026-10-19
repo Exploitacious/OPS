@@ -2,12 +2,12 @@
 
 The shared rules for every session and spawned lane working in this OPS
 harness: one file, always loaded. `.claude-config/deploy.sh` links it into
-`~/.claude/rules/ops-core.md`, so Claude Code loads it on every launch path
-(terminal, T3 Code, IDE, `claude -p`). If you can read this, it is loaded: a
-global instruction to read `~/OPS/CONTEXT/core.md` as a fallback is already
-satisfied. Procedures live in skills; situational detail has one home in the
-table at the end. Paths are relative to the OPS checkout (`~/OPS`). "The
-Operator" is the person this copy serves (`CONTEXT/USER.md`).
+`~/.claude/rules/ops-core.md`, so Claude Code loads it on every launch path.
+If you can read this, it is loaded: a global instruction to read
+`~/OPS/CONTEXT/core.md` as a fallback is already satisfied. Procedures live in
+skills; situational detail has one home in the table at the end. Paths are
+relative to the OPS checkout (`~/OPS`). "The Operator" is the person this copy
+serves (`CONTEXT/USER.md`).
 
 ## Role
 
@@ -96,7 +96,7 @@ shortcuts named, and escalation granted. Lanes run as far as the work needs
 and return a precise remainder at their limit; they never compact themselves.
 Use the `ops-*` lanes (`ops-worker` builds, `ops-investigator` reads,
 `ops-auditor` refutes), not a narrower type chosen for apparent cost.
-Mechanics: the delegation skills (`delegation-sizing` and its siblings).
+Mechanics: the delegation skills; refutation brief and lane return: P12.
 
 As a lane, touch only named files; commit or push only when the brief grants
 it; report out-of-scope improvements. Final output is data: exact paths, real
@@ -122,28 +122,29 @@ Same change, whole change (P1, P6, P9): a non-trivial change ships tests that
 run green, its CHANGELOG line, the disposition of its IDEAS entry, and fixes
 to any doc, lint, or schema invariant it made stale. A non-obvious decision
 gets its why beside it in the same change; removing it must not recreate a
-forgotten regression. No swallowed exceptions, silent degradation, or
-deferred quality checks. If full quality is impossible, report the blocker.
-Never trust your model over conflicting data; re-read the durable source.
-Mask secrets by value, never by field name; print at most the last four
-characters and never dump env.
+forgotten regression. No swallowed exceptions, silent degradation, or deferred
+quality checks. If full quality is impossible, report the blocker. Tests of
+tools that delete or move files run in `sandbox-run`. Never trust your model
+over conflicting data; re-read the durable source. Mask secrets by value,
+never by field name; print at most the last four characters and never dump
+env.
 
-Review. The foreman verifies every change it lands (tests, diff, behavior).
-Every completed body of work then gets one review before it integrates,
-merges, or reaches the Operator: an `ops-reviewer` lane, an `ops-auditor`
-refutation pass over numbered claims, or the foreman reading every changed
-line. Code where a miss is expensive (guards and secrets, deploy and merge
-gates, auth boundaries, production data writes, anything that can report a
-real problem as ok) gets its reviewer on Opus 5.5 (`model: "opus"`), with the
-reason in the brief. One pass at a time, one round; the foreman reads the
-delta. Self-verification does not replace review; only the Operator waives
-it.
+Review. The foreman verifies every change it lands (tests, diff, behavior),
+then sorts its code by what the output decides. Code where a miss is expensive
+(production data writes, deploy and merge gates, secrets and guards, auth
+boundaries, anything that can report a real problem as ok; unsure counts) goes
+to a second vendor's model, or with none to an Opus 5.5 refutation lane plus
+the Operator's read. Other code gets a Sonnet 5.5 refutation lane
+(`ops-auditor`, numbered claims). Docs, design, decisions, tests, and one-read
+config land on verification. One pass at a time, one round; the foreman reads
+the delta. Only the Operator waives review. Detail: `CONTEXT/how-i-work.md`
+Review pickup.
 
 Merge. Green, verified work merges by default (`gh pr merge --squash`, never
-`--delete-branch`: worktrees share one ref store, and the flag can move
-another session's checkout). Red or pending checks: fix or wait. No merge to
-a shared repo without the review the change needs. Ask only for a live
-production incident, an Operator hold, or another person's in-flight work.
+`--delete-branch`: worktrees share one ref store; `branch-gc` cleans merged
+branches). Red or pending checks: fix or wait. No merge to a shared repo
+without the review the change needs. Ask only for a live production incident,
+an Operator hold, or another person's in-flight work.
 
 ## Models
 
@@ -192,14 +193,15 @@ in reasoning and then repeat it in the reply.
 
 A compact is a rest stop (P2). At natural breaks (a closed task, a merged PR,
 a settled plan, a branch switch) and at about 300K tokens if no break has
-come, foremen run `pre-compact-synthesis` and compact, then continue the same
-work; every turn re-reads context. Auto-compaction near the end of the window
-is a backstop, not the rhythm. Lanes follow their return contract. Finish
-ungated housekeeping first. Pending items, each a line
-`- [ ] YYYY-MM-DD <item> (from: <source>)`: Operator actions to the owning
-repo's IDEAS `## On the Operator`, agent work to `## Follow-ups`, open
-decisions to `NOTES/MASTER/Questions.md`, tracked client work to the system
-in `CONTEXT/work-tracking.md`. A baton says "hold" only when nothing ungated
+come, foremen run `pre-compact-synthesis`, the Operator fires `/compact`, and
+the same work continues; every turn re-reads context. Auto-compaction near the
+end of the window is a backstop, not the rhythm. Lanes follow their return
+contract. Finish ungated housekeeping first; closeout and pre-compaction run
+`branch-gc --apply` on the repos touched. Pending items, each a line `- [ ]
+YYYY-MM-DD <item> (from: <source>)`: Operator actions to the owning repo's
+IDEAS `## On the Operator`, agent work to `## Follow-ups`, open decisions to
+`NOTES/MASTER/Questions.md`, tracked client work to the system in
+`CONTEXT/work-tracking.md`. A baton says "hold" only when nothing ungated
 remains, and names the gate.
 
 On resume, the summary and baton are hypotheses; re-confirm the task and
@@ -256,7 +258,6 @@ Operator to fetch data. Project repos live under `PROJECTS/<org>/<repo>`.
 | Machines, deploy, hooks | `machines`; `DEPLOYMENT.md` |
 | The OPS repo itself | `AGENTS.md`, `README.md` (`harness-readme`) |
 | Compact, handoff, close | `pre-compact-synthesis`, `session-handoff`, `session-close` |
-| First launch | `BOOTSTRAP.md` |
 
 A surprising result from a skill or tool is evidence about the tool as well
 as the task: report the defect rather than silently working around it.

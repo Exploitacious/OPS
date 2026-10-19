@@ -3,8 +3,8 @@
 #
 # Orients the operator the moment a session boots: the default worker model
 # tier, the config posture (compaction / effort / model), the project-lessons
-# pointer, the last pre-compact snapshot for this project, plus reminders +
-# a memory-health nudge.
+# pointer, the last pre-compact snapshot for this project, plus reminders,
+# a memory-health nudge, and the last nightly backup's problems, if any.
 #
 # COMPLEMENTARY to handoff-check.sh: that hook prints the pending-handoff
 # banner (project-keyed); this one does NOT repeat it. Together they are the
@@ -121,6 +121,17 @@ if [ -f "$MEM" ]; then
   fi
 fi
 
+# Flush queue depth: pending fold-or-keep decisions the next closeout consumes
+# (the read side of secrets-guard.sh's write-time nudge, which appends one
+# "<ISO time><TAB><file><TAB><reason>" line per flagged memory entry). A queue
+# nobody reads is decisions nobody makes, so say it at boot.
+FQ="$HOME/.claude-compact-cycle/memory-flush-queue"
+if [ -s "$FQ" ]; then
+  fq_n="$(grep -c . "$FQ" 2>/dev/null)"
+  fq_oldest="$(head -1 "$FQ" 2>/dev/null | cut -f1 | cut -dT -f1)"
+  printf ' Memory:  flush queue %s line(s) pending (oldest %s); closeout hygiene step 2 consumes them\n' "${fq_n:-?}" "${fq_oldest:-?}"
+fi
+
 # --- hygiene (quiet-when-clean): dirty repos, drift-gate state, closeout age ---
 STATE_DIR="$HOME/.local/state/ops"
 hyg=""
@@ -173,6 +184,32 @@ for md in "$CFG"/projects/*/memory; do
 done
 if [ -n "$hyg" ]; then
   printf ' Hygiene:%s\n' "${hyg% ·}"
+fi
+
+# --- nightly backup (quiet-when-clean) ---
+# daily-sync.sh exits 0 whatever its OPS stage did, and nothing else reads its
+# log, so a push it skipped (origin not verified private) or a stage that
+# failed (no git identity, a pull that failed every night) left the copy
+# un-backed-up with no one the wiser. Read the LAST run's OPS-stage ERROR and
+# WARN lines back from sync.log and say them here, with their continuation
+# lines: each line already names its reason and its fix. Only the log's tail is
+# read: a run is a few dozen lines, and the project stage adds one per repo.
+SYNC_LOG="$OPS_DIR/.claude-config/backup/sync.log"
+if [ -f "$SYNC_LOG" ]; then
+  bk="$(tail -n 3000 "$SYNC_LOG" 2>/dev/null | awk '
+    /\] ===== daily-sync start =====/ { n = 0; cont = 0; ts = substr($0, 2, 16); next }
+    {
+      msg = $0; sub(/^\[[^]]*\] /, "", msg)
+      if (msg ~ /^OPS: (ERROR|WARN) /) { sub(/^OPS: /, "", msg); line[++n] = msg; cont = 1; next }
+      if (cont && msg ~ /^     /) { sub(/^ +/, "", msg); line[n] = line[n] "; " msg; next }
+      cont = 0
+    }
+    END { if (n) { printf "%s|", ts; for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " / " : ""), line[i] } }')"
+  if [ -n "$bk" ]; then
+    bk_ts="${bk%%|*}"; bk_msg="${bk#*|}"
+    [ "${#bk_msg}" -le 400 ] || bk_msg="${bk_msg:0:397}..."
+    printf ' Backup:  the nightly backup at %s did not finish clean: %s (full log: %s)\n' "$bk_ts" "$bk_msg" "${SYNC_LOG/#$HOME/\~}"
+  fi
 fi
 
 # --- window-ping health (quiet-when-clean): the cron dumb-pipe that opens the

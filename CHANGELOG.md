@@ -4,6 +4,75 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-10-19: lane-aware hooks, branch cleanup, the sandbox, and the review split
+
+The hooks assumed one 1M window for every caller and still told sessions to
+self-compact through a tmux typer that cannot exist under T3 Code. OPS also had
+no rule on where destructive tests run and no landing tooling. This release
+ports those pieces from the maintainer's private harness.
+
+- **Lanes are sized by their own model.** `context-watch.sh` treats a hook call
+  carrying `agent_id` as a sub-agent lane: it reads the lane's own transcript,
+  sizes the window from the lane's model (1M for the current Opus, Sonnet and
+  Fable ids, 200K for the 4.6 and Haiku 4.5 ids, one 95K backstop under Haiku
+  5.5's 100K ceiling), and speaks only mid-turn, a reminder at 60% and a
+  wrap-up at 80%. Before, every lane got the main session's ladder read from
+  the main transcript, so a lane of a busy foreman was told to compact at once.
+  The agent definitions carry the lane return contract.
+- **No session self-compacts.** `bin/compact-cycle.sh` is deleted: it typed
+  `/compact` into a tmux pane and could not tell a finished compaction from a
+  failed one. Every nag now routes to `pre-compact-synthesis` and then the
+  Operator's `/compact`; sessions in tmux or herdr are run by hand.
+- **`branch-gc`** removes local branches a merged PR provably carried and
+  parks their worktrees in a 7-day trash it can restore from; it fails closed
+  on any doubt. It runs nightly from `daily-sync.sh`, from the PreCompact hook
+  for the cwd repo (detached; skipped when the payload names a sub-agent),
+  and at closeout.
+- **Destructive tests run in a sandbox.** `bin/sandbox-run` (bubblewrap: a
+  read-only root, a fresh home and `/tmp`, nothing writable by default) plus
+  a guard every suite that runs branch-gc, pre-compact, memory-init, deploy or
+  skills-vendor now starts with; outside the sandbox those suites exit 97.
+  `verify-ops.sh` check 24 fails an unguarded one. Why: in the private harness
+  an unsandboxed mutation sweep wiped most of a home directory.
+- **The review split.** The open-ended `ops-reviewer` lane is retired. Code
+  where a miss is expensive goes to a second vendor's model
+  (`bin/second-vendor-review` is the optional hand-off), or with none to an
+  Opus 5.5 refutation lane plus the Operator's own read; other code gets a
+  Sonnet 5.5 refutation lane; docs and decisions land on verification.
+  `how-i-work.md` carries the refutation brief shape.
+- **Backups that fail are visible.** The session briefing's `Backup:` line
+  repeats the last nightly run's OPS-stage errors and skipped pushes, since
+  `daily-sync.sh` exits 0 and nothing read its log. An origin with no branch
+  of that name yet is now a first push; before, its pull failed every night
+  and nothing was ever backed up.
+- **Fixes:** every git-guard check now sees through an `rtk` prefix (from a
+  project repo, `rtk git push --force`, `rtk git branch -D` and the other
+  rtk forms of a blocked command all passed); `harness-update-scan.sh` exits 7
+  when git cannot list the delta, instead of reporting a clean empty one;
+  deploy's failure summary mentions the core only when the core rule failed;
+  the pre-compact-synthesis skill states the push gate's verdict rule;
+  `verify-ops.sh` check 25 warns on a memory link whose pool is gone.
+- **`guard-selftest.sh` counts every failure.** Its rtk probes read their
+  JSON through a pipe, which ran each probe in a subshell: a failing rtk guard
+  printed FAIL and the selftest still exited 0 with "ALL GUARDS ENFORCE", the
+  exit code `deploy.ps1` acts on. They read a here-string now, and
+  `tests/guard-selftest-test.sh` inverts one guard verdict per probe site and
+  checks the exit code and the count.
+- **`second-vendor-review` never runs a reviewer without its cap.** With no
+  `timeout` or `gtimeout` on PATH (stock macOS) it skipped `--timeout` in
+  silence, so a hung reviewer blocked forever and a slow one was written up as
+  a review. It now exits 3 before any git work and names the fix
+  (`brew install coreutils`); `gtimeout` alone is enough.
+- **Ported:** `bin/transcript-usage.py` (token profile from transcripts) with
+  a test.
+- **Review hardening.** `sandbox-run` passes only an allowlisted set of open
+  file descriptors into bubblewrap: an inherited descriptor (fd 255 included)
+  let a suite write to the host behind the read-only mounts. `second-vendor-review`
+  writes its packet and result to private, unique paths published atomically,
+  stops when the digest cannot be read, and no longer records the reviewer
+  command, whose inline assignments could carry a credential. New
+  `sandbox-run-fd-test.py`, which runs outside the sandbox like `sandbox-run-test.sh`.
+
 ## 2026-10-19: one always-loaded core, and the fleet retired
 
 OPS booted through a foreman charter and an identity digest that a `claude()`

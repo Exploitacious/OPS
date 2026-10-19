@@ -3,7 +3,8 @@
 # (14 session pin, 15 Opus 5 ban, 15b retired ids and Haiku), the
 # SessionStart matcher check (18), the boot checks (1b root instructions, 5
 # citations, 16 the always-loaded core, 17 retired hooks, 21 and 21b the
-# identity layer), and the identity-exclusion check (23) pass the shipped tree
+# identity layer), the identity-exclusion check (23), the sandbox guards (24)
+# and dangling memory links (25) pass the shipped tree
 # against current Stage-1-shaped settings, and fail on each class they exist to
 # catch.
 #
@@ -17,6 +18,7 @@
 # argument; no command intervenes to overwrite it.
 # shellcheck disable=SC2319
 set -uo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/sandbox-guard.sh" && sandbox_guard || exit 97
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_OPS="$(cd "$DIR/../.." && pwd)"
 
@@ -387,6 +389,38 @@ chk "mirror verifier error -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 chmod -x "$OPS/.claude-config/bin/skills-vendor.sh"
 run check_skills_vendored
 chk "mirror verifier not executable -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+
+# 24. Sandbox guards: the shipped suites pass; a fixture suite that names a
+# destructive tool without the guard FAILs, and missing tooling FAILs.
+new_case sandbox
+mkdir -p "$OPS/.claude-config/bin/tests"
+for f in sandbox-run sandbox-lint sandbox-guard.sh sandbox_guard.py; do cp -p "$SRC_OPS/.claude-config/bin/$f" "$OPS/.claude-config/bin/"; done
+printf '#!/usr/bin/env bash\n%s\nbash "$HERE/../branch-gc" --dry-run\n' \
+  '. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97' \
+  > "$OPS/.claude-config/bin/tests/guarded-test.sh"
+run check_sandbox_guards
+chk "guarded destructive suite -> OK" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf '#!/usr/bin/env bash\nbash "$HERE/../branch-gc" --apply\n' > "$OPS/.claude-config/bin/tests/bare-test.sh"
+run check_sandbox_guards
+chk "destructive suite without the guard -> FAIL naming it" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'bare-test.sh'; echo $?)"
+rm -f "$OPS/.claude-config/bin/sandbox-lint"
+run check_sandbox_guards
+chk "sandbox-lint missing -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'sandbox-lint'; echo $?)"
+new_case sandbox-real
+OPS="$SRC_OPS"
+run check_sandbox_guards
+chk "shipped suites all carry the guard -> OK" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+
+# 25. Dangling memory links WARN and name memory-init; a resolving link and a
+# real directory stay quiet.
+new_case memlinks
+mkdir -p "$HOME/.claude/projects/-ok/" "$HOME/.claude/projects/-dir/memory" "$HOME/pool-ok" "$HOME/.claude/projects/-gone"
+ln -s "$HOME/pool-ok" "$HOME/.claude/projects/-ok/memory"
+run check_memory_links
+chk "resolving link and real dir -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+ln -s "$HOME/pool-removed" "$HOME/.claude/projects/-gone/memory"
+run check_memory_links
+chk "dangling memory link -> WARN naming memory-init" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q -- '-gone' && printf '%s' "$OUT" | grep -q 'memory-init'; echo $?)"
 
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"

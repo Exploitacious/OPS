@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# context-watch.sh — context-usage escalation ladder (Stop + PostToolUse).
+# context-watch.sh: context-usage escalation ladder (Stop + PostToolUse), with a
+# separate backstop for sub-agent lanes.
 #
 # Modes (first arg):
 #   stop      (default) Stop hook: block the stop with an escalating nag telling
-#             the agent to run the compact ritual (pre-compact-synthesis skill
-#             -> compact-cycle.sh self-compact).
+#             the agent to run the compact ritual (the pre-compact-synthesis
+#             skill, then tell the Operator a manual /compact is clear to fire).
 #   posttool  PostToolUse hook: once usage reaches URGENT, inject a matching
 #             warning MID-TURN via additionalContext. Stop hooks only fire
-#             between turns — a long tool-calling turn once ran from 65% to 98%
+#             between turns: a long tool-calling turn once ran from 65% to 98%
 #             before its first Stop event and lost the room to synthesize. This
-#             mode is the fix: the turn can no longer outrun the nag.
+#             mode is the fix: the turn can no longer outrun the nag. It is also
+#             the only mode that speaks inside a lane (below).
 #   readout   UserPromptSubmit hook: a calm one-line context annotation, never a
 #             block. Below the window ladder it is boundary-aware: a per-turn
 #             weight plus a transcript-derived natural break (a closed task, a
@@ -18,47 +20,90 @@
 #             numbers are noise filters on WHEN it speaks (see the readout
 #             branch), never shown to the agent as a reason to act.
 #
+# Who compacts. OPS ships no self-compaction: under T3 Code the Operator fires
+# /compact in the composer, in a terminal they type it, and Claude Code's own
+# auto-compaction near the end of the window is the backstop. Sessions in tmux
+# or herdr are run by hand and never self-compact. (The retired tmux typer,
+# bin/compact-cycle.sh, could not tell a finished compaction from a failed one,
+# and a resume sent after a failed compact resumed work on a thread whose
+# history was never summarized.) So every route this hook prints ends with the
+# Operator's /compact, after the synthesis.
+#
 # Registration: Stop hook (no arg) + PostToolUse hook (matcher ".*", arg
 # `posttool`) + UserPromptSubmit hook (matcher ".*", arg `readout`) in the
-# Stage 1 settings.json template — settings.json is a Level 1 file owned by
+# Stage 1 settings.json template. settings.json is a Level 1 file owned by
 # linuxploitacious, so a new deploy picks them up automatically; see
 # DEPLOYMENT.md ("a new hook means registering it in the Stage 1 settings.json").
 # Hook config is session-cached: changes land at the next session launch.
 #
 # Context is measured from the transcript's last assistant `usage` entry
-# (input + cache_read + cache_creation tokens) — the actual API context, not a
+# (input + cache_read + cache_creation tokens): the actual API context, not a
 # byte-size guess (transcripts run 20-160MB; bytes are meaningless).
 #
-# Escalation ladder — fractions of CC_CONTEXT_WINDOW (default 1000000; export
-# 200000 on 200K-window machines and every tier scales):
+# Escalation ladder for the main session, fractions of CC_CONTEXT_WINDOW
+# (default 1000000; export 200000 on a 200K-window setup and every tier scales):
 #   65%  NOTICE    re-nag after +75K growth
 #   78%  WARNING   re-nag after +40K
 #   86%  URGENT    re-nag after +20K    posttool active from here (+15K throttle)
 #   92%  CRITICAL  every stop           posttool throttle tightens to +8K
 # Crossing INTO a higher tier always fires immediately, growth gap or not.
 # Legacy overrides still honored (tier 1 only): CC_COMPACT_NAG_TOKENS
-# (threshold), CC_COMPACT_RENAG_TOKENS (re-nag gap) — prefer CC_CONTEXT_WINDOW.
-# State per session id under ~/.claude-compact-cycle/, one line:
+# (threshold), CC_COMPACT_RENAG_TOKENS (re-nag gap); prefer CC_CONTEXT_WINDOW.
+# State per session id under ~/.claude-compact-cycle/ (the session-state
+# directory every hook shares; the name predates the retired typer), one line:
 # "<last_stop_ctx> <last_stop_tier> <last_posttool_ctx>".
 #
+# Sub-agent (lane) awareness. A hook input carrying agent_id is running INSIDE a
+# sub-agent lane, not the main session (the hooks docs: agent_id is "present
+# only when the hook fires inside a subagent call"). A lane is not a session:
+# it does not compact on purpose and has no early checkpoint. It runs as high
+# as the work needs and returns a remainder the foreman respawns from
+# (CONTEXT/how-i-work.md P12). An earlier 250K/400K lane ladder made lanes stop
+# after one to three items, and every continuation lane re-paid its reading.
+# What a lane gets is a two-stage backstop near its REAL window, sized from the
+# lane transcript's model (LANE_WINDOWS below), not from CC_CONTEXT_WINDOW:
+#   LANE_REMIND_PCT (60)  reminder: keep going, plan to finish, skip large reads
+#                         you do not need; re-injected after +10% of window
+#   LANE_WRAP_PCT   (80)  wrap up: at the next natural break commit what is
+#                         green if the brief allows, write the precise
+#                         handoff note, return; re-injected after +2.5% (10K floor)
+# Crossing into wrap fires immediately, growth gap or not. LANE_WINDOW_OVERRIDE
+# (tokens) replaces the model map for tests and emergencies. Auto-compaction is
+# on in the Stage-1 settings (autoCompactEnabled true, DISABLE_AUTO_COMPACT "0")
+# and reaches lanes too: a 1M lane would compact near 967K and lose the working
+# detail its handoff note needs, so its backstop asks it to return first.
+# A Haiku 5.5 lane is the exception (its LANE_CEILINGS row): Stage-1 pins it a
+# 100K compaction window (modelSettings), so it compacts on its own well below
+# the 100K long-context price and gets no reminder and no wrap, only one
+# backstop at LANE_CEILING_BACKSTOP_PCT (95) of its ceiling, which fires only if
+# compaction did not. Both stages ride PostToolUse (additionalContext): a lane's
+# completion fires SubagentStop (which settings.json does not register), and
+# blocking a SubagentStop would force the lane to CONTINUE rather than return,
+# the opposite of a ceiling. So stop and readout invocations in a lane stay
+# silent. The lane's context is read from its OWN transcript: the hook input's
+# transcript_path is the MAIN transcript even in a lane, so the lane transcript
+# is derived as <main without .jsonl>/subagents/agent-<agent_id>.jsonl (a
+# recursive glob covers workflow lanes that nest under subagents/workflows/).
+# Lane throttle state keys on agent_id, because session_id in a lane is the
+# MAIN id and would collide across concurrent lanes. Main-session behaviour is
+# unchanged: the lane branch is skipped whenever agent_id is absent.
+#
 # Suppressed when:
-#   - stop_hook_active (we already blocked this stop — loop guard; stop mode)
-#   - a fresh (<30 min) resume baton exists for this tmux session — the
-#     ritual is already in flight and the agent is ending its turn ON PURPOSE
-#     so the compactor can type /compact
+#   - stop_hook_active (we already blocked this stop; loop guard; stop mode)
+#   - inside a lane, any mode but posttool (above)
 #   - CC_CONTEXT_WATCH=0 (all), CC_CONTEXT_WATCH_POSTTOOL=0 (posttool only),
 #     not enough data, or no usable JSON parser
 #   - no python3 (see limitation note below)
 #
 # Limitation (accepted, not a bug): the simple payload fields (session_id,
-# transcript_path, stop_hook_active) go through hooklib.sh's hook_field, which
-# falls back through jq/python/py same as every other hook. But the actual
-# context measurement below re-reads the transcript file and scans its tail
-# for the last `usage` entry — that byte-seek + JSONL scan stays python3-only,
-# so hosts without python3 (e.g. Windows Git Bash) never get the nag, in
-# EITHER mode. This is fail-open BY DESIGN, unlike git-guard/secrets-guard
-# which fail CLOSED: a missed reminder just means the operator compacts
-# manually instead of on this hook's cue — the compact ritual itself
+# transcript_path, stop_hook_active, agent_id) go through hooklib.sh's
+# hook_field, which falls back through jq/python/py same as every other hook.
+# But the actual context measurement below re-reads the transcript file and
+# scans its tail for the last `usage` entry: that byte-seek + JSONL scan stays
+# python3-only, so hosts without python3 (e.g. Windows Git Bash) never get the
+# nag, in ANY mode. This is fail-open BY DESIGN, unlike git-guard/secrets-guard
+# which fail CLOSED: a missed reminder just means the Operator compacts on their
+# own cue instead of this hook's; the compact ritual itself
 # (pre-compact-synthesis skill) still works fine without this nag ever firing.
 #
 # A hook must never break the session: every failure path exits 0 silently.
@@ -74,7 +119,7 @@ PAYLOAD=""
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HOOK_DIR/hooklib.sh"
 
-# Simple field reads use hook_field (jq-first, python3/python/py fallback) —
+# Simple field reads use hook_field (jq-first, python3/python/py fallback):
 # only the transcript tail-scan further down is python3-only.
 if [ "$MODE" = "stop" ]; then
   STOP_ACTIVE="$(printf '%s' "$PAYLOAD" | hook_field stop_hook_active)" || exit 0
@@ -85,28 +130,21 @@ TRANSCRIPT="$(printf '%s' "$PAYLOAD" | hook_field transcript_path)" || exit 0
 SID="$(printf '%s' "$PAYLOAD" | hook_field session_id)" || exit 0
 SID="${SID:-unknown}"
 SID="${SID:0:64}"
+AGENT_ID="$(printf '%s' "$PAYLOAD" | hook_field agent_id)" || exit 0
 
 RUNDIR="${CC_CYCLE_RUNDIR:-$HOME/.claude-compact-cycle}"
 mkdir -p "$RUNDIR" 2>/dev/null || exit 0
 
-# Ritual-in-flight interlock: fresh baton for this tmux session => stay silent
-# in both modes (the compactor needs the turn to end).
-if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-  SNAME="$(tmux display-message -p '#S' 2>/dev/null | tr ':. ' '---' | tr -cd 'A-Za-z0-9-')"
-  if [ -n "$SNAME" ] && [ -f "$RUNDIR/resume-$SNAME.txt" ]; then
-    if [ -n "$(find "$RUNDIR/resume-$SNAME.txt" -mmin -30 2>/dev/null)" ]; then exit 0; fi
-  fi
-fi
-
-# The transcript byte-tail scan (below) needs python3 specifically — jq has no
+# The transcript byte-tail scan (below) needs python3 specifically: jq has no
 # clean way to seek N bytes from EOF in a multi-hundred-MB file and re-parse a
 # JSONL tail. See the limitation note at the top of this file.
 command -v python3 >/dev/null 2>&1 || exit 0
 
-CW_TRANSCRIPT="$TRANSCRIPT" CW_SID="$SID" RUNDIR="$RUNDIR" MODE="$MODE" \
+CW_TRANSCRIPT="$TRANSCRIPT" CW_SID="$SID" CW_AGENT_ID="$AGENT_ID" RUNDIR="$RUNDIR" MODE="$MODE" \
 WINDOW="${CC_CONTEXT_WINDOW:-1000000}" \
+LANE_WINDOW_OVERRIDE="${LANE_WINDOW_OVERRIDE:-}" LANE_REMIND_PCT="${LANE_REMIND_PCT:-}" LANE_WRAP_PCT="${LANE_WRAP_PCT:-}" \
 NAG_OVERRIDE="${CC_COMPACT_NAG_TOKENS:-}" RENAG_OVERRIDE="${CC_COMPACT_RENAG_TOKENS:-}" \
-IN_TMUX="${TMUX:+1}" python3 - <<'PY' 2>/dev/null || exit 0
+python3 - <<'PY' 2>/dev/null || exit 0
 import json, os, re, sys
 
 
@@ -229,6 +267,218 @@ mode = os.environ.get("MODE", "stop")
 tp = os.environ["CW_TRANSCRIPT"]
 sid = os.environ["CW_SID"]
 
+# --- sub-agent (lane) branch: runs ONLY when agent_id is present -------------
+# See the header: a lane runs as high as the work needs and returns a
+# remainder; its only ceiling is the two-stage backstop near its real window,
+# or one backstop for a ruled ceiling (LANE_CEILINGS). This branch fully
+# handles and exits the lane case; main-thread inputs fall straight through.
+
+# Context window per lane model, keyed on the transcript's message.model, the id
+# the API answered with (Claude Code strips a [1m] suffix before sending, so a
+# transcript does not carry one). Basis: the Claude Code model-config docs
+# ("Extended context": Fable 5.1, Fable 5, Sonnet 5 and Opus 4.7 and later run
+# with the 1M window on every plan; Opus 4.6 and Sonnet 4.6 reach 1M only
+# through their [1m] variant, which the transcript cannot show, so their bare
+# ids get the safe 200K, and LANE_WINDOW_OVERRIDE=1000000 covers a [1m] lane on
+# them; Haiku 4.5 is 200K) and the Sonnet 5.5 release note (1M). Older ids are
+# pinned nowhere in this harness (CONTEXT/model-roles.md); add a row before
+# running a lane on one. Haiku 5.5's row is a PRICE ceiling, not its window: the
+# model has a native 1M window, but every rate is 5x once a request's prompt
+# passes 100K tokens, so the harness keeps Haiku lanes under 100K and Stage-1
+# pins its compaction window there. LANE_CEILINGS marks such rows so the stage
+# text names a ceiling, not a hard window.
+LANE_WINDOWS = {
+    "claude-fable-5-1": 1_000_000, "claude-fable-5": 1_000_000,
+    "claude-sonnet-5-5": 1_000_000, "claude-sonnet-5": 1_000_000,
+    "claude-opus-5-5": 1_000_000, "claude-opus-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 200_000, "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-haiku-5-5": 100_000,
+}
+# Family fallbacks for an id the map does not list, checked in this order (the
+# Haiku 5.5 snapshot prefix must precede the wider Haiku family).
+LANE_FAMILY_WINDOWS = [("claude-haiku-5-5-", 100_000), ("claude-haiku-", 200_000),
+                       ("claude-fable-", 1_000_000), ("claude-sonnet-", 1_000_000),
+                       ("claude-opus-", 1_000_000)]
+LANE_DEFAULT_WINDOW = 1_000_000
+# Ids whose row is a ruled ceiling below the model's real window (Haiku 5.5).
+LANE_CEILINGS = ("claude-haiku-5-5",)
+# The one stage a ceiling lane gets, as a percentage of its ceiling: just under
+# the 100K price edge, well above where its auto-compaction fires.
+LANE_CEILING_BACKSTOP_PCT = 95
+
+
+def lane_is_ceiling(model):
+    """True when the lane's size comes from a ruled ceiling, not its window. A
+    [1m] suffix does not lift a ruled ceiling: the price edge is per request."""
+    m = (model or "").strip().replace("[1m]", "")
+    return any(m == c or m.startswith(c + "-") for c in LANE_CEILINGS)
+
+
+def lane_window(model):
+    """Window for a lane's model id. A [1m] suffix, should a transcript ever carry
+    one, is the 1M variant by definition. An unknown id falls to its family,
+    else to 1M: every current lane model is 1M, so a new id is far more likely a
+    newer 1M model than an older 200K one, and the two possible errors are not
+    symmetric. Guessing low would silently bring back early wrap-ups (at 160K on
+    a 1M lane, on every lane, until someone noticed); guessing high fails loudly
+    once (that lane ends on "Prompt is too long", the foreman sees it, the map
+    gains a row)."""
+    m = (model or "").strip()
+    if "[1m]" in m:
+        if lane_is_ceiling(m):
+            m = m.replace("[1m]", "")
+        else:
+            return 1_000_000
+    if m in LANE_WINDOWS:
+        return LANE_WINDOWS[m]
+    for prefix, lw in LANE_FAMILY_WINDOWS:
+        if m.startswith(prefix):
+            return lw
+    return LANE_DEFAULT_WINDOW
+
+
+def lane_pct(name, default):
+    """A stage percentage from the environment, 1-100, else the default."""
+    try:
+        v = int(os.environ.get(name) or default)
+    except Exception:
+        return default
+    return v if 1 <= v <= 100 else default
+
+
+agent_id = os.environ.get("CW_AGENT_ID") or ""
+if agent_id:
+    # A lane speaks ONLY mid-turn via PostToolUse. Its own end fires SubagentStop
+    # (unregistered in settings.json), and blocking a stop would force the lane to
+    # CONTINUE, not return; so stop/readout in a lane are silent.
+    if mode != "posttool":
+        sys.exit(0)
+    import glob
+    # The hook input's transcript_path is the MAIN transcript even here, so derive
+    # the lane's own transcript to weigh the lane's context, not the session's.
+    base = tp[:-6] if tp.endswith(".jsonl") else tp
+    lane_tp = os.path.join(base, "subagents", "agent-%s.jsonl" % agent_id)
+    if not os.path.isfile(lane_tp):
+        lane_tp = next(iter(glob.glob(
+            os.path.join(glob.escape(base), "subagents", "**", "agent-%s.jsonl" % glob.escape(agent_id)),
+            recursive=True)), "")
+    if not lane_tp or not os.path.isfile(lane_tp):
+        sys.exit(0)  # cannot locate the lane transcript: fail open, stay silent
+    lctx, lmodel = 0, ""
+    try:
+        lsize = os.path.getsize(lane_tp)
+        with open(lane_tp, "rb") as f:
+            f.seek(max(0, lsize - 800_000))
+            ltail = f.read().decode("utf-8", "replace")
+    except Exception:
+        sys.exit(0)
+    for line in reversed(ltail.splitlines()):
+        if '"usage"' not in line:
+            continue
+        try:
+            le = json.loads(line)
+        except Exception:
+            continue
+        lu = (le.get("message") or {}).get("usage") or le.get("usage") or {}
+        lt = sum(int(lu.get(k) or 0) for k in
+                 ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        if lt > 0:
+            lctx = lt
+            lmodel = str((le.get("message") or {}).get("model") or le.get("model") or "")
+            break
+    if lctx <= 0:
+        sys.exit(0)
+    # The lane's window: the override, else the model map. Stage thresholds are
+    # percentages of it; an inverted pair (remind at or above wrap) is a typo, and
+    # the defaults are safer than a one-stage ladder.
+    try:
+        lwin = int(os.environ.get("LANE_WINDOW_OVERRIDE") or 0)
+    except Exception:
+        lwin = 0
+    ceiling = lane_is_ceiling(lmodel)
+    if lwin <= 0:
+        lwin = lane_window(lmodel)
+    elif ceiling:
+        # The emergency override may lower a ruled ceiling, never raise it.
+        lwin = min(lwin, lane_window(lmodel))
+    remind_pct, wrap_pct = lane_pct("LANE_REMIND_PCT", 60), lane_pct("LANE_WRAP_PCT", 80)
+    if remind_pct >= wrap_pct:
+        remind_pct, wrap_pct = 60, 80
+    if ceiling:
+        # A ceiling lane compacts by design below its ceiling, so the reminder
+        # and wrap knobs do not apply: one backstop stage, reached only when its
+        # auto-compaction did not fire.
+        stage = 2 if lctx >= lwin * LANE_CEILING_BACKSTOP_PCT // 100 else 0
+    else:
+        remind_at, wrap_at = lwin * remind_pct // 100, lwin * wrap_pct // 100
+        stage = 2 if lctx >= wrap_at else 1 if lctx >= remind_at else 0
+    # Throttle per LANE: session_id in a lane is the MAIN id, so keying on it
+    # would let concurrent lanes share one throttle. agent_id is unique per lane.
+    # State: "<last injected ctx> <its stage>".
+    lstate = os.path.join(os.environ["RUNDIR"], "lane-%s" % re.sub(r"[^A-Za-z0-9_-]", "", agent_id)[:64])
+    last_l = last_stage = 0
+    try:
+        with open(lstate) as f:
+            parts = (f.read().split() + ["0", "0"])[:2]
+        last_l, last_stage = int(parts[0] or 0), int(parts[1] or 0)
+    except Exception:
+        last_l = last_stage = 0
+    # Auto-compaction reuses the lane id. Forget its previous backstop after
+    # the context falls, including quiet calls below the threshold: otherwise
+    # a 95K -> 20K -> 95K refill stays throttled until 105K, past the ceiling.
+    if stage == 0:
+        if last_l:
+            try:
+                with open(lstate, "w") as f:
+                    f.write("0 0")
+            except OSError:
+                pass
+        sys.exit(0)
+    if lctx < last_l:
+        last_l = last_stage = 0
+    # Re-inject on a first hit, on crossing into wrap, or after enough growth:
+    # +10% of window in the reminder stage (one nudge per ~100K on a 1M lane)
+    # and +2.5% with a 10K floor in wrap (25K on 1M: the lane must keep hearing
+    # it as the edge nears).
+    gap = lwin // 10 if stage == 1 else max(10_000, lwin // 40)
+    if last_l and stage <= last_stage and lctx < last_l + gap:
+        sys.exit(0)
+    try:  # record before emitting so a crash can never inject-spam
+        with open(lstate, "w") as f:
+            f.write(f"{lctx} {stage}")
+    except Exception:
+        sys.exit(0)
+    lk, lwk, lpct = lctx // 1000, lwin // 1000, lctx * 100 // lwin
+    # A ceiling row (Haiku 5.5) is not the model's limit: the lane would run on
+    # past it, so the text names the ruled ceiling instead of an API-error edge.
+    of_what = (f"of the ~{lwk}K ceiling set for its model (~{lpct}%)" if ceiling
+               else f"of its ~{lwk}K window (~{lpct}%)")
+    # Wording note: verify-ops check 20 bans scarcity words in emitted strings,
+    # so the doctrine's "remainder" is "handoff note" here.
+    ret = ("At the next natural break, never mid-edit: "
+           "commit what is green if your brief allows, write a precise handoff note (what is done, what "
+           "is left, where the state lives) into your report, and return. ")
+    if stage == 2 and ceiling:
+        lmsg = (f"[context-watch lane] Backstop: this lane carries ~{lk}K {of_what}. This model's lanes "
+                "auto-compact well below here, so compaction did not fire (auto-compaction is off, or Claude "
+                "Code stopped it after rapid refills), and past the ceiling every request bills at 5x. " + ret +
+                "A brief may set its own lower ceiling. A lane returns a handoff note.")
+    elif stage == 2:
+        lmsg = (f"[context-watch lane] Wrap up: this lane carries ~{lk}K {of_what}, near its context limit, "
+                "where auto-compaction would summarize the lane and drop the working detail its handoff note "
+                "needs. " + ret + "A brief may set its own lower ceiling. A lane returns a handoff note; it "
+                "does not compact.")
+    else:
+        lmsg = (f"[context-watch lane] Reminder: this lane carries ~{lk}K {of_what}. "
+                "Keep going and plan to finish from here: prefer targeted reads over large new ones you do "
+                f"not need, and keep your handoff note current. Wrap-up guidance arrives at ~{wrap_pct}%; "
+                "a brief may set its own lower ceiling.")
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse", "additionalContext": lmsg}}))
+    sys.exit(0)
+
 # Last usage entry from the transcript tail (context = what the last API call carried).
 try:
     size = os.path.getsize(tp)
@@ -284,13 +534,11 @@ BREAK_TURN = 250_000   # this heavy AND a real boundary -> "natural break point"
 LONG_TURN  = 400_000   # this heavy regardless of a boundary -> "run long" backstop
 
 # how = the compact route. Defined here, above the readout, so the readout texts
-# and the ladder nags below share one definition.
-how = ("run the pre-compact-synthesis skill in SELF-COMPACT mode: full synthesis, write the "
-       "resume baton, spawn ~/OPS/.claude-config/bin/compact-cycle.sh --target <this tmux "
-       "session>, then END YOUR TURN so the compactor can fire /compact"
-       if os.environ.get("IN_TMUX")
-       else "run the pre-compact-synthesis skill, then tell the operator a manual /compact is clear "
-            "to fire (this session is not in tmux, so no self-compact)")
+# and the ladder nags below share one definition. One route on every host: OPS
+# has no self-compaction (see the header), so the session synthesizes and the
+# Operator fires /compact.
+how = ("run the pre-compact-synthesis skill, then tell the Operator a manual /compact is clear "
+       "to fire")
 
 # --- readout mode: ALWAYS handled here, at EVERY tier, and always exits. ---
 # This branch must come before any ladder logic. A readout is a passive
@@ -333,9 +581,9 @@ if mode == "readout":
         # 2026-07-25 after a session substituted "this feels long" for data and
         # pushed toward closeout at ~20%), not a call to act.
         print(f"[context] ~{ctx // 1000}K of {win // 1000}K in play (~{pct0}%). Ample "
-              "headroom, no action needed. Self-compact is pre-authorized at any "
-              "milestone; you never need to ask, and context is never a reason to wrap "
-              "up or cut quality.")
+              "headroom, no action needed. A compact is pre-authorized at any milestone "
+              "(synthesis, then the Operator's /compact); you never need to ask, and "
+              "context is never a reason to wrap up or cut quality.")
     sys.exit(0)
 
 if tier == 0:
@@ -360,7 +608,7 @@ except Exception:
 if ctx < last_ctx or ctx < last_post:
     # Context SHRANK since the last nag (a /compact ran mid-session under the
     # same session id): the stale high-water marks would suppress every re-nag
-    # below CRITICAL for the rest of the session — start a fresh epoch.
+    # below CRITICAL for the rest of the session: start a fresh epoch.
     last_ctx = last_tier = last_post = 0
 
 pct = ctx * 100 // win
@@ -416,7 +664,7 @@ if name == "NOTICE":
             f"as a session boundary: synthesis then continue as one body of work.")
 elif name == "WARNING":
     body = (f" Finish the current step, then run the compact ritual BEFORE starting anything new: "
-            f"{how}. Past ~86%, run the synthesis now; the compactor needs room to work, so do not defer this "
+            f"{how}. Past ~86%, run the synthesis now; it needs room to work, so do not defer this "
             f"twice. This reminder returns after ~{gap // 1000}K more tokens. Not a session boundary: "
             f"synthesis then continue as one body of work.")
 elif name == "URGENT":

@@ -105,7 +105,15 @@ only when the why is not obvious, and no AI attribution.
 
 For an eligible green `MERGEABLE` PR, use `gh pr merge --squash` and report
 the SHA. Never add `--delete-branch`: worktrees share a ref store and that
-flag can rotate another session's checkout. Shared-infrastructure PRs need an
+flag can rotate another session's checkout. `.claude-config/bin/branch-gc`
+cleans up instead: nightly from `backup/daily-sync.sh` on every repo it
+manages (`~/OPS`, `~/OPS/PROJECTS/<org>/<repo>`, `~/linuxploitacious`), at
+pre-compaction for the repo holding the cwd, and at closeout on each repo
+touched. It deletes a branch only when a merged PR's head or the default
+branch provably holds every commit it carried, moves a removable worktree
+to a 7-day trash it can restore from, and fails closed on any doubt (no
+`gh` sign-in means it removes nothing). Never sweep branches or worktrees by
+hand. Shared-infrastructure PRs need an
 extra-careful application of the same review gate. Automatic merge
 permission does not extend to rebasing onto main or deleting unmerged work;
 the other gates are in [core: Intake](core.md#intake-then-autonomy).
@@ -113,12 +121,83 @@ the other gates are in [core: Intake](core.md#intake-then-autonomy).
 ## Review pickup
 
 The review contract is in
-[core: Land](core.md#land-the-work-with-one-review-gate). A continued
-reviewer thread remembers its earlier verdicts, so each batch prompt asks for
-a fresh adversarial read of the new delta and states which earlier findings
-the foreman kept or reverted, and why. A refutation brief lists numbered
-claims and asks for one verdict per claim (CONFIRMED, PARTIAL, or REFUTED,
-with the evidence); it is the shape `ops-auditor` expects.
+[core: Land](core.md#land-the-work-with-one-review-gate): the foreman verifies
+every change it lands, then sorts its code by what the output decides, not by
+whether it writes (a read-only verdict that reports a real problem as ok is
+the expensive kind).
+
+- **Second vendor:** code where a miss is expensive. Production data writes
+  and deletes (prune sweeps, branch deletion, re-encryption); deploy, merge,
+  and CI gates; secrets and guards; tenant, auth, and redaction boundaries,
+  including the sibling paths of the one fixed; security verdicts such as
+  isolation or exposure, even read-only; anything that can report a real
+  problem as ok or success on failure; concurrency, ordering, retries, and
+  idempotency on a production path; logic meeting untrusted input there.
+  Unsure means this bucket. A model from another vendor has blind spots the
+  Claude builder lanes do not share. `.claude-config/bin/second-vendor-review`
+  is the optional hand-off: one packet (digest plus diff) piped to the CLI in
+  `OPS_REVIEWER_CMD`, the result in a file.
+- **No second vendor (OPS rule):** that same code gets an Opus 5.5
+  refutation lane (`ops-auditor` with `model: "opus"`, the reason in the
+  brief) plus the Operator's own read of the diff before it merges. Neither
+  alone replaces the second vendor's independence; together they are the
+  fallback, and the Operator's read is not optional.
+- **Sonnet 5.5 refutation lane:** the rest of the code. Internal tooling,
+  offline and read-only scripts whose failure is visible and reversible,
+  harness lifecycle code, refactors proven by tests.
+- **Land on verification, no second review:** docs, doctrine, context files,
+  skills, memory, READMEs, changelogs; design docs, decisions, and Operator
+  rulings recorded as config; front-end content and styling; tests-only
+  changes, config checkable in one read, generated files, lockfiles,
+  fixtures; live-incident hotfixes (their code rides the next review).
+
+One review per finished body of work, one round: send the whole verified
+package after its own fixes land, so no reviewer reads code that is about to
+change. The second vendor gets a digest (each part's what and why, the
+decisions already made, the tests already run, known failures to ignore) and
+no list of claims, so it is not steered. A finding in expensive-miss code
+found by a refutation lane moves into that review. Fixes for findings ride
+the next package, except secrets and guards, where a short review of just
+the fix earns its cost. A continued reviewer thread remembers its earlier
+verdicts, so each batch prompt asks for a fresh adversarial read of the new
+delta and states which earlier findings the foreman kept or reverted, and
+why. Disagreements between a reviewer and the foreman go to the Operator
+with both positions and a recommendation.
+
+The refutation lane tries to break the foreman's numbered claims about a
+change; it does not "review the branch". Stating the claims forces the
+foreman to name the invariants the change asserts, and each verdict comes
+back checkable in minutes. Brief shape:
+
+1. **Stakes.** The change (repo, branch, head SHA, worktree path), who runs
+   it, and what breaks for them if a CONFIRMED verdict is wrong. Cite P3 and
+   P14.
+2. **Scope.** The files or line ranges that are the lane's; name what is
+   out of scope and say it may be read only where in-scope code calls it.
+3. **Rules.** Read-only on the worktree: no edits, commits, or pushes. No
+   production or network writes; GET-only reads and the repo's own
+   stub-based tests are fine. Mutations only on scratch copies, and a
+   mutation of anything that deletes or moves files only inside
+   `sandbox-run` (P9). Never print another process's argv or env, or a token.
+4. **The claims.** Numbered, falsifiable invariants, each with file:line and
+   the command that proves it ("a failed post-check is reported as failed
+   and holds the version", not "error handling is good"), plus the build
+   lane's own known risks to confirm or dispute.
+5. **Look especially at.** Races between a check and the act, failure and
+   rollback paths, success reported on failure, input shapes the stubs do
+   not model, tests that would pass a mutant.
+6. **Output.** Per claim: CONFIRMED, PARTIAL, or REFUTED (the `ops-auditor`
+   vocabulary), with file:line evidence, the probe run, and an output
+   excerpt. Then out-of-scope findings, ranked; then what could not be
+   checked and why.
+7. **Banned shortcuts.** Verdicts from the PR text or the build lane's
+   summary instead of the code; any real write; "looks fine" without a
+   probe.
+
+The foreman verifies every cited line before acting, sends PARTIAL and
+REFUTED items back as one fix round (tests that fail first), reads the fix
+diff, and lands. Copy the claim list and verdicts into the PR body as
+its verification record.
 
 Once the review's content lands, the foreman removes its result files,
 temporary branches and worktrees, and any task-owned identity or config
@@ -196,7 +275,11 @@ T3 Code runs Claude Code as an Agent SDK provider thread. No shell function
 wraps that launch, so nothing on the boot path may depend on one: the core
 loads through `~/.claude/rules/ops-core.md` and the hooks through the Stage-1
 settings, the same as in a terminal. Approvals use the T3 UI. Compaction uses
-the composer's `/compact`. Do not assume Claude's process, hooks, or MCP
+the composer's `/compact`, fired by the Operator after the session's
+`pre-compact-synthesis`: no session compacts itself, here or in a tmux or
+herdr session, which the Operator runs by hand (a script that typed
+`/compact` into a pane could not tell a finished compaction from a failed
+one, and was retired). Do not assume Claude's process, hooks, or MCP
 registration model applies to another provider in the same T3 instance. If
 native task tools are absent, use the fallback in
 [core: Intake](core.md#intake-then-autonomy).
@@ -338,6 +421,20 @@ Tests that exercise a deleter, a guard, or anything that writes outside a
 temp directory run against a throwaway `HOME` and fixtures, never the live
 tree.
 
+Where destructive tests run: a test, self-test, mutation check, or probe of a
+tool that deletes, moves, or overwrites files it did not create runs only
+inside `.claude-config/bin/sandbox-run` (read-only root, a fresh tmpfs over
+the home directory and `/tmp`, a fresh PID namespace, nothing writable unless
+named with `--bind`, and never a primary checkout). Such a suite starts with
+the sandbox guard and refuses to run anywhere else (exit 97); `verify-ops.sh`
+check 24 fails one that names a destructive tool without it. A mutation
+sweep of any tool runs there too, because a mutation can turn any write into
+a delete. Why: in the harness OPS is ported from, an unsandboxed mutation
+sweep of a cleanup tool ran the real deleter on `/` and `$HOME` and wiped
+most of a home directory; a throwaway `HOME` does not stop a mutant that
+computes its own path. How to run one: `.claude-config/bin/README.md`,
+"sandbox-run".
+
 For vendor write integrations, include authorized live verification in the
 change. Mocks encode the developer's assumptions; actual APIs may have
 undocumented fields or different read and write shapes. Bisect rejected
@@ -378,13 +475,28 @@ manual delegation. The delegation skills (`delegation-sizing`,
 
 Lanes run as high as the work needs. Briefs split work for parallelism, never
 to save context: every continuation lane re-pays its reading, a restart cost
-far above the cost of carrying context. A lane nearing the end of its own
-window stops at the next natural break (never mid-edit), commits what is
-green if the brief allows, writes the precise remainder, and returns; work it
-has not reported is at risk once auto-compaction summarizes it. Haiku 5.5
-lanes stay under 100K tokens of context, so their briefs size the input to
-fit ([model-roles.md](model-roles.md)). The main thread's manual compaction
-at natural breaks stays the norm ([core: Rhythm](core.md#rhythm-and-context)).
+far above the cost of carrying context. The only lane ceiling is the
+context-watch hook's two-stage backstop, sized from the lane's own model
+(about 1M on the Opus, Sonnet, and Fable lanes): a reminder at about 60%
+(keep going, plan to finish, skip large reads you do not need) and a wrap-up
+at about 80%. Work a lane has not reported is at risk once auto-compaction
+summarizes it, so at the wrap-up it returns. A brief states a lower ceiling
+only when the work needs one, and then sets both `LANE_REMIND_PCT` and
+`LANE_WRAP_PCT`. Haiku 5.5 lanes stay under 100K tokens of context, held by
+their own auto-compaction (Stage-1 gives `claude-haiku-5-5` a 100K window);
+the hook gives them only a backstop at 95K, and their briefs size the input
+to fit ([model-roles.md](model-roles.md)).
+
+The lane return contract, which every brief inherits: at its limit or at the
+end, a lane stops at the next natural break (never mid-edit), commits what is
+green only if the brief grants commits, and returns data, not prose: the
+exact paths it changed, the real output of the checks it ran, ranked
+findings, what it skipped and why, what it noticed out of scope, and any
+blocker with a precise remainder (what is done, what is left, where the
+state lives) the foreman can paste into a continuation brief. A lane never
+compacts itself. A read-only lane at its limit returns partial findings
+naming the uncovered scope. The main thread's manual compaction at natural
+breaks stays the norm ([core: Rhythm](core.md#rhythm-and-context)).
 
 ### P13. Finish the job; context is abundant, deferral is the exception
 

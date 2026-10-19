@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# sandbox-run - run a command inside a bubblewrap sandbox: the root filesystem
+# read-only, a fresh tmpfs over the home directory (at the same path, so a
+# script that computes paths from $HOME lands in the tmpfs), a fresh tmpfs /tmp
+# (TMPDIR=/tmp), a fresh PID namespace, and writable only the directories named
+# with --bind (none by default).
+#
+# Why: in the harness this one is ported from, an unsandboxed mutation sweep of
+# a scratch-cleanup tool ran the real deleter on / and $HOME and wiped most of
+# a host's home directory (2026-10-15). The ruling that followed: it must not
+# happen again. Every test, self-test, mutation check or probe of a tool that
+# can delete, move, chmod or overwrite files runs through this runner, and
+# those suites refuse to start anywhere else (sandbox-guard.sh,
+# sandbox_guard.py; verify-ops.sh check 24 holds the list of destructive tools
+# and fails a suite that names one without the guard).
+#
+# Why nothing is writable by default, and never a shared checkout (2026-10-17
+# review): a writable bind is exactly what an rm -rf under the sandbox can
+# still reach. The default used to be the git toplevel of the current
+# directory, so launched from ~/OPS a mutated rm -rf "$HOME" would descend
+# into that bind, mounted inside the fresh home, and remove the real checkout. The
+# blast radius must be a disposable worktree or a scratch directory: a linked
+# worktree can be re-added from the repository, the primary checkout holds the
+# repository itself and other sessions' work.
+#
+# Usage:
+#   sandbox-run [--bind DIR]... [--no-bind] [--ro-bind PATH]... [--no-net]
+#               [--chdir DIR] [--] COMMAND [ARG...]
+#
+#   --bind DIR      make DIR writable inside (repeatable; without one nothing
+#                   is writable but the fresh HOME and /tmp). Refused: /, the
+#                   home directory (real or $HOME), any ancestor of either,
+#                   anything under /proc, /sys or /dev, the user runtime dir
+#                   /run/user/<uid> or an ancestor of it, any path that is not
+#                   an existing directory owned by you, and a repository's
+#                   primary checkout, anything inside one, or a git directory
+#                   (git_refusal below). A linked worktree (git worktree add)
+#                   or a plain scratch directory is the bind to use.
+#   --no-bind       the default; still accepted, so older callers keep working,
+#                   and still refused alongside --bind
+#   --ro-bind PATH  show a readable regular file or directory read-only
+#                   (repeatable): needed for anything under
+#                   the home directory, which is otherwise hidden. Refused: /,
+#                   /tmp, the home directory or an ancestor of it (that would
+#                   expose the real home over the fresh one), /proc, /sys,
+#                   /dev, and the user runtime dir.
+#   --no-net        a fresh network namespace (loopback only)
+#   --chdir DIR     working directory inside (default: the current one, which
+#                   must be visible inside: on the read-only root outside the
+#                   home directory and /tmp, or under a bind)
+#
+# Inside: OPS_SANDBOX=1, OPS_SANDBOX_NONCE=<32 hex>, and the same nonce
+# (one line) in /tmp/.ops-sandbox/nonce, a read-only bind mount. The guards check the
+# mount table, not the environment, so exporting the variables outside proves
+# nothing. The user runtime dir (/run/user/<uid>: the systemd user bus and
+# other control sockets) is covered by an empty tmpfs.
+# Binds are mounted shallowest first, so the most specific path wins: a --bind
+# inside a --ro-bind is writable, a --ro-bind inside a --bind is read-only.
+#
+# It never runs the command unsandboxed. Exit: the command's status, or
+#   2   usage error
+#   3   a refused or unusable path
+#   4   bwrap missing, or not a root-owned binary that only root can modify or
+#       replace (every directory above it root-owned and closed to others)
+#   125 bwrap could not set up the sandbox (the command was not run)
+set -uo pipefail
+
+# The checks below run on the system's own tools, whatever the caller's PATH
+# holds: a test's stub dir with a fake realpath or stat must not decide what is
+# safe to bind. bwrap is looked up on the caller's PATH (then held to root
+# ownership), and the command gets the caller's PATH back inside.
+CALLER_PATH="${PATH-}"
+CALLER_PATH_SET="${PATH+set}"
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+die() { local rc="$1"; shift; printf 'sandbox-run: %s\n' "$*" >&2; exit "$rc"; }
+usage() { sed -n '2,/^set -uo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+binds=() robinds=() nobind=0 net=1 chdir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bind) [ $# -ge 2 ] || die 2 "--bind needs a directory"; binds+=("$2"); shift 2 ;;
+    --bind=*) binds+=("${1#--bind=}"); shift ;;
+    --ro-bind) [ $# -ge 2 ] || die 2 "--ro-bind needs a path"; robinds+=("$2"); shift 2 ;;
+    --ro-bind=*) robinds+=("${1#--ro-bind=}"); shift ;;
+    --no-bind) nobind=1; shift ;;
+    --no-net) net=0; shift ;;
+    --chdir) [ $# -ge 2 ] || die 2 "--chdir needs a directory"; chdir="$2"; shift 2 ;;
+    --chdir=*) chdir="${1#--chdir=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) die 2 "unknown option: $1 (see --help)" ;;
+    *) break ;;
+  esac
+done
+[ $# -gt 0 ] || die 2 "no command given (see --help)"
+if [ "$nobind" = 1 ] && [ "${#binds[@]}" -gt 0 ]; then die 2 "--no-bind and --bind cannot be combined"; fi
+
+# bwrap must be a binary only root can change: a bwrap earlier on PATH that the
+# user (or anything running as the user) wrote could run the command bare.
+BWRAP="$(PATH="$CALLER_PATH" command -v bwrap 2>/dev/null)" \
+  || die 4 "bwrap (bubblewrap) is not installed or not on PATH; refusing to run the command unsandboxed"
+case "$BWRAP" in /*) ;; *) die 4 "bwrap resolves to '$BWRAP', not an executable file; refusing" ;; esac
+BWRAP_REAL="$(realpath -e -- "$BWRAP" 2>/dev/null)" || die 4 "cannot resolve $BWRAP; refusing"
+# The regular-file test comes first: stat never opens the path, so a FIFO named
+# bwrap is refused here without blocking.
+[ -f "$BWRAP_REAL" ] && [ -x "$BWRAP_REAL" ] || die 4 "$BWRAP_REAL is not an executable regular file; refusing"
+read -r _owner _mode < <(stat -c '%u %a' -- "$BWRAP_REAL" 2>/dev/null) || die 4 "cannot stat $BWRAP_REAL; refusing"
+[ "${_owner:-}" = 0 ] || die 4 "$BWRAP_REAL is owned by uid ${_owner:-?}, not root; refusing to trust it as the sandbox"
+[[ "${_mode:-}" =~ ^[0-7]+$ ]] || die 4 "cannot read the mode of $BWRAP_REAL; refusing"
+(( (8#$_mode & 8#022) == 0 )) || die 4 "$BWRAP_REAL is writable by group or others (mode $_mode); refusing"
+# Root ownership of the file is not enough: a root-owned bwrap in a directory
+# the user can write can be renamed away and replaced between this check and
+# the exec. So every directory above it must be root's and closed to group and
+# others too; then only root can change what runs as the sandbox, and both
+# invocations below run the path checked here. (The 2026-10-17 review pinned
+# the binary by an open descriptor instead, but bwrap passes every inherited
+# descriptor on to the command and bash cannot open one close-on-exec, so the
+# sandboxed command held a descriptor for the host's bwrap.)
+_d="$BWRAP_REAL"
+while [ "$_d" != / ]; do
+  _d="${_d%/*}"; _d="${_d:-/}"
+  read -r _downer _dmode < <(stat -c '%u %a' -- "$_d" 2>/dev/null) || die 4 "cannot stat $_d; refusing"
+  { [ "${_downer:-}" = 0 ] && [[ "${_dmode:-}" =~ ^[0-7]+$ ]] && (( (8#$_dmode & 8#022) == 0 )); } \
+    || die 4 "$_d, a directory above $BWRAP_REAL, is not root-owned and closed to group and others (uid ${_downer:-?}, mode ${_dmode:-?}); refusing to trust a bwrap that can be replaced"
+done
+
+uid="$(id -u)" || die 3 "cannot read the user id"
+pw_home="$(getent passwd "$uid" 2>/dev/null | cut -d: -f6)"
+[ -n "$pw_home" ] || pw_home="$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null)"
+[ -n "$pw_home" ] || die 3 "cannot find the home directory of uid $uid"
+pw_home="$(realpath -e -- "$pw_home" 2>/dev/null)" || die 3 "the home directory of uid $uid does not resolve"
+env_home="${HOME:-}"
+if [ -z "$env_home" ]; then
+  env_home="$pw_home"
+else
+  case "$env_home" in /*) ;; *) die 3 "HOME is not an absolute path: $env_home" ;; esac
+  env_home="$(realpath -m -- "$env_home" 2>/dev/null)" || die 3 "HOME does not resolve: $HOME"
+fi
+homes=("$pw_home")
+[ "$env_home" = "$pw_home" ] || homes+=("$env_home")
+for _h in "${homes[@]}"; do
+  [ "$_h" != / ] || die 3 "the home directory resolves to /; refusing (a tmpfs there would hide the whole system)"
+done
+runtime="/run/user/$uid"
+
+# git_refusal DIR: walk up from DIR the way git discovers a repository, and
+# print why DIR must not be writable, or nothing. At each level: a git
+# directory (HEAD, objects/ and refs/: a bare repository or a .git directory)
+# refuses; a .git directory beside it that is such a git directory marks a
+# primary checkout, whose git dir is the repository's common dir, and refuses
+# (one that is not, git walks past too: sandboxes leave empty .git dirs as
+# mount targets, as Codex's bwrap did in TMPDIR on 2026-10-17, and refusing
+# those refused plain scratch dirs below them); a .git file stops the walk and
+# is allowed only when it names a linked worktree's admin dir (one holding
+# commondir), since a submodule's or a --separate-git-dir checkout's .git file
+# also leads to the only copy of that checkout. A .git that cannot be read
+# refuses. No git command runs: GIT_DIR or GIT_CEILING_DIRECTORIES in the
+# caller's environment must not change the answer.
+# Known limit: a directory with a checkout somewhere below it, and none above
+# it, is not detected; bind the narrowest directory that needs the writes.
+git_refusal() {
+  local d="$1" g line gd
+  while :; do
+    if [ -f "$d/HEAD" ] && [ -d "$d/objects" ] && [ -d "$d/refs" ]; then
+      printf '%s is a git directory' "$d"; return 0
+    fi
+    g="$d/.git"
+    if [ -d "$g" ]; then
+      if [ -f "$g/HEAD" ] && [ -d "$g/objects" ] && [ -d "$g/refs" ]; then
+        printf '%s is the primary checkout of a repository' "$d"; return 0
+      fi
+    elif [ -e "$g" ] || [ -L "$g" ]; then
+      line=""
+      [ -f "$g" ] && IFS= read -r line < "$g"
+      gd="${line#gitdir: }"
+      if [ -n "$gd" ] && [ "$gd" != "$line" ]; then
+        case "$gd" in /*) ;; *) gd="$d/$gd" ;; esac
+        [ -f "$gd/commondir" ] && return 0
+      fi
+      printf '%s is a checkout whose .git does not name a linked worktree (a submodule, a --separate-git-dir checkout, or an unreadable .git)' "$d"
+      return 0
+    fi
+    [ "$d" != / ] || return 0
+    d="${d%/*}"; d="${d:-/}"
+  done
+}
+
+# Path names travel through a tab-separated sort below.
+plain() { case "$1" in *$'\n'*|*$'\t'*) return 1 ;; esac; return 0; }
+under() { case "$1/" in "$2"/*) return 0 ;; esac; return 1; }   # $1 is $2 or inside it
+
+check_rw() {
+  local d="$1" r o h why
+  [ -n "$d" ] || die 3 "--bind: empty path"
+  r="$(realpath -e -- "$d" 2>/dev/null)" || die 3 "--bind $d: no such directory"
+  plain "$r" || die 3 "--bind $d: the path holds a tab or newline"
+  [ -d "$r" ] || die 3 "--bind $d: $r is not a directory"
+  [ "$r" != / ] || die 3 "--bind $d: refusing to make / writable"
+  for h in "${homes[@]}"; do
+    [ "$r" != "$h" ] || die 3 "--bind $d: refusing to make the home directory $h writable"
+    ! under "$h" "$r" || die 3 "--bind $d: refusing $r, an ancestor of the home directory $h"
+  done
+  case "$r/" in /proc/*|/sys/*|/dev/*) die 3 "--bind $d: refusing a path under /proc, /sys or /dev" ;; esac
+  if under "$r" "$runtime" || under "$runtime" "$r"; then
+    die 3 "--bind $d: refusing the user runtime dir $runtime or a path around it (control sockets)"
+  fi
+  o="$(stat -c %u -- "$r" 2>/dev/null)" || die 3 "--bind $d: cannot stat $r"
+  [ "$o" = "$uid" ] || die 3 "--bind $d: $r is owned by uid $o, not by you (uid $uid)"
+  why="$(git_refusal "$r")"
+  [ -z "$why" ] || die 3 "--bind $d: refusing $r: $why; bind a linked worktree (git worktree add) or a scratch directory instead"
+  printf '%s' "$r"
+}
+check_ro() {
+  local d="$1" r h
+  [ -n "$d" ] || die 3 "--ro-bind: empty path"
+  r="$(realpath -e -- "$d" 2>/dev/null)" || die 3 "--ro-bind $d: no such file or directory"
+  plain "$r" || die 3 "--ro-bind $d: the path holds a tab or newline"
+  [ "$r" != / ] || die 3 "--ro-bind $d: refusing /, which would cover the fresh HOME and /tmp"
+  [ "$r" != /tmp ] || die 3 "--ro-bind $d: refusing /tmp, which would cover the fresh /tmp"
+  for h in "${homes[@]}"; do
+    under "$h" "$r" && die 3 "--ro-bind $d: refusing $r: it would expose the home directory $h over the fresh one"
+  done
+  case "$r/" in /proc/*|/sys/*|/dev/*) die 3 "--ro-bind $d: refusing a path under /proc, /sys or /dev" ;; esac
+  if under "$r" "$runtime" || under "$runtime" "$r"; then
+    die 3 "--ro-bind $d: refusing the user runtime dir $runtime or a path around it (control sockets)"
+  fi
+  printf '%s' "$r"
+}
+
+# Every mount but the base layer goes through one list sorted by depth, so a
+# deeper mount always lands on top of a shallower one, whatever its kind.
+declare -A seen=()
+declare -A source_fds=()
+mounts=()
+add_mount() {   # KIND PATH
+  local k="$1" p="$2" depth="${2//[!\/]/}"
+  if [ -n "${seen[$p]:-}" ]; then
+    [ "${seen[$p]}" = "$k" ] && return 0
+    die 3 "$p is named as both ${seen[$p]} and $k"
+  fi
+  seen[$p]="$k"
+  mounts+=("${#depth}"$'\t'"${#mounts[@]}"$'\t'"$k"$'\t'"$p")
+}
+# Pin each validated source, then check what was actually opened. A symlink
+# swap must never make bwrap bind the real home at a different writable path.
+# Both the dry run and final execution use these same descriptors, so neither
+# resolves a host source pathname again after validation. bwrap closes each one
+# once it is mounted, so none reaches the command (a descriptor for a read-only
+# source would still write the host directory through openat).
+pin_mount() {
+  local k="$1" p="$2" fd actual owner pinned
+  [ -f "$p" ] || [ -d "$p" ] || die 3 "--$k $p: not a regular file or directory"
+  exec {fd}< "$p" || die 3 "--$k $p: cannot open the source"
+  pinned="/proc/$$/fd/$fd"
+  actual="$(realpath -e -- "$pinned" 2>/dev/null)" || die 3 "--$k $p: cannot resolve the opened source"
+  [ "$actual" = "$p" ] || die 3 "--$k $p: the source changed during validation ($actual); refusing"
+  if [ "$k" = bind ]; then
+    [ -d "$pinned" ] || die 3 "--bind $p: the opened source is not a directory"
+    owner="$(stat -Lc %u -- "$pinned" 2>/dev/null)" || die 3 "--bind $p: cannot stat the opened source"
+    [ "$owner" = "$uid" ] || die 3 "--bind $p: the opened source is not owned by you"
+  else
+    [ -f "$pinned" ] || [ -d "$pinned" ] || die 3 "--ro-bind $p: the opened source is not a regular file or directory"
+  fi
+  add_mount "$k" "$p"
+  source_fds[$p]="$fd"
+}
+add_mount tmpfs /tmp
+for _h in "${homes[@]}"; do plain "$_h" || die 3 "the home directory path holds a tab or newline"; add_mount tmpfs "$_h"; done
+[ -d "$runtime" ] && add_mount tmpfs "$runtime"
+# The explicit paths are checked first, so a refused one is reported as itself.
+ro_ok=() rw_ok=()
+for _d in "${robinds[@]}"; do _r="$(check_ro "$_d")" || exit $?; ro_ok+=("$_r"); done
+for _d in "${binds[@]}"; do _r="$(check_rw "$_d")" || exit $?; rw_ok+=("$_r"); done
+for _r in "${rw_ok[@]}"; do pin_mount bind "$_r"; done
+for _r in "${ro_ok[@]}"; do pin_mount ro-bind "$_r"; done
+
+nonce="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 125 "cannot read 16 random bytes for the sandbox nonce"
+[ -n "$chdir" ] || chdir="$PWD"
+
+args=(--die-with-parent --unshare-pid --new-session)
+[ "$net" = 1 ] || args+=(--unshare-net)
+args+=(--ro-bind / / --dev /dev --proc /proc)
+while IFS=$'\t' read -r _ _ _k _p; do
+  case "$_k" in
+    tmpfs) args+=(--tmpfs "$_p") ;;
+    bind) args+=(--bind-fd "${source_fds[$_p]}" "$_p") ;;
+    ro-bind) args+=(--ro-bind-fd "${source_fds[$_p]}" "$_p") ;;
+  esac
+done < <(printf '%s\n' "${mounts[@]}" | sort -t $'\t' -k1,1n -k2,2n)
+args+=(--dir /tmp/.ops-sandbox --ro-bind-data 3 /tmp/.ops-sandbox/nonce)
+args+=(--setenv HOME "$env_home" --setenv TMPDIR /tmp --setenv OPS_SANDBOX 1 --setenv OPS_SANDBOX_NONCE "$nonce")
+if [ -n "$CALLER_PATH_SET" ]; then args+=(--setenv PATH "$CALLER_PATH"); else args+=(--unsetenv PATH); fi
+args+=(--chdir "$chdir")
+
+# Set-up check first, so a sandbox that cannot be built is reported as that and
+# never mistaken for the command's own failure. The command itself only ever
+# runs as bwrap's child: there is no path that runs it without the sandbox.
+# bwrap preserves unrelated inherited descriptors. A host file or directory
+# descriptor can write through the read-only mounts, including openat through
+# a directory. Pass only stdio and our validated bind sources. Close the rest
+# in a parsed child so bash's script reader can be closed too (an inherited
+# descriptor 255 can otherwise be restored when bash launches bwrap).
+run_bwrap() (
+  local fd path
+  local -A keep=([0]=1 [1]=1 [2]=1)
+  for fd in "${source_fds[@]}"; do keep[$fd]=1; done
+  [ -r "/proc/$BASHPID/fd" ] || die 125 "cannot enumerate inherited descriptors; the command was not run"
+  for path in "/proc/$BASHPID/fd/"*; do
+    fd="${path##*/}"
+    case "$fd" in ''|*[!0-9]*) continue ;; esac
+    [ -z "${keep[$fd]:-}" ] || continue
+    exec {fd}>&- || die 125 "cannot close inherited descriptor $fd; the command was not run"
+  done
+  exec "$BWRAP_REAL" "${args[@]}" -- "$@" 3<<< "$nonce"
+)
+run_bwrap /bin/true
+_rc=$?
+[ "$_rc" = 0 ] || die 125 "bwrap could not set up the sandbox (exit $_rc); the command was not run"
+run_bwrap "$@"

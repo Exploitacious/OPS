@@ -35,6 +35,7 @@
 # Exit: 0 = all pass; non-zero on first failure.
 set -uo pipefail
 
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97
 SV="$(cd "$(dirname "$0")/.." && pwd)/skills-vendor.sh"
 [ -f "$SV" ] || { echo "FAIL: skills-vendor.sh missing at $SV" >&2; exit 1; }
 

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# second-vendor-review: hand one finished change to a second vendor's model for
+# review, and write what it says to a file. OPTIONAL: nothing in OPS runs it on
+# its own, and a copy without a second vendor never needs it.
+#
+# Why a second vendor: the review split (CONTEXT/how-i-work.md, "Review
+# pickup") sends code where a miss is expensive (production data writes,
+# deploy and merge gates, secrets and guards, auth and tenant boundaries,
+# anything that can report a real problem as ok) to a model from another
+# vendor, whose blind spots the Claude builder lanes do not share. Without one,
+# that code gets an Opus 5.5 refutation lane plus the Operator's own read
+# instead; this script is only the hand-off when a second vendor exists.
+#
+# What it does: builds one packet (a fixed reviewer preamble, your digest, the
+# diff stat, and `git diff <base>...HEAD`), pipes it on stdin to the command in
+# OPS_REVIEWER_CMD, and writes a result file holding a header (repo, base,
+# head, packet size, exit status) and everything the command printed on
+# stdout. The command runs in a scratch directory, never in the repo. Its own
+# permissions govern filesystem access; configure a read-only reviewer as in
+# the Codex example below.
+#
+# Usage:
+#   second-vendor-review --base REF --digest FILE [--repo DIR] [--out FILE]
+#                        [--exclude PATHSPEC]... [--max-kb N] [--timeout S]
+#                        [--dry-run]
+#
+#   --base REF       the review covers REF...HEAD (the merge base to HEAD)
+#   --digest FILE    your description of the change: what and why per part,
+#                    the decisions already made (so the reviewer does not
+#                    reopen them), the tests already run with their results,
+#                    and known failures to ignore. It describes; it does not
+#                    steer, so no list of claims to confirm.
+#   --repo DIR       the repository (default: the current directory)
+#   --out FILE       the result file (default: review.md in a unique private
+#                    $TMPDIR/second-vendor-review-<repo>-<UTC>.* directory);
+#                    the packet is written beside it as <out>.packet.md
+#   --exclude SPEC   keep a pathspec out of the diff (repeatable): generated
+#                    files, fixtures, docs. Lock files are always out.
+#   --max-kb N       refuse a packet over N KB (default 400): split the change
+#                    instead, because a reviewer that cannot hold the whole
+#                    diff reviews part of it and says nothing about the rest
+#   --timeout S      wall-clock cap on the reviewer command (default 3600).
+#                    Enforced by timeout or gtimeout; with neither on PATH
+#                    (stock macOS: brew install coreutils) the reviewer is
+#                    not run and the exit is 3
+#   --dry-run        build and write the packet, do not call the reviewer
+#
+# Configure: OPS_REVIEWER_CMD, a shell command that reads the packet on stdin
+# and prints the review on stdout. Example (checked against the Codex CLI's
+# `exec --help`, 2026-10-19):
+#   export OPS_REVIEWER_CMD='codex exec --sandbox read-only --skip-git-repo-check -'
+# Any vendor's non-interactive CLI with the same stdin/stdout shape works.
+#
+# One round: the foreman reads the result as claims, verifies each cited line,
+# fixes what holds with tests that fail first, and lands. A second pass is the
+# Operator's call.
+#
+# Exit: 0 reviewed (or packet written, --dry-run) · 2 usage · 3 not configured
+#       (OPS_REVIEWER_CMD unset, or no timeout command) · 4 packet over
+#       --max-kb · 5 the reviewer failed, timed out or printed nothing · 6 git
+#       could not build the diff
+set -uo pipefail
+# A private copy's diff and digest can contain its Operator's notes. Neither
+# the packet nor the returned review belongs in a world-readable temp file.
+umask 077
+
+die() { local rc="$1"; shift; printf 'second-vendor-review: %s\n' "$*" >&2; exit "$rc"; }
+usage() { sed -n '2,/^set -uo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+BASE="" DIGEST="" REPO="$PWD" OUT="" MAXKB=400 TIMEOUT=3600 DRY=0
+EXCLUDES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) [ $# -ge 2 ] || die 2 "--base needs a ref"; BASE="$2"; shift 2 ;;
+    --digest) [ $# -ge 2 ] || die 2 "--digest needs a file"; DIGEST="$2"; shift 2 ;;
+    --repo) [ $# -ge 2 ] || die 2 "--repo needs a directory"; REPO="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || die 2 "--out needs a file"; OUT="$2"; shift 2 ;;
+    --exclude) [ $# -ge 2 ] || die 2 "--exclude needs a pathspec"; EXCLUDES+=("$2"); shift 2 ;;
+    --max-kb) [ $# -ge 2 ] || die 2 "--max-kb needs a number"; MAXKB="$2"; shift 2 ;;
+    --timeout) [ $# -ge 2 ] || die 2 "--timeout needs seconds"; TIMEOUT="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die 2 "unknown argument: $1 (see --help)" ;;
+  esac
+done
+[ -n "$BASE" ] || die 2 "--base is required (see --help)"
+[ -n "$DIGEST" ] || die 2 "--digest is required: the reviewer needs your what and why (see --help)"
+[ -f "$DIGEST" ] && [ -s "$DIGEST" ] || die 2 "--digest $DIGEST is missing or empty"
+[[ "$MAXKB" =~ ^[1-9][0-9]*$ ]] || die 2 "--max-kb takes a positive number"
+[[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 2 "--timeout takes a positive number of seconds"
+# Checked before any git work so an unconfigured copy says so first: this is
+# the optional path, and the fallback is the Opus refutation lane, not an error.
+if [ "$DRY" = 0 ] && [ -z "${OPS_REVIEWER_CMD:-}" ]; then
+  die 3 "OPS_REVIEWER_CMD is not set. This reviewer is optional: without a second vendor, expensive-miss code gets an Opus 5.5 refutation lane plus the Operator's read (CONTEXT/how-i-work.md, Review pickup)."
+fi
+# The reviewer runs under a timeout command or not at all. Without one the cap
+# was skipped in silence: a hung reviewer blocked forever and a slow one was
+# written up as a review (2026-10-19). Stock macOS has no timeout; Homebrew's
+# coreutils installs GNU's as gtimeout. Both exit 124 when the cap kills.
+TOBIN=""
+if [ "$DRY" = 0 ]; then
+  for t in timeout gtimeout; do
+    command -v "$t" >/dev/null 2>&1 && { TOBIN="$t"; break; }
+  done
+  [ -n "$TOBIN" ] || die 3 "no timeout command (timeout or gtimeout) is on PATH, so --timeout cannot be enforced and the reviewer was not run. Install GNU coreutils (macOS: brew install coreutils); until then expensive-miss code gets the fallback, an Opus 5.5 refutation lane plus the Operator's read (CONTEXT/how-i-work.md, Review pickup)."
+fi
+
+REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" || die 6 "$REPO is not inside a git repository"
+HEAD_SHA="$(git -C "$REPO" rev-parse --verify -q HEAD)" || die 6 "cannot resolve HEAD in $REPO"
+BASE_SHA="$(git -C "$REPO" rev-parse --verify -q "$BASE^{commit}")" || die 6 "--base $BASE is not a commit in $REPO"
+NAME="$(basename "$REPO")"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Lock files are never reviewable code; the operator's excludes add to them.
+SPECS=(. ':(exclude,glob)**/*.lock' ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/pnpm-lock.yaml'
+       ':(exclude,glob)**/go.sum')
+# ${a[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
+for e in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do SPECS+=(":(exclude)$e"); done
+
+# Each git step is checked on its own: a diff that failed must never reach the
+# reviewer as an empty change it then calls clean.
+# --no-ext-diff/--no-textconv/--no-color: the packet must be the raw change,
+# not whatever an external diff driver or textconv filter in the user's config
+# renders (a driver could hide a hunk from the reviewer).
+STAT="$(git -C "$REPO" diff --no-ext-diff --no-textconv --no-color --stat "$BASE_SHA...$HEAD_SHA" -- "${SPECS[@]}" 2>&1)" \
+  || die 6 "git diff --stat failed: $(printf '%s' "$STAT" | tail -n 1)"
+DIFF="$(git -C "$REPO" diff --no-ext-diff --no-textconv --no-color "$BASE_SHA...$HEAD_SHA" -- "${SPECS[@]}" 2>&1)" \
+  || die 6 "git diff failed: $(printf '%s' "$DIFF" | tail -n 1)"
+[ -n "$DIFF" ] || die 6 "no reviewable changes between $BASE and HEAD (after excludes)"
+
+if [ -z "$OUT" ]; then
+  # A timestamp alone collides across simultaneous reviews of the same repo:
+  # one reviewer could read another run's packet under the wrong head header.
+  OUTPUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/second-vendor-review-$NAME-$STAMP.XXXXXX")" \
+    || die 2 "cannot create a private output directory"
+  OUT="$OUTPUT_DIR/review.md"
+fi
+PACKET="$OUT.packet.md"
+mkdir -p "$(dirname "$OUT")" || die 2 "cannot create the directory for $OUT"
+[ ! -d "$OUT" ] && [ ! -d "$PACKET" ] || die 2 "--out and its packet path must not be directories"
+# Stage beside the destination so publication replaces old files and symlinks
+# atomically with mode 600, rather than retaining an existing file's public mode.
+STAGE="$(mktemp -d "$(dirname "$OUT")/.second-vendor-review.XXXXXX")" \
+  || die 2 "cannot create private output staging"
+SCRATCH=""
+trap 'rm -rf -- "$STAGE"; [ -z "$SCRATCH" ] || rm -rf -- "$SCRATCH"' EXIT
+
+{
+  cat <<'PREAMBLE'
+You are the second-vendor reviewer for one finished change. Read the digest,
+then the diff. Review only: change nothing, run nothing that writes. Report
+defects that would let the code do the wrong thing or report a real problem as
+ok: correctness, failure and rollback paths, success reported on failure,
+races between a check and the act, security and data-loss edges, and tests
+that would pass a broken version. Rank findings most severe first, each with
+file and line, the evidence, and the fix you would make. Do not reopen the
+decisions the digest lists as made. Name what you could not check. One round:
+this is the whole review.
+
+PREAMBLE
+  printf '## Digest\n\n'
+  cat "$DIGEST" || die 2 "cannot read the digest from $DIGEST"
+  # Markdown fences are literal, not shell command substitutions.
+  # shellcheck disable=SC2016
+  printf '\n\n## Change\n\nRepository: %s\nBase: %s (%s)\nHead: %s\n\n```\n%s\n```\n\n## Diff\n\n```diff\n%s\n```\n' \
+    "$NAME" "$BASE" "$BASE_SHA" "$HEAD_SHA" "$STAT" "$DIFF"
+} > "$STAGE/packet" || die 2 "cannot write the packet to $PACKET"
+mv -f -- "$STAGE/packet" "$PACKET" || die 2 "cannot publish the packet to $PACKET"
+
+KB=$(( ($(wc -c < "$PACKET") + 1023) / 1024 ))
+if [ "$KB" -gt "$MAXKB" ]; then
+  die 4 "the packet is ${KB} KB, over --max-kb $MAXKB: split the change, or --exclude generated files and fixtures (packet kept at $PACKET)"
+fi
+if [ "$DRY" = 1 ]; then
+  printf 'second-vendor-review: dry run, packet written (%s KB): %s\n' "$KB" "$PACKET"
+  exit 0
+fi
+
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/second-vendor-review.XXXXXX")" || die 2 "cannot create a scratch directory"
+# Do not record any of the shell command: even its first word can be an
+# environment assignment carrying a key (TOKEN=... reviewer).
+rc=0
+( cd "$SCRATCH" && "$TOBIN" -k 30 "$TIMEOUT" bash -c "$OPS_REVIEWER_CMD" ) < "$PACKET" > "$SCRATCH/review.out" 2> "$SCRATCH/review.err" || rc=$?
+status=ok
+if [ "$rc" = 124 ]; then status="timed out after ${TIMEOUT}s"
+elif [ "$rc" != 0 ]; then status="reviewer exited $rc"
+elif [ ! -s "$SCRATCH/review.out" ]; then status="reviewer printed nothing"
+fi
+{
+  printf '# Second-vendor review: %s\n\n' "$NAME"
+  printf -- '- base: %s (%s)\n- head: %s\n- reviewer: %s\n- packet: %s (%s KB)\n- status: %s\n- written: %s\n\n' \
+    "$BASE" "$BASE_SHA" "$HEAD_SHA" 'OPS_REVIEWER_CMD (configured command)' "$PACKET" "$KB" "$status" "$STAMP"
+  if [ "$status" = ok ]; then
+    cat "$SCRATCH/review.out"
+  else
+    printf 'NO REVIEW: %s. Its stderr, last lines:\n\n```\n' "$status"
+    tail -n 20 "$SCRATCH/review.err"
+    printf '```\n'
+  fi
+} > "$STAGE/result" || die 2 "cannot write the result to $OUT"
+mv -f -- "$STAGE/result" "$OUT" || die 2 "cannot publish the result to $OUT"
+if [ "$status" != ok ]; then
+  die 5 "$status; nothing was reviewed (details in $OUT)"
+fi
+printf 'second-vendor-review: review written: %s\n' "$OUT"

@@ -30,6 +30,15 @@ Non-negotiables (doctrine by name):
 - **Style:** match the file you edit: its comment density, naming, idiom.
   No emojis. No line-number references inside prose docs (cite sections).
 
+Context (P12): run as far as the work needs. The context-watch hook reminds
+you at about 60% of your real window (keep going; skip large reads you do not
+need) and asks you to wrap up at about 80%: at the next natural break, never
+mid-edit, write state (commit if your brief allows, else
+findings so far into your report) and report exactly what remains so the
+foreman can paste it into a continuation brief, then return.
+A brief may set a lower ceiling. A lane returns a remainder; it does not
+compact.
+
 Your final message is data for the foreman, not prose for a human: what
 changed (exact paths), how you verified it (real output), what you skipped
 and why, what you noticed out of scope.

@@ -28,10 +28,13 @@ current task allows.
 
 - Gate: `bash .claude-config/bin/verify-ops.sh` after any harness change. It
   checks `~/OPS`; set `OPS_DIR` to check another checkout.
-- Tests: `.claude-config/bin/tests/*.sh`, `.claude-config/bin/*-selftest.sh`,
+- Tests: `.claude-config/bin/tests/*-test.{sh,py}`, `.claude-config/bin/*-selftest.*`,
   and `.claude-config/hooks/*-selftest.sh`. Run the ones covering what you
-  changed. Every shell script you touch passes `bash -n`; every workflow
-  script passes `node --check`.
+  changed. A suite that runs a tool that deletes or moves files starts with
+  the sandbox guard and runs only inside `.claude-config/bin/sandbox-run`
+  (exit 97 elsewhere); the command line is in `.claude-config/bin/README.md`.
+  Every shell script you touch passes `bash -n`; every workflow script passes
+  `node --check`.
 - `CHANGELOG.md` gets a dated entry for every notable change.
 - Several sessions can share this checkout. Before pushing, run
   `git log --oneline origin/main..main`; if it shows commits that are not

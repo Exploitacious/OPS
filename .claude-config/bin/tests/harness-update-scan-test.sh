@@ -25,6 +25,8 @@
 #   9. A template symlink arrives as a symlink, not a file holding its target.
 #  10. A local symlink ancestor cannot redirect a safe copy outside the repo
 #      or into an excluded identity path, even when its content matches base.
+#  11. A git diff or ls-tree that fails is ERR_LIST (exit 7), never an empty
+#      delta reported as "0 new · 0 update" that the skill would commit.
 # No network: the ops-template remote points at a local bare repo.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -216,6 +218,35 @@ for boundary in outside identity; do
     && ok "symlink ancestor ($boundary): destination and identity stay untouched" \
     || bad "symlink ancestor ($boundary): wrote through the parent symlink"
 done
+
+# --- 11. a failed listing is an error, never an empty delta ---
+# A git wrapper fails the one listing under test and passes everything else
+# through, the way a missing object in a damaged clone fails only that call.
+REAL_GIT="$(command -v git)"; mkdir -p "$T/failgit"
+cat > "$T/failgit/git" <<STUB
+#!/usr/bin/env bash
+case " \$* " in *" \$FAIL_GIT_ON "*) echo "fatal: simulated failure of \$FAIL_GIT_ON" >&2; exit 128 ;; esac
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$T/failgit/git"
+g init -q "$T/up11"; echo v1 > "$T/up11/README.md"; echo boot > "$T/up11/BOOTSTRAP.md"
+g -C "$T/up11" add -A; g -C "$T/up11" commit -qm base; BASE11="$(git -C "$T/up11" rev-parse HEAD)"
+mkdir -p "$T/up11/lib"; echo 'echo new' > "$T/up11/lib/new-name.sh"
+g -C "$T/up11" add -A; g -C "$T/up11" commit -qm add
+g clone -q --bare "$T/up11" "$T/up11.git"
+g clone -q "$T/up11" "$T/copy11"; g -C "$T/copy11" reset -q --hard "$BASE11"
+g -C "$T/copy11" remote add ops-template "$T/up11.git"
+mkdir -p "$T/copy11/.claude-config"
+printf 'upstream=local/test\nlast_synced=%s\n' "$BASE11" > "$T/copy11/.claude-config/ops-upstream-ref"
+for on in "diff" "ls-tree"; do
+  out="$(cd "$T/copy11" && PATH="$T/failgit:$PATH" FAIL_GIT_ON="$on" OPS_UPSTREAM=local/test bash "$SCAN_TMP" --apply-safe 2>&1)"; rc=$?
+  [ "$rc" -eq 7 ] && grep -q "^ERR_LIST: .*simulated failure of $on" <<<"$out" && ! grep -q '# summary:' <<<"$out" \
+    && ok "failed git $on: ERR_LIST exit 7, no summary" || bad "failed git $on: rc=$rc: $out"
+  [ ! -e "$T/copy11/lib/new-name.sh" ] && ok "failed git $on: nothing applied" || bad "failed git $on: --apply-safe wrote files"
+done
+out="$(cd "$T/copy11" && OPS_UPSTREAM=local/test bash "$SCAN_TMP" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && grep -q -E '^NEW +lib/new-name.sh$' <<<"$out" && ok "failed listing fixture: the same copy scans clean without the fault" \
+  || bad "failed listing fixture: rc=$rc: $out"
 
 echo; echo "harness-update-scan-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS"

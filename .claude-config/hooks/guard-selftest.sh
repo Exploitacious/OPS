@@ -32,6 +32,33 @@ J
 probe "git-guard allows normal git"          0 git-guard.sh <<'J'
 {"tool_name":"Bash","tool_input":{"command":"git status"}}
 J
+# rtk-awareness: every guard reaches the same verdict whether or not the
+# command carries an rtk prefix (bare, absolute-path, `command rtk`, an rtk
+# option, the argv form of a command-running subcommand, or rtk after && in a
+# chain). Before the fix each blocked form below passed. Read-only rtk git
+# still passes. cmdj wraps one command in the PreToolUse JSON with its cwd in
+# a plain project repo, where the OPS-copy push gate allows pushes, so only the
+# check under test can block (without a cwd the push gate blocked the push
+# forms on its own and the force-push check went untested). Each probe reads
+# cmdj through a here-string, not a pipe: a pipe runs probe in a subshell, so
+# its fails count was lost and a regression here still exited 0 (2026-10-19).
+RTKREPO="$(mktemp -d)"; git init -q "$RTKREPO"
+cmdj() { jq -cn --arg c "$1" --arg d "$RTKREPO" '{tool_name:"Bash",cwd:$d,tool_input:{command:$c}}'; }
+for form in "rtk git push --force origin main" "rtk git push -f origin main" \
+            "/usr/local/bin/rtk git push --force origin main" "command rtk git push --force origin main" \
+            "rtk -v git push --force origin main" "rtk proxy git push --force origin main" \
+            "rtk run git push --force-with-lease origin main" "cd /tmp && rtk git push --force origin main" \
+            "rtk git push origin --delete feature" "rtk git push origin :refs/heads/x" \
+            "rtk git branch -D feature" "rtk git commit --no-verify -m x" "rtk git filter-repo --force" \
+            'rtk rm -rf $HOME/OPS' 'cd /tmp; rtk rm -rf ~' "rtk tmux kill-server" "rtk pkill tmux"; do
+  probe "git-guard blocks behind rtk: $form" 2 git-guard.sh <<< "$(cmdj "$form")"
+done
+for form in "rtk git status" "rtk git log --oneline -5" "rtk git branch -d merged-branch" \
+            "rtk tmux -S /tmp/sock kill-server" "rtk rm -rf /tmp/scratch-dir"; do
+  probe "git-guard allows behind rtk: $form" 0 git-guard.sh <<< "$(cmdj "$form")"
+done
+probe "git-guard allows a plain push from a project repo (fixture check)" 0 git-guard.sh <<< "$(cmdj "git push origin main")"
+rm -rf "$RTKREPO"
 probe "secrets-guard blocks secret->memory"  2 secrets-guard.sh pre <<'J'
 {"tool_input":{"file_path":"/x/memory/note.md","content":"-----BEGIN OPENSSH PRIVATE KEY-----"}}
 J

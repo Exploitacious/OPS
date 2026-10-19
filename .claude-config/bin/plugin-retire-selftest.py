@@ -5,6 +5,7 @@ writes; a real local CLI, when available, also checks the symlink boundary.
 No API calls, real configuration changes, or plugin downloads.
 """
 
+import os, runpy; runpy.run_path(os.path.join(os.path.dirname(os.path.realpath(__file__)), "sandbox_guard.py"))["require"]()
 import json
 import os
 import shutil

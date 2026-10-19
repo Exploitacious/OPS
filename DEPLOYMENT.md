@@ -191,8 +191,13 @@ In order:
 8. **Schedule daily backup.** Installs a user crontab entry
    (`0 9 * * * ~/OPS/.claude-config/backup/daily-sync.sh`). The sync script
    commits any uncommitted changes and pushes them to the OPS origin when the
-   push gate verifies it private (no-op if clean); it logs to
-   `.claude-config/backup/sync.log`. Skipped with `--no-system`.
+   push gate verifies it private (no-op if clean; an origin with no branch of
+   that name yet gets it as a first push), pulls every project repo, then runs
+   `branch-gc --apply` to remove merged branches and park their worktrees in a
+   7-day trash (it needs a signed-in `gh` and removes nothing without one). It
+   logs to `.claude-config/backup/sync.log`, and always exits 0, so the
+   session briefing's `Backup:` line repeats the last run's OPS-stage errors
+   and skipped pushes at boot. Skipped with `--no-system`.
 
    **The push gate.** Your copy holds your memory, context, and notes, so the
    two automatic pushes (memory-init's and the daily backup's) run only when
@@ -343,7 +348,19 @@ Stage 2 deploy scripts.
   effect immediately; adding a *new* hook means registering it in the Stage-1
   `settings.json`. Two retired hooks must not be registered:
   `foreman-charter.sh` and `remote-session-register.sh` (both deleted;
-  `verify-ops.sh` check 17 warns while an entry remains).
+  `verify-ops.sh` check 17 warns while an entry remains). The PreCompact hook
+  also starts `branch-gc --apply` for the repo holding the cwd, detached. No
+  hook self-compacts: the retired `bin/compact-cycle.sh` typed `/compact` into
+  a tmux pane and could not tell a finished compaction from a failed one, so
+  the Operator fires `/compact` (T3 Code's composer, or the terminal).
+
+- **Destructive-tool tests run in a sandbox:** every suite that runs a tool
+  that deletes or moves files (branch-gc, pre-compact, memory-init, deploy,
+  skills-vendor) refuses to start outside `.claude-config/bin/sandbox-run`,
+  which needs `bwrap` (bubblewrap; `apt install bubblewrap`).
+  `verify-ops.sh` check 24 fails a suite that names one of those tools
+  without the guard; `.claude-config/bin/README.md` ("sandbox-run") has the
+  command line.
 
 - **The `ops-verify` timer:** `.claude-config/systemd/` ships a user unit that
   runs `.claude-config/bin/verify-ops.sh` nightly and writes the report to
@@ -542,6 +559,8 @@ If a new piece of OPS setup needs to run on every host:
 - `.claude-config/bin/origin-private-check`: the push gate for the backup and memory-init.
 - `.claude-config/hooks/`: SessionStart, pre-compact, and guard hooks (registered via the Stage-1 `settings.json`).
 - `.claude-config/systemd/`: the `ops-verify` timer and the optional `tmux-main` unit.
+- `.claude-config/bin/branch-gc`: merged-branch and worktree cleanup (nightly, pre-compaction, closeout).
+- `.claude-config/bin/sandbox-run`: the sandbox destructive-tool tests run in.
 - `.claude-config/bin/verify-ops.sh`: the drift gate.
 - `.claude-config/bin/claude-root-wrapper.sh`: root permission mode and shared-host lock (Linux).
 - `.claude-config/bin/memory-init`, `memory-init.ps1`, `memory-index`: auto-memory git-sync and its index.

@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""sandbox-lint - which test suites must carry the sandbox guard, whether they
+do, and whether the gate must run a suite through sandbox-run.
+
+  sandbox-lint check --root OPS [--tool NAME]... [--suite REL]...
+      Scans every test and self-test under .claude-config (Scanned, below)
+      and prints one line per violation, "VIOLATION<TAB>rel<TAB>kind<TAB>detail", then
+      "SUMMARY<TAB>required<TAB>guarded<TAB>scanned". Exit 0 clean, 1 with
+      violations, 2 on a usage or internal error.
+  sandbox-lint needs --root OPS [--tool NAME]... REL
+      Prints "sandbox<TAB>why" or "bare<TAB>why" for one suite (any suite the
+      gate runs, under bin/tests or not). Exit 0, or 2 on an error (the gate
+      then runs the suite in the sandbox).
+
+verify-ops.sh owns the lists (OPS_DESTRUCTIVE_TOOLS, OPS_SANDBOX_SUITES) and
+passes them in; this file owns the rules, stated here so a reviewer can check
+the code against them:
+
+  Scanned: every regular file under .claude-config (recursively; symlinks,
+    __pycache__, node_modules and .git skipped) that is a test and is shell or
+    Python. A test: a directory on its path below .claude-config is named
+    "tests" or "test" (all of bin/tests), or its file name has "test",
+    "tests" or "selftest" as a word, at the start or after "-", "_" or ".",
+    and at the end or before "-", "_" or "." (hooks/skill-hint-selftest.sh,
+    remote-sessions/rc-web-selftest.sh, bin/claude-window-ping-selftest.sh,
+    x-test.py, test_x.py, home.test.mjs; not latest.sh or contest.py). Shell
+    or Python: the name ends in .sh or .py, or the first line is a #! line.
+    Why every self-test, not only bin/tests: a self-test beside its tool
+    (rc-web-selftest.sh runs rc-web.sh) is started by hand as often as a
+    suite, and without the guard it ran the destructive tool bare. Other
+    files (data, fixtures, a JavaScript test) cannot carry the guard; none
+    names a destructive tool today, and a new one would need a guard of its
+    own language first.
+  Language: Python for .py or a #! line naming python, shell otherwise.
+  Code text: shell, every line but the #! line and lines whose first non-blank
+    character is "#" (heredoc bodies count: they are what the suite runs or
+    writes). Python, the source without comments and without string-only
+    statements (docstrings); a file that does not parse counts whole.
+  Reference: a tool name in the code text, not preceded or followed by a
+    letter, digit, "_", "." or "-" (so branch-gc matches "$HERE/../branch-gc"
+    and "branch-gc" but not branch-gc-test.sh or branch-gc.log).
+  Required: every suite in --suite (which must exist), and every scanned file
+    that references a --tool.
+  Guarded: shell, the canonical guard line (GUARD_SH, its path the relative
+    path from the file's directory to .claude-config/bin: "../" from bin/tests,
+    "../bin/" from hooks/ or remote-sessions/, nothing from bin/ itself) is the
+    first line that is not the #! line, blank, a comment, or a "set" options
+    line. Python, after the docstring and any __future__ imports, the next two
+    statements are the canonical guard (GUARD_PY, the same path as separate
+    os.path.join arguments) by AST.
+  needs: "sandbox" for a file that references a --tool or holds the
+    canonical guard anywhere (a whole line, shell; a module-level statement
+    pair, Python); "bare" otherwise. The --suite list is not consulted: a
+    runner that sandboxes suites runs every entry in OPS_SANDBOX_SUITES there
+    too, even when its guard has been removed. (OPS's gate runs no suites
+    today; `needs` is the verdict for a runner, and for a person deciding how
+    to start a suite by hand.)
+
+Known limit, by design: a reference is a name, so a suite that builds the
+tool's path at run time ("branch" + "-gc") or reaches it through a helper that
+names it is not detected. The static --suite list covers the known ones, and a
+helper module that is itself a guarded suite (branch-gc-late-writer-test.py
+loads branch-gc-safety-test.py) runs that guard when loaded.
+"""
+import argparse
+import ast
+import io
+import os
+import re
+import sys
+import tokenize
+
+TESTS = os.path.join(".claude-config", "bin", "tests")
+BIN = os.path.join(".claude-config", "bin")
+CONFIG = ".claude-config"
+SKIP_DIRS = {"__pycache__", "node_modules", ".git"}
+TEST_DIRS = {"tests", "test"}
+TEST_NAME = re.compile(r"(?:^|[-_.])(?:self)?tests?(?:[-_.]|$)")
+
+GUARD_SH = ('. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/{up}sandbox-guard.sh"'
+            ' && sandbox_guard || exit 97')
+GUARD_PY = ('import os, runpy; runpy.run_path(os.path.join(os.path.dirname(os.path.realpath(__file__)), '
+            '{up}"sandbox_guard.py"))["require"]()')
+# "set -e", "set -o pipefail", "set -euo pipefail", "set +x": option clusters, an
+# "o" cluster followed by its option name.
+SET_LINE = re.compile(r"set(?:[ \t]+(?:[-+][A-Za-z]*o[ \t]+[A-Za-z]+|[-+][A-Za-z]+))+[ \t]*")
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def _parts(up):
+    """An int is that many ".." levels below bin/; a list is the path parts."""
+    return [".."] * up if isinstance(up, int) else list(up)
+
+
+def guard_sh(up):
+    return GUARD_SH.replace("{up}", "".join(p + "/" for p in _parts(up)))
+
+
+def guard_py(up):
+    return GUARD_PY.replace("{up}", "".join('"%s", ' % p for p in _parts(up)))
+
+
+def parts_to_bin(root, path):
+    """The relative path from PATH's directory to .claude-config/bin, as parts
+    ([] in bin/ itself, [".."] in bin/tests, ["..", "bin"] in hooks/)."""
+    rel = os.path.relpath(os.path.join(root, BIN), os.path.dirname(os.path.abspath(path)))
+    return [] if rel == "." else rel.split(os.sep)
+
+
+def is_test(rel_to_config):
+    """The Scanned rule's test, on a path relative to .claude-config."""
+    parts = rel_to_config.split(os.sep)
+    return bool(TEST_DIRS.intersection(parts[:-1])) or bool(TEST_NAME.search(parts[-1]))
+
+
+def read(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def is_python(path, src):
+    if path.endswith(".py"):
+        return True
+    first = src.split("\n", 1)[0]
+    return first.startswith("#!") and "python" in first
+
+
+def is_suite(path):
+    if path.endswith((".sh", ".py")):
+        return True
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+def py_code_text(src):
+    """Python source minus comments and string-only statements."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return src
+    lines = [list(l) for l in src.splitlines(keepends=True)]
+
+    def col(lineno, byte_col):   # ast columns count UTF-8 bytes, not characters
+        return len("".join(lines[lineno - 1]).encode("utf-8")[:byte_col].decode("utf-8", "replace"))
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        r0, c0 = node.lineno, col(node.lineno, node.col_offset)
+        r1, c1 = node.end_lineno, col(node.end_lineno, node.end_col_offset)
+        for r in range(r0, r1 + 1):
+            row = lines[r - 1]
+            start = c0 if r == r0 else 0
+            end = c1 if r == r1 else len(row)
+            for c in range(start, min(end, len(row))):
+                if row[c] != "\n":
+                    row[c] = " "
+    kept = "".join("".join(l) for l in lines)
+    out = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(kept).readline):
+            if tok.type != tokenize.COMMENT:
+                out.append(tok.string)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return src
+    return " ".join(out)
+
+
+def sh_code_text(src):
+    lines = src.split("\n")
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]
+    return "\n".join(l for l in lines if not l.lstrip().startswith("#"))
+
+
+def references(text, tools):
+    hits = []
+    for t in tools:
+        if re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(t) + r"(?![A-Za-z0-9_.-])", text):
+            hits.append(t)
+    return hits
+
+
+def sh_guard_state(src, up):
+    """'first' when the guard is the first statement, 'late' when the exact
+    line is present but not first, None when absent."""
+    want = guard_sh(up)
+    lines = src.split("\n")
+    present = any(l.strip() == want for l in lines)
+    for i, line in enumerate(lines):
+        if i == 0 and line.startswith("#!"):
+            continue
+        s = line.strip()
+        if not s or s.startswith("#") or SET_LINE.fullmatch(s):
+            continue
+        if line.rstrip() == want:
+            return "first"
+        break
+    return "late" if present else None
+
+
+def py_guard_state(src, up):
+    want = [ast.dump(n) for n in ast.parse(guard_py(up)).body]
+    try:
+        body = ast.parse(src).body
+    except (SyntaxError, ValueError):
+        return None
+    dumps = [ast.dump(n) for n in body]
+    present = any(dumps[i:i + len(want)] == want for i in range(len(dumps)))
+    i = 0
+    if (i < len(body) and isinstance(body[i], ast.Expr) and isinstance(body[i].value, ast.Constant)
+            and isinstance(body[i].value.value, str)):
+        i += 1
+    while i < len(body) and isinstance(body[i], ast.ImportFrom) and body[i].module == "__future__":
+        i += 1
+    if dumps[i:i + len(want)] == want:
+        return "first"
+    return "late" if present else None
+
+
+def inspect(root, path, tools):
+    """(references, guard state, path parts to bin) for one file."""
+    src = read(path)
+    up = parts_to_bin(root, path)
+    py = is_python(path, src)
+    refs = references(py_code_text(src) if py else sh_code_text(src), tools)
+    state = py_guard_state(src, up) if py else sh_guard_state(src, up)
+    return refs, state, up
+
+
+def scan(root):
+    base = os.path.join(root, CONFIG)
+    found = []
+    for top, dirs, files in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for name in sorted(files):
+            path = os.path.join(top, name)
+            if (os.path.isfile(path) and not os.path.islink(path)
+                    and is_test(os.path.relpath(path, base)) and is_suite(path)):
+                found.append(path)
+    return found
+
+
+def check(root, tools, suites):
+    violations = []
+    paths = {os.path.relpath(p, root): p for p in scan(root)}
+    required = {}
+    for rel in suites:
+        if rel not in paths:
+            if os.path.exists(os.path.join(root, rel)):
+                violations.append((rel, "unscanned", "listed in OPS_SANDBOX_SUITES but not a scanned test under %s" % CONFIG))
+            else:
+                violations.append((rel, "missing", "listed in OPS_SANDBOX_SUITES but the file does not exist"))
+            continue
+        required[rel] = "listed in OPS_SANDBOX_SUITES"
+    guarded = 0
+    for rel, path in sorted(paths.items()):
+        refs, state, _ = inspect(root, path, tools)
+        if refs and rel not in required:
+            required[rel] = "references " + ", ".join(refs)
+        if state == "first":
+            guarded += 1
+        if rel not in required:
+            continue
+        if state is None:
+            violations.append((rel, "unguarded", "%s; the sandbox guard must be its first statement" % required[rel]))
+        elif state == "late":
+            violations.append((rel, "misplaced", "%s; the sandbox guard is present but not the first statement" % required[rel]))
+    return violations, len(required), guarded, len(paths)
+
+
+def needs(root, rel, tools):
+    path = os.path.join(root, rel)
+    refs, state, _ = inspect(root, path, tools)
+    if refs:
+        return "sandbox", "references " + ", ".join(refs)
+    if state is not None:
+        return "sandbox", "carries the sandbox guard"
+    return "bare", "no destructive tool referenced"
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="sandbox-lint", description=__doc__.split("\n", 1)[0])
+    ap.add_argument("mode", choices=("check", "needs"))
+    ap.add_argument("--root", required=True)
+    ap.add_argument("--tool", action="append", default=[])
+    ap.add_argument("--suite", action="append", default=[])
+    ap.add_argument("rel", nargs="?")
+    a = ap.parse_intermixed_args(argv)
+    root = os.path.abspath(a.root)
+    for t in a.tool:
+        if not NAME.fullmatch(t):
+            ap.error("not a tool name: %r" % t)
+    suites = [os.path.normpath(s) for s in a.suite]
+    if a.mode == "needs":
+        if not a.rel or suites:
+            ap.error("needs takes the suite's path relative to --root, and no --suite")
+        verdict, why = needs(root, os.path.normpath(a.rel), a.tool)
+        print("%s\t%s" % (verdict, why))
+        return 0
+    if a.rel:
+        ap.error("check takes no positional argument")
+    if not os.path.isdir(os.path.join(root, TESTS)):
+        print("sandbox-lint: no %s under %s" % (TESTS, root), file=sys.stderr)
+        return 2
+    violations, required, guarded, scanned = check(root, a.tool, suites)
+    for rel, kind, detail in violations:
+        print("VIOLATION\t%s\t%s\t%s" % (rel, kind, detail))
+    print("SUMMARY\t%d\t%d\t%d" % (required, guarded, scanned))
+    return 1 if violations else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as exc:  # any internal error is exit 2, never a verdict
+        print("sandbox-lint: internal error: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
+        sys.exit(2)

@@ -34,7 +34,8 @@
 # applied as a symlink.
 #
 # Exit: 0 = scan ran · 2 ERR_USAGE · 3 ERR_NOREPO (not inside an OPS copy) ·
-#       4 ERR_REMOTE · 5 ERR_FETCH · 6 ERR_APPLY
+#       4 ERR_REMOTE · 5 ERR_FETCH · 6 ERR_APPLY · 7 ERR_LIST (git could not
+#       list the upstream files: nothing was classified, so nothing is in sync)
 set -uo pipefail
 
 REMOTE="${OPS_REMOTE:-ops-template}"
@@ -329,7 +330,7 @@ mode_audit() {
     [ "$lm" = "$mode" ] && continue
     [ "$(git hash-object --path "$path" -- "$f" 2>/dev/null)" = "$sha" ] || continue
     mode_line "$path" "$lm" "$mode"
-  done < <(git ls-tree -r -z "$UP_REF")
+  done < "$LIST_DIR/tree"
 }
 
 # The mode comes from the upstream tree entry, not the redirect: `> dest`
@@ -379,6 +380,24 @@ apply_safe() {
   return $rc
 }
 
+# --- list what to classify, before any report line ---
+# Into files, never read from a process substitution: `done < <(cmd)` reports
+# the loop's status, not cmd's, so a git diff or ls-tree that failed (an object
+# missing from a partial or damaged clone) read as an empty list, and the scan
+# printed a clean "0 new · 0 update" that the skill then committed as in sync.
+LIST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/harness-update-scan.XXXXXX")" \
+  || { echo "ERR_LIST: cannot create a temp dir for the file lists" >&2; exit 7; }
+trap 'rm -rf "$LIST_DIR"' EXIT
+list_or_fail() { # WHAT FILE CMD...: run CMD into FILE; on failure ERR_LIST, exit 7
+  local what="$1" out="$2"; shift 2
+  if ! "$@" > "$out" 2> "$out.err"; then
+    echo "ERR_LIST: could not list $what: $(tail -n 1 "$out.err" 2>/dev/null); nothing classified. Fetch again (git fetch $REMOTE) or check the clone (git fsck), then rerun." >&2
+    exit 7
+  fi
+}
+list_or_fail "the upstream changes ($MODE)" "$LIST_DIR/candidates" gen_candidates
+[ "$MODE" = delta ] && [ "$FILEMODE" != false ] && list_or_fail "the upstream tree" "$LIST_DIR/tree" git ls-tree -r -z "$UP_REF"
+
 # --- report ---
 echo "# harness-update scan: $(date -Is)"
 echo "# upstream: $UPSTREAM ($UP_REF @ ${UP_SHA:0:12})"
@@ -399,7 +418,7 @@ echo "#"
 
 while IFS= read -r -d '' p; do
   [ -n "$p" ] && classify_one "$p"
-done < <(gen_candidates)
+done < "$LIST_DIR/candidates"
 [ "$MODE" = delta ] && mode_audit
 
 echo "#"

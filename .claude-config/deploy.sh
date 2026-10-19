@@ -876,11 +876,23 @@ if [[ -n "$t3_bin" ]]; then
   msg_action "If T3's browser is not set up on this host yet, run once: sudo $t3_bin browser setup (DEPLOYMENT.md, \"T3 Code hosts\")"
 fi
 
+# deploy_failure_lines FAILED: the summary for a failed deploy (FAILED is the
+# space-separated DEPLOY_FAILED list). The core-rule note prints only when
+# core-rule is among the failures: printed after every failure, it told an
+# Operator whose only problem was a missing git identity that sessions would
+# boot without the core.
+deploy_failure_lines() {
+  c_red "Deploy finished with failures:$1"
+  case " $1 " in
+    *" core-rule "*) c_red "Fix the [XX] lines above and re-run (core-rule means sessions boot without CONTEXT/core.md)." ;;
+    *) c_red "Fix the [XX] lines above and re-run." ;;
+  esac
+}
+
 echo ""
 c_cyan "--------------------------------------------------"
 if [[ -n "$DEPLOY_FAILED" ]]; then
-  c_red "Deploy finished with failures:${DEPLOY_FAILED}"
-  c_red "Fix the [XX] lines above and re-run (core-rule means sessions boot without CONTEXT/core.md)."
+  deploy_failure_lines "$DEPLOY_FAILED"
 else
   c_green "Deploy complete."
 fi
