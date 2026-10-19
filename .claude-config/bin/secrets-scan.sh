@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secrets-scan.sh — literal-credential detector for memory/lessons surfaces.
+# secrets-scan.sh: literal-credential detector for memory/lessons surfaces.
 #
 # Usage:
 #   secrets-scan.sh FILE|DIR [...]    scan files/dirs (md files), print hits
@@ -12,8 +12,8 @@
 # <path>", "1Password entry X"), never literal values. This scanner backs
 # secrets-guard.sh (write-time), verify-ops.sh (repo gate), and any
 # pre-push scan. Two pattern tiers:
-#   HARD — unambiguous credential shapes; always flagged.
-#   SOFT — assignment-style (password:, api_key=); skipped when the line
+#   HARD: unambiguous credential shapes; always flagged.
+#   SOFT: assignment-style (password:, api_key=); skipped when the line
 #          already reads as a pointer (sops/vault/1password/.env/redacted),
 #          because pointers are exactly what we WANT written.
 set -uo pipefail

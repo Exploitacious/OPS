@@ -1,7 +1,7 @@
-# NOTES/MASTER/ — the Obsidian vault
+# NOTES/MASTER/: the Obsidian vault
 
 `NOTES/MASTER/` is the Obsidian vault slot. Point Obsidian at **this
-directory** (`~/OPS/NOTES/MASTER/`) when you open the vault — its
+directory** (`~/OPS/NOTES/MASTER/`) when you open the vault: its
 `.obsidian/` config lives here, and `.gitignore` is tuned to track the
 vault's markdown and a curated slice of its `.obsidian/` settings while
 ignoring high-churn workspace state.

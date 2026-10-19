@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# key.sh — the single source of truth for the handoff PROJECT KEY.
+# key.sh: the single source of truth for the handoff PROJECT KEY.
 #
 # Emits a stable, filesystem-safe key for the current project so the WRITE
 # (session-handoff skill), the READ (same skill), and the notifier
@@ -8,7 +8,7 @@
 # Key = git repo toplevel if inside a repo, else the current working dir;
 # slashes → dashes, leading dashes stripped. handoff-check.sh inlines this
 # same logic as a fallback so a missing/non-exec helper degrades gracefully
-# rather than crashing the hook — keep the two in sync if you change it.
+# rather than crashing the hook; keep the two in sync if you change it.
 
 set -uo pipefail
 

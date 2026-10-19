@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# claude-window-ping-selftest.sh — prove the window-ping pipe handles every
+# claude-window-ping-selftest.sh: prove the window-ping pipe handles every
 # path it can hit unattended: good profiles, config typos, missing binary,
 # nonzero/timeout rcs, empty config, overlap locking, and tmp hygiene. Runs
 # entirely against a MOCK claude binary and a scratch state dir (the
-# CC_WINDOW_PING_BIN / CC_WINDOW_PING_STATE_DIR test hooks) — no real API
+# CC_WINDOW_PING_BIN / CC_WINDOW_PING_STATE_DIR test hooks), no real API
 # usage, no touch of the real ~/.local/state/window-ping.
 #
 # Exit 0 = every case behaves; 1 = defect.
@@ -71,7 +71,7 @@ CC_WINDOW_PING_MODEL="custommodel" CC_WINDOW_PING_PROFILES="m=$WORK/cfg-m" bash 
 chk "CC_WINDOW_PING_MODEL passed through"  "$(grep -q -- "--model custommodel" "$MOCK_RECORD"; echo $?)"
 
 # 6. Missing binary: one rc=127 row PER configured profile, complete atomic file.
-# PATH mimics cron's minimal /usr/bin:/bin — coreutils work, claude is absent.
+# PATH mimics cron's minimal /usr/bin:/bin (coreutils work, claude is absent).
 reset
 CC_WINDOW_PING_BIN="$WORK/does-not-exist" PATH="/usr/bin:/bin" CC_WINDOW_PING_PROFILES="a=$WORK/x b=$WORK/y" bash "$SCRIPT"
 chk "missing binary -> 2 rc=127 rows"      "$([ "$(awk -F'\t' '$2=="127"' "$STATE/last-status.tsv" | wc -l)" = 2 ]; echo $?)"
@@ -108,6 +108,6 @@ if [ "$fails" -eq 0 ]; then
   echo "claude-window-ping-selftest: PIPE BEHAVES"
   exit 0
 else
-  echo "claude-window-ping-selftest: $fails case(s) failing — do not trust the cron pipe"
+  echo "claude-window-ping-selftest: $fails case(s) failing: do not trust the cron pipe"
   exit 1
 fi
