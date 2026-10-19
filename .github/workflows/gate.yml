@@ -1,6 +1,6 @@
 # The OPS gate. Runs on every push and pull request:
 #
-#   syntax   bash -n, node --check, python3 -m py_compile and a PowerShell parse
+#   syntax   bash -n, a JavaScript parse, python3 -m py_compile and a PowerShell parse
 #            over every tracked script
 #   suites   every suite under .claude-config/bin/tests/, the *-selftest scripts
 #            and the PowerShell suites (the ones that delete or move files run
@@ -23,8 +23,8 @@
 # Not covered, on purpose: Windows and macOS (this runs on Linux; the two
 # PowerShell suites run under pwsh on Linux and exercise deploy.ps1's logic, not
 # a Windows host), and any Claude Code CLI behavior (the CLI is not installed;
-# deploy warns and goes on without it). `.claude-config/bin/README.md` and
-# CONTRIBUTING.md list the same commands for a local run.
+# deploy warns and goes on without it). CONTRIBUTING.md ("Before you open the
+# PR") lists the same commands for a local run.
 name: gate
 
 on:
@@ -108,29 +108,47 @@ jobs:
           done < "$RUNNER_TEMP/shell.lst"
           exit "$rc"
 
-      - name: node --check on every .js
-        # The .js files here are workflow scripts: a top-level `export const
-        # meta`, and a body that uses top-level `await` and `return`, because the
-        # workflow runner executes the body as an async function. node --check on
-        # the file itself cannot be trusted for them. Node 18 rejects the valid
-        # files (it reads .js as CommonJS), and newer releases detect the
-        # `export`, treat the file as a module, and then report no error even for
-        # a file with an unclosed brace (checked on Node 24). So each file is
-        # checked in the shape it runs in: `export` dropped, the body wrapped in
-        # an async function, and that file given to node --check. Error line
-        # numbers are one more than the source's (the wrapper line). Any real
-        # syntax error fails on every node release.
+      - name: Check every JavaScript script
+        # A workflow script is any .js whose first statement (after a #! line,
+        # comments and blank lines) is `export const meta =`: the ones under
+        # .claude-config/workflows/ and skill-bundled ones such as
+        # SKILLS/memory-prune/audit_workflow.js. It is chosen by content, not
+        # path, because a path rule sends a skill's workflow to the module
+        # check, which rejects its top-level `return`. The workflow runner
+        # executes the body as an async function, with top-level `await` and
+        # `return`, so that body is parsed directly: constructing an
+        # AsyncFunction parses without running it, and unlike a textual wrapper
+        # it cannot accept a body that closes the wrapper and opens another
+        # function. Only the leading metadata export is removed, so a malformed
+        # later export stays invalid. The parser exits 10 for any other file,
+        # which is then checked in explicit CommonJS, then module, mode: Node
+        # 24's automatic module detection can accept an unclosed brace.
         run: |
           node --version
           rc=0
           while IFS= read -r f; do
-            { echo ';(async () => {'
-              sed -E -e '1{/^#!/d}' -e 's/^export[[:space:]]+//' "$f"
-              echo
-              echo '})'
-            } > "$RUNNER_TEMP/check.js"
-            node --check "$RUNNER_TEMP/check.js" \
-              || { echo "::error file=$f::node --check failed (checked as an async function body)"; rc=1; }
+            st=0
+            node --input-type=commonjs - "$f" <<'JS' || st=$?
+          const { readFileSync } = require('node:fs');
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const source = readFileSync(process.argv[2], 'utf8')
+            .replace(/^#![^\r\n]*(?:\r?\n|$)/, '\n');
+          const lead = source.match(/^(?:\s+|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)*/)[0];
+          const rest = source.slice(lead.length);
+          if (!/^export\s+const\s+meta\s*=/.test(rest)) process.exit(10);
+          new AsyncFunction(lead + rest.replace(/^export(?=\s+const\s+meta\s*=)/, '      '));
+          JS
+            case "$st" in
+              0) ;;
+              10)
+                if ! node --check --input-type=commonjs < "$f" 2> "$RUNNER_TEMP/node.err"; then
+                  node --check --input-type=module < "$f" \
+                    || { cat "$RUNNER_TEMP/node.err"; echo "::error file=$f::invalid JavaScript"; rc=1; }
+                fi ;;
+              *)
+                echo "::error file=$f::invalid workflow async function body"
+                rc=1 ;;
+            esac
           done < "$RUNNER_TEMP/node.lst"
           exit "$rc"
 

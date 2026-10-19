@@ -473,12 +473,15 @@ Your copy holds your memory and notes, so every push of it meets one gate.
 - **A CI gate.** `.github/workflows/gate.yml` runs on every push and pull
   request, with no secrets, so a fork's pull request gets the same run, on the
   `ubuntu-26.04` image (24.04's coreutils 9.4 cannot run `branch-gc`, and
-  `ubuntu-latest` still means 24.04). Four jobs: `syntax` (`bash -n`, `node
-  --check`, `python3 -m py_compile` and a PowerShell parse over every tracked
-  script, found by extension or `#!` line; an empty list fails the job; the
-  workflow scripts are checked as the async function bodies they run as, because
-  plain `node --check` rejects them on Node 18 and, on newer Node, reports no
-  error for a broken one), `suites` (every suite under `bin/tests/`, the
+  `ubuntu-latest` still means 24.04). Four jobs: `syntax` (`bash -n`, a
+  JavaScript parse, `python3 -m py_compile` and a PowerShell parse over every
+  tracked script, found by extension or `#!` line; an empty list fails the job;
+  a workflow script, any `.js` whose first statement is `export const meta`, a
+  skill's included, is parsed as the async function body it runs as, and any
+  other `.js` in explicit CommonJS, then module, mode, because plain `node
+  --check` rejects workflow scripts on Node 18 and, on newer Node, reports no
+  error for a broken one; `bin/tests/ci-gate-test.py` runs that step over every
+  tracked `.js` and a set of broken and valid fixtures), `suites` (every suite under `bin/tests/`, the
   `*-selftest` scripts and the two PowerShell suites, the destructive ones
   inside `sandbox-run`; the job installs bubblewrap, zsh and rsync and upgrades
   an older git, because `branch-gc` needs 2.45), `smoke` (a fresh install in a
