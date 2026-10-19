@@ -71,9 +71,23 @@ are tracked. Each project repo (`<org>/<repo>/`) manages its own git.
 |---------|---------|
 | `ExampleOrg/` | *(example)* your primary body of work: swap for your real org. |
 | `AnotherOrg/` | *(example)* a second cluster, added when a distinct body of work earns one. |
+| `Exploitacious/` | Shipped: holds the public skill source `deploy.sh` clones (`agent-skills/`). |
 
-On a fresh copy there is one example cluster. Add rows here as you
-create real clusters, and give each its own section below.
+On a fresh copy there is one example cluster plus the skill-source cluster
+deploy creates. Add rows here as you create real clusters, and give each its
+own section below.
+
+---
+
+## Cluster: Exploitacious (skill source, deploy-managed)
+
+| Repo | Role | Stack | Deploys to |
+|------|------|-------|------------|
+| `agent-skills/` | Public source of the mounted skills in `SKILLS/VENDORED.tsv`; `deploy.sh` clones it once, `skills-vendor.sh sync` mirrors it into `SKILLS/` | Markdown skills | `SKILLS/<name>/` (mirror) |
+
+Edit a mounted skill at this source (or upstream), never in its `SKILLS/`
+mirror; update with `git -C PROJECTS/Exploitacious/agent-skills pull --ff-only`
+and then `.claude-config/bin/skills-vendor.sh sync`.
 
 ---
 

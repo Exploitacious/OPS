@@ -334,6 +334,18 @@ mkdir -p "$OPS/WORKFORCE"
 run check_retired_context
 chk "about-me.md and WORKFORCE/ left behind -> WARN naming both" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'about-me.md' && printf '%s' "$OUT" | grep -q 'WORKFORCE/'; echo $?)"
 
+# 12. Line-ref lint (4) skips mounted skills: a line number in a mirror listed
+# in VENDORED.tsv is not fixable here; the same text in a local skill WARNs.
+new_case linerefs
+mkdir -p "$OPS/SKILLS/mountedx" "$OPS/SKILLS/localx"
+printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/mountedx/SKILL.md"
+printf 'mountedx\tsrc/skills/mountedx\n' >> "$OPS/SKILLS/VENDORED.tsv"
+run check_linerefs
+chk "line ref in a mounted skill -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/localx/SKILL.md"
+run check_linerefs
+chk "line ref in a local skill -> WARN" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'localx'; echo $?)"
+
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"
   exit 0

@@ -87,11 +87,21 @@ check_changelog() {
 }
 
 # 4. Line-ref lint: core docs must not cite code by line number (drift class).
+# Mounted skills (SKILLS/VENDORED.tsv) are skipped: they are mirrors edited at
+# their source repo, so a hit there is not fixable here, and deploy syncs them
+# onto every fresh install.
 check_linerefs() {
-  local hits
+  local hits f name mounted="" skills=()
+  mounted=" $(awk -F'\t' '$1 !~ /^#/ && NF >= 2 {printf "%s ", $1}' "$OPS/SKILLS/VENDORED.tsv" 2>/dev/null)"
+  for f in "$OPS"/SKILLS/*/SKILL.md; do
+    [ -f "$f" ] || continue
+    name="$(basename "$(dirname "$f")")"
+    case "$mounted" in *" $name "*) continue ;; esac
+    skills+=("$f")
+  done
   hits="$(grep -rnE '(line ~?[0-9]{2,}|:[0-9]{3,}\))' \
     "$OPS/AGENTS.md" "$OPS/README.md" "$OPS/DEPLOYMENT.md" "$OPS/BOOTSTRAP.md" \
-    "$OPS"/CONTEXT/*.md "$OPS"/SKILLS/*/SKILL.md 2>/dev/null | grep -v 'verify-ops' | grep -v '"~line' | head -20)" || true
+    "$OPS"/CONTEXT/*.md ${skills[@]+"${skills[@]}"} 2>/dev/null | grep -v 'verify-ops' | grep -v '"~line' | head -20)" || true
   [ -z "$hits" ] && ok "no line-number refs in core docs" || warn "line-number refs in core docs (cite sections, not lines):"$'\n'"$hits"
 }
 
