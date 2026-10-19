@@ -9,7 +9,7 @@ This is policy, not a per-operator config. The model *ids* below are the ones th
 | Role | Model | Id | How it is reached |
 |---|---|---|---|
 | Foreman (main session) | Opus 5.5 | `claude-opus-5-5[1m]` | the top-level `"model"` pin in the Stage-1 `settings.json`; also `ANTHROPIC_DEFAULT_OPUS_MODEL` (`/model opus`, `model: "opus"`) |
-| Default lane: builds, fixes, docs, research, recon, refutation, mechanical work | Sonnet 5.5 | `claude-sonnet-5-5[1m]` | `CLAUDE_CODE_SUBAGENT_MODEL` in the Stage-1 `env` (every spawn or workflow `agent()` that names no model); `ANTHROPIC_DEFAULT_SONNET_MODEL` (`model: "sonnet"`); the `ops-worker`, `ops-reviewer`, and `ops-auditor` pins (full id) and `ops-investigator` (`model: sonnet`) |
+| Default lane: builds, fixes, docs, research, recon, refutation, mechanical work | Sonnet 5.5 | `claude-sonnet-5-5[1m]` | `CLAUDE_CODE_SUBAGENT_MODEL` in the Stage-1 `env` (every spawn or workflow `agent()` that names no model); `ANTHROPIC_DEFAULT_SONNET_MODEL` (`model: "sonnet"`); the `ops-worker` and `ops-auditor` pins (full id) and `ops-investigator` (`model: sonnet`) |
 | High-criticality build lane | Opus 5.5 | `claude-opus-5-5[1m]` | `model: "opus"` on a spawn, with the reason stated in the brief; the judgment lanes of `harness-audit.js` pin the full id |
 | Cheap reading | Haiku 5.5 | `claude-haiku-5-5` (the exact id) | `ANTHROPIC_DEFAULT_HAIKU_MODEL` in the Stage-1 `env` (the haiku alias and Claude Code's background requests); `model: 'claude-haiku-5-5'` named on a workflow stage; never the bare `haiku` alias |
 | Rare | Fable 5.1 | `claude-fable-5-1` | Agent tool `model: "fable"`; `/model claude-fable-5-1[1m]` for a session that needs it at the top |
@@ -20,7 +20,11 @@ Sonnet 5.5 is the default lane, refutation lanes included: spawn on it without a
 
 ## Opus 5.5, the foreman and high-stakes lane
 
-Opus 5.5 is the foreman (the `"model"` pin) and the lane for work where Sonnet is likely to get it wrong: guards and deploy code, secrets and auth logic, subtle concurrency or state-machine logic, novel design, a second attempt after a Sonnet lane stalled or got it wrong, and refuting a high-stakes claim. Its known weakness is big-picture judgment and fewer unprompted "there is a better way" suggestions; compensate with explicit written plans and the foreman's verification of every returned lane. Its API effort default is `medium`, so the explicit `xhigh` pin (see Effort) is what keeps it at the harness default.
+Opus 5.5 is the foreman (the `"model"` pin) and the lane for work where Sonnet is likely to get it wrong: guards and deploy code, secrets and auth logic, subtle concurrency or state-machine logic, novel design, a second attempt after a Sonnet lane stalled or got it wrong, and refuting a high-stakes claim. It is also the review for code where a miss is expensive when no second vendor's model is available: an Opus refutation lane plus the Operator's own read (`how-i-work.md`, Review pickup). With a second vendor, that code goes there instead; no Claude lane is that review. Its known weakness is big-picture judgment and fewer unprompted "there is a better way" suggestions; compensate with explicit written plans and the foreman's verification of every returned lane. Its API effort default is `medium`, so the explicit `xhigh` pin (see Effort) is what keeps it at the harness default.
+
+## Context windows
+
+Opus 5.5, Sonnet 5.5, and Fable 5.1 run with a 1M-token window; the 4.6-era ids reach 1M only through their `[1m]` variants. Haiku 5.5 has a native 1M window, but every rate is 5x once a request passes 100K tokens, so the harness holds it under 100K: the Stage-1 settings give `claude-haiku-5-5` a 100K auto-compaction window. The context-watch hook sizes each sub-agent lane from its own model on this basis (a reminder at 60% and a wrap-up at 80% of a 1M window, one backstop at 95K for Haiku 5.5); its `LANE_WINDOWS` table is the per-id record, and a new model id gets a row there before a lane runs on it.
 
 ## Sonnet 5.5, the workhorse
 
