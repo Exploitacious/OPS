@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # verify-ops-selftest.sh: prove the model-policy checks of verify-ops.sh
-# (14 session pin, 15 Opus 5 ban, 15b retired ids and Haiku) and the
-# SessionStart matcher check (18) pass the shipped tree against current
-# Stage-1-shaped settings, and fail on each pin class they exist to catch.
+# (14 session pin, 15 Opus 5 ban, 15b retired ids and Haiku), the
+# SessionStart matcher check (18), the boot checks (1b root instructions, 5
+# citations, 16 the always-loaded core, 17 retired hooks, 21 and 21b the
+# identity layer), and the identity-exclusion check (23) pass the shipped tree
+# against current Stage-1-shaped settings, and fail on each class they exist to
+# catch.
 #
 # Sources verify-ops.sh (its main runs only when executed) and drives single
 # checks against fixture trees under a throwaway HOME made by mktemp. It never
@@ -224,6 +227,166 @@ mkdir -p "$HOME/other-profile"
 printf '%s\n' '{}' > "$HOME/other-profile/settings.json"
 CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_retired_model_pins
 chk "active profile missing its Haiku pin -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+
+# 8. Identity exclusion (23): the shipped scan names every identity file, and
+# dropping any one of them, current or retired, FAILs.
+new_case exclusion-shipped
+mkdir -p "$OPS/.claude-config/bin"
+cp "$SRC_OPS/.claude-config/bin/harness-update-scan.sh" "$OPS/.claude-config/bin/"
+run check_identity_exclusion
+chk "shipped scan lists every identity file" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+for name in USER.md standing-orders.md .bootstrapped about-me.md; do
+  new_case exclusion-missing
+  mkdir -p "$OPS/.claude-config/bin"
+  sed "s#CONTEXT/$name|##; s#|CONTEXT/$name)#)#" "$SRC_OPS/.claude-config/bin/harness-update-scan.sh" \
+    > "$OPS/.claude-config/bin/harness-update-scan.sh"
+  run check_identity_exclusion
+  chk "scan without CONTEXT/$name -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -qF "CONTEXT/$name"; echo $?)"
+done
+
+# 9. The always-loaded core (16): the shipped core linked into the rules dir
+# passes; a missing link, a link aimed elsewhere, and an oversized core FAIL;
+# deploy.ps1's import-file form passes; a leftover boot shim WARNs only.
+core_case() {
+  new_case "$1"
+  mkdir -p "$OPS/CONTEXT" "$HOME/.claude/rules"
+  cp "$SRC_OPS/CONTEXT/core.md" "$OPS/CONTEXT/"
+  cp "$SRC_OPS/.claude-config/deploy.sh" "$OPS/.claude-config/"
+}
+core_case core-linked
+ln -s "$OPS/CONTEXT/core.md" "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "shipped core linked into ~/.claude/rules -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+core_case core-unlinked
+run check_core_boot
+chk "rules link missing -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'ops-core.md missing'; echo $?)"
+core_case core-elsewhere
+printf '# Core\n' > "$HOME/other-core.md"
+ln -s "$HOME/other-core.md" "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "rules link aimed elsewhere -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case core-import
+printf '@%s\n' "$OPS/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "rules import file (deploy.ps1 fallback) -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
+core_case core-import-missing
+printf '@%s\n' "$HOME/missing/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "import of a nonexistent core -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case core-import-other
+mkdir -p "$HOME/other/CONTEXT"
+printf '# Other core\n' > "$HOME/other/CONTEXT/core.md"
+printf '@%s\n' "$HOME/other/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "import of another checkout's core -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case 'core import spaces'
+printf '@%s\n' "$OPS/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "unescaped spaces truncate an import -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+printf '@%s\n' "${OPS// /\\ }/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "escaped spaces in an import -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
+core_case core-import-code
+printf '```\n@%s\n```\n' "$OPS/CONTEXT/core.md" > "$HOME/.claude/rules/ops-core.md"
+run check_core_boot
+chk "an import inside a code fence is not loaded -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case core-profile
+ln -s "$OPS/CONTEXT/core.md" "$HOME/.claude/rules/ops-core.md"
+CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_core_boot
+chk "active profile without its own core rule -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+mkdir -p "$HOME/other-profile/rules"
+ln -s "$OPS/CONTEXT/core.md" "$HOME/other-profile/rules/ops-core.md"
+CLAUDE_CONFIG_DIR="$HOME/other-profile" run check_core_boot
+chk "active profile with a valid core rule -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
+core_case core-oversized
+ln -s "$OPS/CONTEXT/core.md" "$HOME/.claude/rules/ops-core.md"
+head -c 15360 /dev/zero | tr '\0' 'x' >> "$OPS/CONTEXT/core.md"
+run check_core_boot
+chk "core.md over 15,360 bytes -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'budget'; echo $?)"
+core_case core-missing
+rm -f "$OPS/CONTEXT/core.md"
+run check_core_boot
+chk "core.md missing -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+core_case core-oldshim
+ln -s "$OPS/CONTEXT/core.md" "$HOME/.claude/rules/ops-core.md"
+printf 'claude() { command claude --append-system-prompt "$boot" "$@"; }\n' > "$HOME/.zshrc.local"
+run check_core_boot
+chk "retired boot shim in .zshrc.local -> WARN, not FAIL" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ]; echo $?)"
+
+# 10. Root instructions (1b), principle citations (5), retired hooks (17).
+new_case root-shipped
+cp "$SRC_OPS/AGENTS.md" "$OPS/"
+run check_root_instructions
+chk "AGENTS.md alone -> OK" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf '# old startup sequence\n' > "$OPS/CLAUDE.md"
+run check_root_instructions
+chk "root CLAUDE.md present -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+rm -f "$OPS/AGENTS.md" "$OPS/CLAUDE.md"
+run check_root_instructions
+chk "AGENTS.md missing -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+new_case citations
+mkdir -p "$OPS/CONTEXT"
+cp "$SRC_OPS/CONTEXT/how-i-work.md" "$SRC_OPS/CONTEXT/core.md" "$OPS/CONTEXT/"
+run check_citations
+chk "shipped doctrine: citations in range (1..15)" "$([ "$FAILS" = 0 ] && printf '%s' "$OUT" | grep -q 'in range (1..15)'; echo $?)"
+printf 'see P16\n' >> "$OPS/CONTEXT/core.md"
+run check_citations
+chk "citation to P16 -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+new_case retired-hook
+run check_retired_hooks
+chk "Stage-1-shaped settings: no retired hook -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+set_settings '.hooks.SessionStart[0].hooks += [{"type":"command","command":"\"$H/.claude-config/hooks/foreman-charter.sh\""}]'
+run check_retired_hooks
+chk "foreman-charter.sh still registered -> WARN" "$([ "$WARNS" = 1 ] && [ "$FAILS" = 0 ]; echo $?)"
+
+# 11. The identity layer (21, 21b): template on a fresh copy passes; the
+# template on a bootstrapped copy and a missing USER.md FAIL; a filled USER.md
+# passes; retired files left behind WARN.
+new_case identity
+mkdir -p "$OPS/CONTEXT"
+cp "$SRC_OPS/CONTEXT/USER.md" "$OPS/CONTEXT/"
+run check_identity_canary
+chk "USER.md template on a fresh copy -> OK" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf 'stage=1\n' > "$OPS/CONTEXT/.bootstrapped"
+run check_identity_canary
+chk "USER.md template on a bootstrapped copy -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+sed -i '/USER-TEMPLATE: unfilled/d' "$OPS/CONTEXT/USER.md"
+run check_identity_canary
+chk "filled USER.md (canary removed) -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
+rm -f "$OPS/CONTEXT/USER.md"
+run check_identity_canary
+chk "USER.md missing -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+run check_retired_context
+chk "no retired files -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf 'old\n' > "$OPS/CONTEXT/about-me.md"
+mkdir -p "$OPS/WORKFORCE"
+run check_retired_context
+chk "about-me.md and WORKFORCE/ left behind -> WARN naming both" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'about-me.md' && printf '%s' "$OUT" | grep -q 'WORKFORCE/'; echo $?)"
+
+# 12. Line-ref lint (4) skips mounted skills: a line number in a mirror listed
+# in VENDORED.tsv is not fixable here; the same text in a local skill WARNs.
+new_case linerefs
+mkdir -p "$OPS/SKILLS/mountedx" "$OPS/SKILLS/localx"
+printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/mountedx/SKILL.md"
+printf 'mountedx\tsrc/skills/mountedx\n' >> "$OPS/SKILLS/VENDORED.tsv"
+run check_linerefs
+chk "line ref in a mounted skill -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/localx/SKILL.md"
+run check_linerefs
+chk "line ref in a local skill -> WARN" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'localx'; echo $?)"
+
+# A gate cannot return green when its mirror verifier cannot run or encounters
+# an unsafe manifest or filesystem error. MISSING sources retain their WARN.
+new_case vendored-error
+mkdir -p "$OPS/.claude-config/bin"
+printf '#!/usr/bin/env bash\necho "skills-vendor: unsafe mirror destination" >&2\nexit 3\n' \
+  > "$OPS/.claude-config/bin/skills-vendor.sh"
+chmod +x "$OPS/.claude-config/bin/skills-vendor.sh"
+run check_skills_vendored
+chk "mirror verifier error -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+chmod -x "$OPS/.claude-config/bin/skills-vendor.sh"
+run check_skills_vendored
+chk "mirror verifier not executable -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"

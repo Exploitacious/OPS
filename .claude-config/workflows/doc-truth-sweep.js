@@ -22,10 +22,10 @@ const RESULT = {
   },
 }
 
-const COMMON = `You are one lane of a doc-truth sweep over the Operator's OPS AI-harness and related repos. The Operator keeps deliberate repetition in the doctrine (repetition aids agent compliance — do NOT trim or consolidate for token savings), but every factual claim must be TRUE and every copy must AGREE: repetition of contradictions teaches agents to distrust the docs. Your fixes ship to master after foreman review; every future session reads what you write. Match each file's existing voice and formatting exactly.
+const COMMON = `You are one lane of a doc-truth sweep over the Operator's OPS AI-harness and related repos. The Operator keeps deliberate repetition in the doctrine (repetition aids agent compliance: do NOT trim or consolidate for token savings), but every factual claim must be TRUE and every copy must AGREE: repetition of contradictions teaches agents to distrust the docs. Your fixes ship to master after foreman review; every future session reads what you write. Match each file's existing voice and formatting exactly.
 
-Rules (doctrine by name — baseline in ~/OPS/CONTEXT/worker-digest.md): P1 document-the-why (keep/repair the rationale next to any rule you fix); P3 verify-before-trust (read the actual current file and confirm each claimed problem still exists before editing — if already fixed or the claim is wrong, SKIP with a reason, never fabricate an edit); P14 (verification field quotes real before/after or command output).
-Bans: no edits outside your named file set. No git commit/push. No file deletions (removing stale ENTRIES inside a file is fine where the fix list says so). No emojis. No line-number references in any doc text you write — cite sections/anchors/names. Surgical edits only; do not restructure or renumber documents.
+Rules (doctrine by name; the baseline is ~/OPS/CONTEXT/core.md, already loaded in your context, and how-i-work.md § Principles): P1 document-the-why (keep/repair the rationale next to any rule you fix); P3 verify-before-trust (read the actual current file and confirm each claimed problem still exists before editing: if already fixed or the claim is wrong, SKIP with a reason, never fabricate an edit); P14 (verification field quotes real before/after or command output).
+Bans: no edits outside your named file set. No git commit/push. No file deletions (removing stale ENTRIES inside a file is fine where the fix list says so). No emojis. No line-number references in any doc text you write: cite sections/anchors/names. Surgical edits only; do not restructure or renumber documents.
 Concurrency: other lanes are editing OTHER files right now. Touch only your named files.
 Finish: StructuredOutput per schema.`
 

@@ -1,8 +1,327 @@
 # Changelog
 
-Notable changes to OPS, newest first. Format: date — what changed and why it
+Notable changes to OPS, newest first. Format: the date, then what changed and why it
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
+
+## 2026-10-19: one always-loaded core, and the fleet retired
+
+OPS booted through a foreman charter and an identity digest that a `claude()`
+shell function appended to the system prompt. Only launches typed into an
+interactive shell ran that function, so a T3 Code thread, an IDE session, or
+`claude -p` started with none of the doctrine. This release replaces that boot
+with one always-loaded file, moves the identity layer to files the template
+sync never touches, and retires the multi-agent fleet. Existing copies migrate
+by hand once: `DEPLOYMENT.md` § "Migrating to the core boot".
+
+- **`CONTEXT/core.md` loads on every launch path.** One generic file, under
+  15,360 bytes, with the rules every session and lane needs on every turn:
+  role, intake and autonomy, delegation, landing and review, models, writing,
+  rhythm, memory routing, and where to look. `deploy.sh` and `deploy.ps1` link
+  it into `~/.claude/rules/ops-core.md`, which Claude Code loads as a user
+  rule in the terminal, in T3 Code threads, in IDEs, and under `claude -p`.
+  The Stage-1 `CLAUDE.md` fallback only asks the model to read the file, so it
+  is no longer relied on. The Operator-gated set now includes releases, file
+  and branch deletions, overwriting uncommitted work, and replacing a file
+  outside the deliverable; secrets are masked by value, never by field name.
+- **The doctrine set.** `how-i-work.md` carries P1-P15 under the same titles
+  as the maintainer's private harness, so a brief citing "P6 best effort is the
+  floor" means the same thing in both, plus the situational rules (git, review
+  pickup, T3 Code hosting). `standing-orders.md` holds the Operator's dated
+  rulings and overrides the defaults without editing them. `USER.md` and
+  `voice.md` are templates with fully synthetic examples; the earlier voice
+  samples paraphrased real messages. `AGENTS.md` replaces the root
+  `CLAUDE.md`, because a root `CLAUDE.md` makes Claude Code skip every
+  `AGENTS.md` below it, including the project repos under `PROJECTS/`.
+- **Retired:** `foreman-charter.md`, `boot-digest.md`, `worker-digest.md`,
+  `operating-doctrine.md`, `working-preferences.md`, `about-me.md`,
+  `brand-voice.md`, `fleet-doctrine.md`, the `WORKFORCE/` fleet (55 files), the
+  `foreman-charter.sh` and `remote-session-register.sh` hooks,
+  `start-remote-claude.sh`, and the `ops-memory-gc` timer. The `claude()` shim
+  is ultracode-only, and a re-deploy heals the old boot shim while keeping a
+  Round F permission edit.
+- **Template sync.** `harness-update-scan.sh` excludes `USER.md`, `voice.md`,
+  `standing-orders.md`, the `work-tracking`, `team`, and `tools` slots, and the
+  marker, plus the retired identity names, so a delta scan never lists an
+  unmigrated identity file as REMOVED. This landed first, ahead of the renames.
+- **BOOTSTRAP** writes the new set: `USER.md`, a `voice.md` starter, and a
+  dated standing order for every Operator choice. Round F keeps its text and
+  records into `standing-orders.md`; the new Round G sets up T3 Code's headless
+  browser on T3 hosts (`sudo <t3> browser setup`), which `DEPLOYMENT.md`
+  § "T3 Code hosts" also documents.
+- **Remote sessions are hand-run.** Nothing registers a session or brings one
+  back at boot; the registry resumes, parks, and revives by name, and `sweep`
+  calls a stopped row `GONE`.
+- **Tools that outlived the fleet** moved to `.claude-config/bin`:
+  `memory-index`, `memory-init`, `memory-init.ps1`, and
+  `claude-root-wrapper.sh`, which deploy wires for root only. The wrapper's
+  conflict hint uses `pgrep -l`, because `pgrep -af` prints other sessions'
+  full command lines.
+- **Mounted skills arrive on a fresh install.** Deploy clones the public skill
+  source once and runs `skills-vendor.sh sync`; it never pulls an existing
+  clone. `skills-vendor.sh` honors `OPS_DIR`, compares file content, and falls
+  back to tar where rsync is missing, as on a stock Debian container.
+- **Deploy** strips the fleet's PATH and wrapper lines, takes `--no-system`
+  (`-NoSystem` on Windows) to skip writes outside `$HOME` for test installs,
+  and exits non-zero when a step fails.
+- **The drift gate** checks the new boot: 16 fails when the core is missing,
+  over budget, or not linked; 1b fails on a root `CLAUDE.md`; 5 counts the
+  principles in `how-i-work.md`; 17 and 21b warn on retired hooks and files;
+  21 is the `USER.md` canary; 23 requires every identity exclusion.
+  `verify-ops.sh` checks another checkout through `OPS_DIR`. New tests:
+  `.claude-config/bin/tests/` (memory-index, root wrapper, deploy rc and core
+  wiring, skills-vendor) and new `verify-ops-selftest.sh` cases.
+- **Skills refreshed.** `grill-me`, `tdd` and `diagnosing-bugs` mount from
+  the public agent-skills library alongside the six earlier mounts; deploy
+  clones it and runs `skills-vendor.sh sync`. `harness-update`,
+  `pre-compact-synthesis`, `session-close`, `session-handoff`, `memory-prune`,
+  `operator-voice` and the grabit skills follow the current rest-stop and close
+  rules: a session closes only on the Operator's word, and the close stamp is
+  now cleared (its redirect was missing, so the `rm` became a `printf`
+  argument). New `scripts/inventory` for memory-prune, which exits 1 on a
+  missing store so a wrong path cannot read as a clean pool. New generic
+  `operating-model` and `stewardship` skills. The `fleet-doctrine` skill is
+  removed with the fleet.
+- **Automatic pushes go only to a private origin.** `memory-init
+  --auto-commit` and the daily backup (`daily-sync.sh`, which the Windows task
+  also runs) pushed to wherever origin pointed, so a tryout clone of this
+  public template, a copy made public by mistake, or a public fork would have
+  published the Operator's memory and notes every day. New
+  `.claude-config/bin/origin-private-check` exits 0 only when GitHub (`gh
+  api`) reports every push URL of origin private; it refuses the template URL
+  in any form (exit 1) and anything it cannot verify (exit 2). Both callers
+  still commit, keep the commit local on a refusal, and log the reason and the
+  fix; the next backup that passes pushes every held commit. `memory-init.ps1`
+  carries the same check. A self-hosted remote opts in per repo with `git
+  config ops.pushVerified true`, which never overrides a public answer. Tests:
+  `origin-private-check-test.sh`, `daily-sync-test.sh`, and new memory-init
+  cases in bash and PowerShell.
+- **Skill mounts never delete a folder they did not write.** A manifest row
+  replaced whatever sat at `SKILLS/<name>`, so this release's `grill-me`,
+  `tdd`, and `diagnosing-bugs` rows would have deleted an existing copy's own
+  skill of that name. `skills-vendor.sh` now records a digest of each mirror
+  it writes (`SKILLS/.vendored-state.tsv`) and moves any other destination,
+  including a hand-edited mirror, to
+  `.claude-config/backup/skills-replaced/<name>-<UTC>/` before installing,
+  with a `BACKUP` line naming the path; a failed install moves it back.
+  Mirrors already equal to their source update in place as before.
+- **Template sync for older copies.** `harness-update-scan.sh` is self-contained
+  by contract (it finds its root from the working directory and loads no helper
+  file), so a copy that predates it runs it straight from the template; the
+  harness-update skill gains "Updating a copy that predates this skill" with the
+  commands. The template's history was rewritten on 2026-10-19 to remove a
+  private name from one old commit, so a `last_synced` marker written before
+  then names a commit the template no longer has: the scan now translates it to
+  its rewritten twin (same tree) and stays in delta mode instead of falling back
+  to a first-sync compare. New `harness-update-scan-test.sh`.
+- **Agents push memory and batons only to a private origin.** The
+  pre-compact-synthesis and session-handoff skills run `origin-private-check`
+  before their additive-sync push, the same gate `memory-init` and the daily
+  backup use.
+- **Backups that cannot happen say so.** The daily backup checks its commit:
+  a failed commit (no git identity, a hook) or a failed stash is logged as an
+  ERROR with the fix, and nothing is pushed or reported as backed up; before,
+  the log claimed a backup that did not exist. A new memory pool gets a
+  `.gitkeep`, because the backup's `git stash -u` dropped the empty directory
+  and left the memory link dangling; `memory-init` also recreates a pool an
+  earlier backup removed, and commits only the pool path. A failed crontab
+  install now fails the deploy.
+- **Template sync delivers renamed and executable files.**
+  `harness-update-scan.sh` read `git diff --name-status` with git's default
+  rename detection, so a renamed file came back as one line holding two paths
+  and dropped out of the delta: never NEW, its old path never REMOVED, and the
+  next sync commit moved `last_synced` past it for good (against the public
+  main of 2026-10-19 that lost `memory-init` and four more files). The delta
+  now runs with `--no-renames`, so a rename is a REMOVED plus a NEW.
+  `--apply-safe` sets each file's mode from the upstream tree entry: NEW files
+  were written at the umask mode, so `memory-init` arrived non-executable and
+  the migration's re-deploy failed. A marker whose last line has no trailing
+  newline is read again; before, its `last_synced` was dropped and the scan
+  fell back to a first-sync compare without a warning. New cases in
+  `harness-update-scan-test.sh`.
+- **The push gate needs its own verdict, not just exit 0.** `daily-sync.sh`
+  and `memory-init` counted exit 0 from `bash origin-private-check` as
+  verified, and an empty file or one cut off after its function definitions
+  also exits 0, so an interrupted update or a full disk turned the gate into a
+  pass. Both now also require the gate's last line to be its `private`
+  verdict, and `memory-init.ps1` checks its twin's reason the same way. The
+  gate normalizes a URL before the template check (surrounding whitespace and
+  quotes trimmed, host and path percent-decoded, repeated slashes and dot
+  segments collapsed, a trailing dot dropped from the host or the ssh
+  HostName): those forms read as unparseable, which the `ops.pushVerified`
+  opt-in turned into a pass while git still reached the template. A push URL
+  list with no usable entry (a lone CR) exits 2 even with the opt-in; it
+  printed an empty `private:` and exited 0. A `gh` answer is compared without
+  case, as the PowerShell twin does. New cases in
+  `origin-private-check-test.sh`, `daily-sync-test.sh`, `memory-init-test.sh`
+  and `memory-init-windows-test.ps1`.
+- **Agent pushes of the OPS copy go through the push gate.** The skills and
+  `AGENTS.md` told agents to commit and push batons, the memory mirror and
+  trunk work, and only prose asked them to run `origin-private-check` first,
+  so a copy with a public origin could be published by any session that
+  skipped a step. `hooks/git-guard.sh` now resolves the repo each `git push`
+  acts on (the cwd, `cd`, `git -C`, `--git-dir`, `env`/`rtk`/`sudo` prefixes,
+  `bash -c`, `eval`, git aliases) and, for a repo whose root holds
+  `.claude-config/bin/origin-private-check`, blocks the push unless that gate
+  proves origin private and the push goes to origin. Pushes in other repos,
+  such as the project clones, are untouched; `GIT_GUARD=off` still lifts it.
+  Without Python 3 it checks every directory the command names instead. The
+  session-handoff, session-close and self-compact docs, the handoff README,
+  `AGENTS.md` and `core.md` now say so. New `guard-selftest.sh` cases.
+- **Skill mounts keep every folder they cannot prove they wrote, and swap
+  mirrors in whole.** `skills-vendor.sh` treated an unrecorded folder under
+  one of the six names that mounted before the record existed as its own
+  mirror, so a user's own or hand-edited `meta-skill-creator` (or any of the
+  six) was overwritten in place with no backup. An unrecorded folder that
+  differs from its source is now moved aside like any other; one equal to its
+  source still updates in place. The rsync engine synced straight into the
+  mirror, so a failed or interrupted rsync left it half-updated, and the next
+  sync then moved it aside with its GUI-local files; both engines now build
+  the mirror in a temp dir and swap it in, keeping the old one on any
+  failure. The `BACKUP` line is printed as soon as a folder is moved aside,
+  so a later failure still says where it went. New cases in
+  `skills-vendor-test.sh`.
+- **A failed backup pull puts the work back.** When `git pull --rebase`
+  failed (offline, no credentials under cron), `daily-sync.sh` returned with
+  the Operator's uncommitted and untracked work still in its stash, so the
+  files vanished from the tree, the mounted skills went missing, and later
+  runs saw a clean tree and never restored them. It now aborts a rebase the
+  pull left half-done, pops the stash with its index so the tree is exactly
+  as before, logs the failure as an ERROR with git's reason, and commits and
+  pushes nothing that run; a pop that conflicts still names the stash. New
+  cases in `daily-sync-test.sh`.
+- **Deploy checks the git identity.** A fresh Debian user has no git
+  identity (an empty GECOS name, no FQDN for an email), so memory-init's
+  commit, the daily backup and every agent commit failed while `deploy.sh`
+  printed "Deploy complete." `deploy.sh` and `deploy.ps1` now ask `git var`
+  for the author and committer identity before memory-init runs and, when
+  either is missing, print the two `git config --global` commands and fail
+  the deploy (`git-identity`). `memory-init` and `memory-init.ps1` show
+  git's own stderr for a failed commit instead of hiding it behind a
+  "(hook/signing?)" guess. New cases in `memory-init-test.sh` and
+  `memory-init-windows-test.ps1`.
+- **A redirect after a push is not its remote.** The push gate read the
+  first word after `git push` as the remote, so `git push 2>&1`, `1>&2`,
+  `>&2`, `&>/dev/null` and the like were blocked on a verified-private copy
+  ("goes to '2', not origin"). Redirections and their fd numbers are now
+  dropped before the arguments are read. New `guard-selftest.sh` cases run
+  each form against a private copy (allowed) and the template (blocked).
+- **The push gate refuses settings that move a push.** `git -c
+  remote.origin.pushurl=...` (or `remote.pushDefault`, `url.*.pushInsteadOf`,
+  `push.*`, `branch.<b>.remote` or `.pushRemote`, the same through
+  `--config-env` or `GIT_CONFIG_*`) sent a push elsewhere while the gate
+  checked only the configured origin. On an OPS copy such a push is now
+  blocked with the setting named, as is a push in the same command as a
+  change to where pushes go (`git remote set-url`, `git config remote.*`,
+  `git config ops.pushVerified`), whose verdict would be stale.
+- **The hook never runs code the command chose.** Its alias lookup ran `git`
+  with the command's own environment, so `PATH=<dir>:$PATH git <word>` or an
+  `LD_PRELOAD` made the hook execute a binary or library before the command
+  was allowed. The lookup now uses the `git` on the hook's own PATH, with the
+  hook's environment, and reads only `git config --get`.
+- **More push forms reach the gate.** `--git-dir`, `GIT_DIR` (also exported
+  earlier in the command) and `--work-tree` resolve to the repo git acts on,
+  not the cwd; here-strings, `... | bash` and `cat <<EOF | bash` are parsed
+  as scripts; `$(...)` and backticks are parsed inside double quotes too;
+  `git send-pack`, `http-push`, `subtree push` and `lfs push` on an OPS copy
+  are blocked; `rtk run|err|summary|test|bypass|proxy` are unwrapped;
+  `bash --norc -c` and `--rcfile` no longer hide the `-c` body; `cd -`, `cd`
+  chains and variables assigned in the command resolve; `git -C` resolves
+  symlinks physically, as git does; a linked worktree whose checkout lacks
+  the gate uses its main copy's gate.
+- **The fallback fails safe.** Without Python 3, on a command that cannot
+  be tokenized, or when a directory cannot be resolved (a loop variable, an
+  `xargs -I{}` placeholder), the hook now reads the raw command with its
+  quotes: a push or send-pack word, or one of the copy's push aliases, runs
+  the gate of every OPS copy the command touches. It used to match only
+  `git` at a command position in the quote-stripped text, so `bash -c`,
+  `eval`, `timeout`, `xargs`, `{ }` and `if` forms pushed unchecked.
+- **The push gate's limits are written down.** The hook header and
+  `DEPLOYMENT.md` say what it is: a seatbelt for normal agent pushes, not a
+  sandbox. Exotic wrappers (`setsid`, `find -exec`, `ssh`, `python -c`) and
+  scripts run from a file are not parsed; the real protection is a private
+  origin. `CONTRIBUTING.md` explains that the template's own checkout is an
+  OPS copy with a public origin, so a contributor pushes a PR branch with
+  `GIT_GUARD=off git push origin <branch>` after checking it carries no
+  private content.
+- **The gate answers inside the hook's time.** `origin-private-check` gave
+  `gh` 30 s, the same 30 s the harness gives the git-guard hook, so a hung
+  `gh` timed the hook out before the agent saw why. `gh` now gets 10 s. New
+  case in `origin-private-check-test.sh`.
+- **Template sync writes only into an OPS copy.** `harness-update-scan.sh`
+  scans the repo of the working directory, and the harness-update skill ran
+  it by absolute path, so from a project clone it added the `ops-template`
+  remote there and `--apply-safe` copied the whole template into it. It now
+  refuses (`ERR_NOREPO`, nothing written) unless the repo has `BOOTSTRAP.md`
+  or `.claude-config/`, and prints the `cd` to run from; the skill's
+  commands run as `(cd ~/OPS && ...)`. New case in
+  `harness-update-scan-test.sh`.
+- **Template sync sees modes.** Files were compared by blob alone, so an
+  upstream `chmod +x` with the same content was never applied, and a script
+  an earlier scan wrote without its exec bit (which then failed deploy's
+  `memory-init` check) read as IDENTICAL forever. Files now compare as (mode,
+  blob): a mode-only change is an UPDATE when the local mode is still the
+  last-synced one, and any other exec-bit difference is a new MODE line, with
+  the `chmod` to run, in delta and first-sync scans alike. New cases.
+- **Template sync sets modes under any umask.** `chmod +x`/`-x` with no
+  `who` is filtered by the umask, so under 027 clearing the bit left group
+  or other bits set and the scan exited 6 after writing the file. It now
+  uses `chmod a+x`/`a-x`. New case under umask 027.
+- **Template symlinks arrive as symlinks.** A mode 120000 entry was written
+  as a regular file holding the link target. It is now created with
+  `ln -s`. Each applied file is built beside its destination and renamed
+  into place, so a local symlink is replaced rather than written through,
+  and the scan can update itself while it runs. A local path that cannot be
+  hashed is a CONFLICT, never NEW. New case.
+- **The daily backup never moves the Operator's work.** `daily-sync.sh`
+  stashed the tree, pulled, then popped: a run killed between stash and pop
+  (a cron timeout, a reboot) left the work in a stash that later runs never
+  mentioned, and stash and pop dropped empty directories and reset file
+  modes on every dirty day. It now commits the day's work where it stands,
+  then runs `git pull --rebase --no-autostash`; a failed pull aborts the
+  rebase so the local commit and the tree stay exactly as they were, and is
+  logged as an ERROR. A rebase over a remote that moved re-creates the day's
+  files at default modes (git keeps only the exec bit), so their permission
+  bits are recorded before the pull and put back after it. A rebase left in
+  progress is reported, never committed on top of. New cases in
+  `daily-sync-test.sh`: the tree byte for byte (modes and empty directories)
+  after an unreachable origin, a conflicting rebase and a killed run, no
+  stash ever created, and modes kept through a rebase.
+- **Skill mounts swap on macOS.** `skills-vendor.sh` swapped each mirror in
+  with `mv -T`, which only GNU mv has, so on macOS and BSD every swap failed
+  and even a fresh install exited 3. Both renames now target a name that does
+  not exist, which plain `mv` handles the same everywhere. New case with a
+  `mv` that rejects `-T`.
+- **Interrupted mounts clean up after themselves.** A run cut off mid-copy
+  left `SKILLS/.vendor.XXXXXX` behind, and the daily backup committed it.
+  A sync now removes those staging dirs first (only that exact name shape),
+  after moving back a mirror a kill left aside between the two renames, so
+  its GUI-local files return with it (a `RESTORED` line); a leftover it
+  cannot place goes to the backup dir. `.gitignore` lists
+  `SKILLS/.vendor.*/`. New cases.
+- **Windows deploy shows a moved skill folder.** `deploy.ps1` captured the
+  sync's output and printed it only on failure, so a successful sync that
+  moved the Operator's own skill aside said nothing. It now prints the
+  `BACKUP` and `RESTORED` lines on success too. New case in
+  `deploy-windows-test.ps1`, whose fixture script is now written with LF
+  line endings so the test also passes on a fresh (CRLF) checkout.
+- **A restored skill folder says so.** When an install failed and the
+  folder went back to its place, the earlier `BACKUP` line still named a
+  backup path that no longer existed. A `RESTORED` line on stdout now says
+  the folder is back where it was. New case.
+- **macOS deploy and a steadier skill sync.** Deploy publishes the cloned
+  skill source with a plain rename onto a free name, not GNU-only `mv -Tn`,
+  which failed every macOS deploy before the skills even synced. The rsync
+  engine ignores time-only itemize lines when deciding UNCHANGED, so a mirror
+  whose directory time moved no longer flips between SYNCED and UNCHANGED; a
+  mode or content change still syncs.
+- **Review hardening.** git-guard closes push bypasses through config
+  includes, inherited alias settings and alias options. The template scanner
+  refuses any path whose parent is a symlink, so it cannot write outside the
+  copy or onto an excluded identity file. Skill sync serializes concurrent
+  runs, records the content it staged, and backs up a mirror it cannot place
+  instead of deleting it. The daily backup keeps every tracked file's
+  permissions across a pull.
 
 ## 2026-10-18: hotfix release (current models, a gate that passes, deploy stops editing Stage 1)
 
@@ -83,7 +402,7 @@ than 2026-10-18".
   review gate, retiring the fleet, refreshed skills, lane-aware context
   watching) follows separately.
 
-## 2026-09-04 — Boot surface rides the system prompt; rest-stop compaction
+## 2026-09-04: Boot surface rides the system prompt; rest-stop compaction
 
 - **Charter + identity digest ride the cached system prompt.** The `claude()`
   launch shim (`deploy.sh`) now appends `CONTEXT/foreman-charter.md` +
@@ -94,7 +413,7 @@ than 2026-10-18".
   for Claude Code (kept as an adapter seam); remove it from the Stage-1
   SessionStart matcher and split SessionStart into `startup|clear` /
   `resume|compact` groups (see DEPLOYMENT.md "Boot surface").
-- **New `CONTEXT/boot-digest.md`** — a slot template (Example Corp flavor, zero
+- **New `CONTEXT/boot-digest.md`**: a slot template (Example Corp flavor, zero
   real facts) for the operator's identity surface: who you work for, the three
   voice registers, people/clients/vendors, stack, doctrine P-pointers, and the
   always-binding standing orders. BOOTSTRAP fills it. Hard-excluded from
@@ -103,7 +422,7 @@ than 2026-10-18".
   depth is P-pointers), the Anthropic autonomy block at the head of "Finish the
   job", a don't-draft-twice effort line, and the rest-stop "Milestone rhythm".
   Planning questions move to prose; the AskUserQuestion block leaves CLAUDE.md.
-- **`CONTEXT/model-roles.md`** — the model-tier policy (foreman / worker /
+- **`CONTEXT/model-roles.md`**: the model-tier policy (foreman / worker /
   banned, the [1m] ids, the Opus 5 + Haiku bans) as one source the charter and
   CLAUDE.md point at instead of restating.
 - **Rest-stop compaction.** `context-watch.sh` gains a calm, boundary-aware
@@ -128,7 +447,7 @@ than 2026-10-18".
   sync (DRIFT FAIL / MISSING WARN); boot-digest excluded from harness-update
   (FAIL). `context-watch-selftest.sh` gains full readout + boundary coverage.
 
-## 2026-08-31 — Glue-skills v2 refresh; portable skills mounted, not vendored
+## 2026-08-31: Glue-skills v2 refresh; portable skills mounted, not vendored
 
 - **Skills refreshed.** The local glue skills were ported to their v2 form:
   `grabit` (now the SEND direction), a new `grabit-screenshots` (the RECEIVE
@@ -148,17 +467,17 @@ than 2026-10-18".
   `work-tracking.md`. Each names its degrade-when-absent, so a portable skill can
   reference a well-known slot and still run on a copy that hasn't filled it in.
 
-## 2026-08-20 — Opus 5 banned; Opus 4.8 is the worker tier
+## 2026-08-20: Opus 5 banned; Opus 4.8 is the worker tier
 
 - **Operator directive.** As the fan-out worker, Opus 5 showed
   disproportionate cache-write churn and message round-trips against Opus 4.8
-  for equivalent output — self-checking redundantly against a harness that
+  for equivalent output: self-checking redundantly against a harness that
   already runs its own review and verify lanes, for no quality edge. It spent
   a large share of the usage budget buying nothing.
 - **Change.** Opus 4.8 (`claude-opus-4-8[1m]`) is now the default
   build/review/audit worker **and** the fallback foreman. Opus 5
   (`claude-opus-5`) is banned harness-wide, like Haiku. The `[1m]` suffix is
-  required on Opus 4.8 — unlike Opus 5, 1M is not its default context, so a
+  required on Opus 4.8: unlike Opus 5, 1M is not its default context, so a
   bare id silently books a 200K worker.
 - **Pins flipped:** `.claude-config/agents/ops-{worker,reviewer,auditor}.md`
   frontmatter, and both judgment lanes (chief reviewer, completeness critic)
@@ -170,38 +489,38 @@ than 2026-10-18".
   `SKILLS/agent-delegation/{SKILL.md,04_foreman_estimation.md}`, and the
   worker line in `.claude-config/hooks/session-briefing.sh`.
 - **Machine enforcement:** `verify-ops.sh` gains check 15
-  (`check_opus5_ban`) — FAILs if `claude-opus-5` appears as a spawn pin in
+  (`check_opus5_ban`): FAILs if `claude-opus-5` appears as a spawn pin in
   any agent, workflow, or settings surface. Scoped to pins, not prose, so the
   doctrine can still name the banned id. Mirrors the Haiku tripwire: a rule a
   machine cannot check is a rule that silently rots.
 
-## 2026-07-28 — Fable-primary model policy + availability probe
+## 2026-07-28: Fable-primary model policy + availability probe
 
 > **Superseded 2026-08-20:** Opus 5 is now BANNED harness-wide; Opus 4.8
 > (`claude-opus-4-8[1m]`) is the default build/review/audit worker. Where this
-> entry names Opus 5 as the worker tier, read it as history — see the 2026-08-20 entry.
+> entry names Opus 5 as the worker tier, read it as history: see the 2026-08-20 entry.
 
-- **The foreman seat is now role-based, not model-based** — the main session
+- **The foreman seat is now role-based, not model-based**: the main session
   boots **Fable 5 where the Operator's plan allows it, Opus 4.8 otherwise**,
   and the charter it runs is identical either way. Nothing in the harness
   branches on which one answered. Where Fable is available it is usage-capped,
-  so the foreman orchestrates only — briefs, delegation, decisions, reviewing
-  worker output in the main thread — and **never spawns itself as a subagent**
+  so the foreman orchestrates only: briefs, delegation, decisions, reviewing
+  worker output in the main thread: and **never spawns itself as a subagent**
   (there is no `fable` worker alias; a Fable worker would burn the scarce tier
   on work Opus 5 does fine).
-- **New `bin/model-probe.sh`** — availability is plan-dependent and Operators
+- **New `bin/model-probe.sh`**: availability is plan-dependent and Operators
   generally don't know their own entitlements, so the harness detects it
   instead of asking. The probe checks whether Fable can actually run on this
   machine and settles the main-session pin accordingly, caching the verdict
   under `~/.local/state/ops` so every later boot reads the answer instead of
   re-probing; `--refresh` re-runs the detection, `--force` overrides the
   verdict when the Operator knows better than the probe. Wired into
-  `deploy.sh` (best-effort, non-fatal — a probe that can't reach the API must
+  `deploy.sh` (best-effort, non-fatal: a probe that can't reach the API must
   not fail an otherwise-good deploy), into `BOOTSTRAP.md` Stage 0 recon (so
   the first real session boots the right foreman), and into the
   `harness-update` skill's post-sync gates (a sync can change model policy).
 - **`ops-worker`, `ops-reviewer`, and `ops-auditor` hard-pinned to
-  `claude-opus-5`** by exact id, not the `opus` alias — that alias is the
+  `claude-opus-5`** by exact id, not the `opus` alias: that alias is the
   *foreman* slot now, and a worker resolving through it would spawn the
   scarce tier. Opus 5 is the default build/review worker and never a foreman:
   as an executor of a precise brief it is excellent, as an orchestrator it
@@ -211,15 +530,15 @@ than 2026-10-18".
 - **Haiku is banned harness-wide**, enforced as a stage-1 tripwire rather than
   a rule anyone has to remember: `ANTHROPIC_DEFAULT_HAIKU_MODEL` is pinned to
   `claude-sonnet-5`, so anything still requesting the haiku tier silently gets
-  Sonnet 5. Never remove that key — removing it resurrects real Haiku. The
+  Sonnet 5. Never remove that key: removing it resurrects real Haiku. The
   `transcript-mine` scout lane, the last in-repo `haiku` caller, now names
   `sonnet` directly.
-- **`session-briefing.sh` reports both model seats** — the `Config:` line
+- **`session-briefing.sh` reports both model seats**: the `Config:` line
   gained `main=<pin>  ·  fallback(opus)=<alias>` in place of the single
   `opus=` field, and the worker line now reads `Opus 5 default worker ·
   Sonnet 5 light lanes`. Which foreman actually booted is the first thing a
   session needs to know when the answer varies by machine.
-- **`verify-ops.sh` gains `check_model_policy`** — the drift gate now fails
+- **`verify-ops.sh` gains `check_model_policy`**: the drift gate now fails
   when the pins disagree with this policy (a worker pointed at the alias, a
   haiku reference reintroduced, the tripwire key removed), so the convention
   is machine-enforced instead of doc-enforced.
@@ -228,12 +547,12 @@ than 2026-10-18".
   `ANTHROPIC_DEFAULT_OPUS_MODEL` to `claude-opus-4-8[1m]`. Pull the stage-1
   repo too, or update those keys yourself if you maintain your own fork.)
 
-## 2026-07-24 — Opus 5 adoption: model tiers, effort rules, deliverable brand kit
+## 2026-07-24: Opus 5 adoption: model tiers, effort rules, deliverable brand kit
 
-> **Superseded 2026-08-20:** the Opus 5 adoption described here was reversed —
+> **Superseded 2026-08-20:** the Opus 5 adoption described here was reversed:
 > Opus 5 is now BANNED and Opus 4.8 is the worker tier. See the 2026-08-20 entry.
 
-- **Model policy moves to Claude Opus 5** — the main-session boot default and
+- **Model policy moves to Claude Opus 5**: the main-session boot default and
   the `opus` worker alias both point at the plain `claude-opus-5` id (1M
   context is Opus 5's default AND max, so no `[1m]` suffix). Same $/token as
   Opus 4.8, separate rate-limit bucket, strictly stronger on hard
@@ -241,32 +560,32 @@ than 2026-10-18".
   (`ANTHROPIC_DEFAULT_SONNET_MODEL`), Sonnet 5 200K stays the trivial tier.
   Updated in `CONTEXT/foreman-charter.md`, `CONTEXT/operating-doctrine.md`
   (P12 + changelog), and `SKILLS/agent-delegation/04_foreman_estimation.md`.
-  (Stage-1 settings pins ship from the deployer repo — update
+  (Stage-1 settings pins ship from the deployer repo: update
   `ANTHROPIC_DEFAULT_OPUS_MODEL` and the top-level `model` key there if you
   maintain your own fork of the stage-1.)
 - **Opus 5 behavioral calibration** (from Anthropic's "Prompting Claude
   Opus 5" guide): the charter's delegate-bias language was overshot against
-  Opus 4.8's under-delegation — Opus 5 delegates readily, so a spawn-
+  Opus 4.8's under-delegation: Opus 5 delegates readily, so a spawn-
   discipline block now bounds it (one agent when one suffices; no mid-task
   self-re-check spawns). The **completed-work review sweep is affirmed as a
-  standing requirement regardless of model** — Opus 5's self-verification
+  standing requirement regardless of model**: Opus 5's self-verification
   trims only duplicate mid-task re-checking, never the end-of-work reviewer
   pass.
-- **Effort rules codified** — effort-decreases are the Operator's token-
+- **Effort rules codified**: effort-decreases are the Operator's token-
   saving lever: honored without friction, never auto-restored mid-session,
   never applied autonomously by the AI, and never to review/verify lanes.
   (Opus 5 holds quality unusually well at `low`/`medium`, which is what makes
   an Operator-requested economy pass cheap.)
-- **New brand-voice template section: "Client Deliverable Brand Kit"** —
+- **New brand-voice template section: "Client Deliverable Brand Kit"**:
   Opus-class models produce markedly better office documents (.docx/.pptx/
   .xlsx) when handed a concrete brand spec (logo, colors, fonts, section
   order, contact block) instead of "professional and clean." The template
   ships an EXAMPLE block to replace during bootstrap; found as the sole
   confirmed gap in a 16-agent audit of the prompting guide vs this harness.
 
-## 2026-07-22 — scheduled 5h-window pings (claude-window-ping.sh)
+## 2026-07-22: scheduled 5h-window pings (claude-window-ping.sh)
 
-- **New `bin/claude-window-ping.sh`** — cron-fired dumb pipe that opens the
+- **New `bin/claude-window-ping.sh`**: cron-fired dumb pipe that opens the
   Claude 5-hour usage window at Operator-chosen times: one headless
   MCP-stripped `ping` to a brand-new session per configured profile
   (`CC_WINDOW_PING_PROFILES`, space-separated `name=config_dir` pairs,
@@ -274,14 +593,14 @@ than 2026-10-18".
   `sonnet`). Why: when your day has predictable blocks, pre-arming the shared
   window clock means the countdown is already running when you sit down. Runs
   from `$HOME`, outside tmux (ping sessions never enter the reboot-resume
-  registry). The crontab is machine-local by design — install lines live in
+  registry). The crontab is machine-local by design: install lines live in
   the script header and `bin/README.md`.
-- **`session-briefing.sh` gains a quiet-when-clean `Ping:` line** — flags a
+- **`session-briefing.sh` gains a quiet-when-clean `Ping:` line**: flags a
   failed last ping (per profile, with rc) or a stale one
   (`CC_WINDOW_PING_STALE_HOURS`, default 25h) at next session start; silent
   when the feature isn't installed (no status file) or the last run was clean
   and recent. A silent ping failure means the window never opened and nobody
-  was present to notice — the next session's briefing is where it gets seen.
+  was present to notice: the next session's briefing is where it gets seen.
 - **Hardened for unattended cron duty (review round):** malformed profile
   pairs are skipped loud (logged + rc=2 status row) instead of silently
   pinging a garbage config dir; whitespace-only config writes a loud
@@ -290,10 +609,10 @@ than 2026-10-18".
   non-blocking flock serializes overlapping runs; tmp litter from killed
   runs is swept; per-profile timeout promoted to `CC_WINDOW_PING_TIMEOUT`
   (default 180s). **`claude-window-ping-selftest.sh`** (new) proves all of it
-  against a mock binary — profile routing, rc propagation (incl. 124/127),
-  malformed/empty config, lock behavior, tmp hygiene — zero real API usage.
+  against a mock binary: profile routing, rc propagation (incl. 124/127),
+  malformed/empty config, lock behavior, tmp hygiene: zero real API usage.
 
-## 2026-07-22 — context-watch: escalation ladder + mid-turn injection
+## 2026-07-22: context-watch: escalation ladder + mid-turn injection
 
 - **`context-watch.sh` rewritten from a single flat threshold into a 4-tier
   escalation ladder** scaled off `CC_CONTEXT_WINDOW` (default 1M): 65% NOTICE
@@ -303,21 +622,21 @@ than 2026-10-18".
   a flat interval is easy for a deep-in-the-work session to defer until the
   window is gone.
 - **New `posttool` mode closes the mega-turn blind spot.** Stop hooks only
-  fire between turns — a long tool-calling turn can run from 65% to
+  fire between turns: a long tool-calling turn can run from 65% to
   window-death without ever seeing a nag. Registered as a PostToolUse hook
   (matcher `.*`, arg `posttool`) in the Stage 1 `settings.json` template, it
   injects the warning mid-turn via `additionalContext` from 86% (+15K
   throttle, +8K at CRITICAL). **Existing copies:** hook config is
-  session-cached and `settings.json` is Stage-1-owned — re-run Stage 1 (or add
+  session-cached and `settings.json` is Stage-1-owned: re-run Stage 1 (or add
   the PostToolUse entry to your `settings.json` by hand) and relaunch
   sessions to arm the mid-turn half; the ladder itself goes live immediately
   since the Stop registration already points at this script.
 - **`context-watch-selftest.sh`** locks the ladder invariants (tier fires,
   throttles, escalation-overrides-throttle in BOTH modes, every-stop
   CRITICAL, loop guard, posttool injection + throttles, literal state-field
-  integrity across the two write paths, post-compact epoch reset — a
+  integrity across the two write paths, post-compact epoch reset: a
   mid-session /compact shrinks context, and a stale high-water mark would
-  otherwise suppress every re-nag below CRITICAL — kill switches, window
+  otherwise suppress every re-nag below CRITICAL: kill switches, window
   scaling, legacy single-int state upgrade + both legacy overrides). The
   four core guarantees are mutation-verified: each selftest case fails when
   its clause is surgically removed. Fail-open like the hook: no python3 =>
@@ -326,14 +645,14 @@ than 2026-10-18".
   honored (tier 1); `CC_CONTEXT_WATCH=0` kills all modes,
   `CC_CONTEXT_WATCH_POSTTOOL=0` the mid-turn half only.
 
-## 2026-07-17 — session-close work-tracking reconciliation gate
+## 2026-07-17: session-close work-tracking reconciliation gate
 
 - **`session-close` gains a WIP & work-tracking reconciliation step** (new step
   2): before a session tears down, it reconstructs which repos the session
   touched (from a per-session start stamp + compact-time work-log, scoped by git
   delta with automation commits filtered out) and reconciles each unit of work
   against the systems the Operator declares in the new `CONTEXT/work-tracking.md`
-  — logging time, advancing a board card, or **drafting the entry text** when no
+ : logging time, advancing a board card, or **drafting the entry text** when no
   tool is wired. Config-driven and additive: an unconfigured OPS still
   reconciles by drafting and reminding. It hardcodes no ticketing, time, or
   board system.
@@ -345,51 +664,51 @@ than 2026-10-18".
   helper the new hooks depend on.
 - **`pre-compact.sh`** now appends a mechanical work-log segment per compact, and
   **`pre-compact-synthesis`** gains a "pause vs close" disambiguation plus a
-  one-line narrative breadcrumb — so a multi-compact session's whole story
+  one-line narrative breadcrumb: so a multi-compact session's whole story
   reaches the eventual close. Pause never touches time or tickets; only
   `session-close` reconciles.
 - **`session-briefing.sh`** now sources `hooklib.sh` and carries a backstop that
   flags sessions abandoned without a reconciliation run (their work may be
   unlogged).
 
-## 2026-07-16 — doctrine: token cost is not a lever against compliance
+## 2026-07-16: doctrine: token cost is not a lever against compliance
 
 - New operating-doctrine ruling (Operator, 2026-07-06, now written down):
   never propose consolidating or trimming the always-loaded doctrine chain
-  for token savings — repetition is how agents internalize a non-default
+  for token savings: repetition is how agents internalize a non-default
   posture; the harm is repeated contradictions, not repetition, and the
   drift checks exist to prevent exactly those. Compliance-motivated
   restructuring (worker-digest) stays fine; distinct from P12's
   workflow-spend gate.
 
-## 2026-07-16 — project-kata: GHCR retention workflow for image-publishing repos
+## 2026-07-16: project-kata: GHCR retention workflow for image-publishing repos
 
 - New kata section: any repo publishing container images to GHCR gets a
   retention workflow at scaffold time (`ghcr-cleanup.yml`, manual-first,
   `dry_run` defaulting to true, keep-last-N, `exclude-tags` for
-  `latest`/`prod`/sha pins) — plus the two platform gotchas learned live
+  `latest`/`prod`/sha pins): plus the two platform gotchas learned live
   (`workflow_dispatch` only fires from the default branch; guessed package
   names 404).
 
-## 2026-07-16 — flush-debt follow-up: stub-phrased entries no longer suppressed
+## 2026-07-16: flush-debt follow-up: stub-phrased entries no longer suppressed
 
 - `secrets-guard.sh`: the routing nudge previously stayed quiet for entries
   phrased like stubs (`folded to` / `canonical entry lives` / `pointer stub`).
-  Under charter § Eviction stubs shouldn't exist — a legacy stub is flush
+  Under charter § Eviction stubs shouldn't exist: a legacy stub is flush
   debt that belongs in the queue, so the suppression is removed and such
   entries now get nudged + queued for the closeout flush.
 
-## 2026-07-16 — closeout/memory wave: memory is a write cache, arming-order gate
+## 2026-07-16: closeout/memory wave: memory is a write cache, arming-order gate
 
 One-PR wave ported from a private harness under the CONTRIBUTING extraction
 discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
 
-- **Memory eviction lifecycle.** `foreman-charter.md` § "Eviction — memory is
+- **Memory eviction lifecycle.** `foreman-charter.md` § "Eviction: memory is
   a write cache, not an archive": auto-memory holds the working set plus a
   small set of standing facts; the long-term store is the repo (lessons
-  files, docs), the cold archive is the git-synced mirror — deleting an entry
+  files, docs), the cold archive is the git-synced mirror: deleting an entry
   is never data loss. Terminal projects purge their entries (fold into the
-  lessons file, then delete — no stubs); `MEMORY.md` gets a ~16KB soft budget
+  lessons file, then delete: no stubs); `MEMORY.md` gets a ~16KB soft budget
   under the ~24.4KB platform truncation ceiling.
 - **Closeout flush gate.** `pre-compact-synthesis` hygiene step 2 becomes a
   three-part gate: this session's entries plus the write-time flush queue
@@ -403,7 +722,7 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
   four artifacts are green, docs-reflect-reality has passed, and a conscious
   knowledge-capture completeness check (the `transcript-mine` workflow since
   the last-closeout stamp, on long/autonomous sessions). Anything unresolved
-  means DO NOT ARM — the automation removes the Operator's keystrokes, never
+  means DO NOT ARM: the automation removes the Operator's keystrokes, never
   the synthesis.
 - **Also in the wave.** Migration-closeout checklist (the four vectors that
   make a fresh agent regenerate a removed pattern) in `pre-compact-synthesis`;
@@ -411,25 +730,25 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
   undefined/stringified) in `agent-delegation/05_dynamic_workflows.md`;
   memory-index regeneration discipline in `memory-prune`.
 
-## 2026-07-15 — backport wave: compact automation, session-persistence hardening, portable hooks
+## 2026-07-15: backport wave: compact automation, session-persistence hardening, portable hooks
 
 Five-PR wave ported from a private harness under the CONTRIBUTING extraction
 discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
 
-- **Automated compact cycle.** `bin/compact-cycle.sh` — a deterministic bash
+- **Automated compact cycle.** `bin/compact-cycle.sh`: a deterministic bash
   compactor in a detached tmux session: waits for the target Claude pane to go
   idle, types `/compact`, watches completion, types the resume baton, and
   self-destructs; on error/timeout it never resumes (the session stays paused
   with synthesis on disk). `hooks/context-watch.sh` (Stop hook) nags the
   ritual from REAL context tokens (transcript `usage` entries), growth-
-  throttled. `pre-compact-synthesis` gains the self-compact exit — automated
+  throttled. `pre-compact-synthesis` gains the self-compact exit: automated
   is the default in tmux; manual only when the Operator claims `/compact`.
 - **Session-persistence single-owner doctrine.** The registry system is the
   only thing allowed to (re)create Claude sessions. `tmux-main.service`
   rewritten from Type=forking + Restart=on-failure (server-death cascade →
   restart → resurrection storm) to oneshot + RemainAfterExit + KillMode=process.
   Registry staleness `sweep`, case-collision guard in the auto-register hook,
-  and every tmux `-t` target exact-matched (`=Name` / `=Name:` — bare names
+  and every tmux `-t` target exact-matched (`=Name` / `=Name:`: bare names
   unique-prefix-match; `kill-session -t Dev` can kill `Dev2`).
 - **Portable hooks.** `hooks/hooklib.sh` `hook_field` (jq-first, python
   fallback, fail-closed) replaces inline `python3 -c` extraction across the
@@ -440,7 +759,7 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
 - **Workforce docs.** Memory-sync doctrine lessons, `ac-memory-init.ps1`
   exit-code contract restored, project-kata delta.
 
-## 2026-07-08 — session-close skill
+## 2026-07-08: session-close skill
 
 - `SKILLS/session-close/`: the third session ending. Pause = closeout +
   `/compact` (pre-compact-synthesis); move = session-handoff; **close** =
@@ -448,7 +767,7 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
   the session removes itself from the reboot registry and kills its own
   tmux. History is never deleted; archived sessions revive on demand.
 
-## 2026-07-08 — Session lifecycle: profiles, auto-register, template sync
+## 2026-07-08: Session lifecycle: profiles, auto-register, template sync
 
 - **Profile-aware reboot-resume.** The remote-sessions registry gains an
   optional 4th column (`CONFIG_DIR`): sessions running a secondary Claude
@@ -457,7 +776,7 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
   working untouched.
 - **Auto-registration.** New SessionStart hook
   (`.claude-config/hooks/remote-session-register.sh`): any Claude session
-  that starts inside tmux self-registers for reboot-resume — hand-launched
+  that starts inside tmux self-registers for reboot-resume: hand-launched
   sessions included, not just skill-created ones. Archived names stay
   parked; opt out with `RC_AUTOREGISTER=0`.
 - **`harness-update` skill + scan script.** The safe update path from the
@@ -466,16 +785,16 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
   last-synced marker, identity surfaces hard-excluded in both directions,
   conflicts never auto-apply.
 
-## 2026-07-08 — Remote-controlled sessions (community PR #1)
+## 2026-07-08: Remote-controlled sessions (community PR #1)
 
 - `.claude-config/remote-sessions/` + the `remote-session` skill: always-on
   Claude Code sessions in tmux, driven from another device via
   `claude --remote-control`, persisted in a registry and **resumed with full
   conversation history after a reboot** (@reboot cron + stable session ids).
   Archive/revive tooling parks sessions without losing history. Contributed
-  by @kontrolflow — the first port from a sibling private harness.
+  by @kontrolflow: the first port from a sibling private harness.
 
-## 2026-07-07 — Contribution discipline
+## 2026-07-07: Contribution discipline
 
 - `CONTRIBUTING.md`: contributions here are typically extractions from a
   contributor's own private harness, so the extraction discipline (port
@@ -485,9 +804,9 @@ discipline (patterns rewritten, identity scrubbed, denylist at zero hits).
 - `main` is now PR-protected: review required, no direct pushes, no force
   pushes.
 
-## 2026-07-07 — Initial public release
+## 2026-07-07: Initial public release
 
-- OPS v1: foreman-by-default orchestration doctrine (P1–P15 + charter),
+- OPS v1: foreman-by-default orchestration doctrine (P1-P15 + charter),
   git-synced file-based memory, session-survival discipline (pre-compact
   synthesis, handoff batons, post-compact re-orientation), the WORKFORCE
   fleet layer, six portable skills, two-stage deploy, and the first-launch

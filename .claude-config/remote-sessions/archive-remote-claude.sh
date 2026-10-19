@@ -3,13 +3,13 @@
 # On-demand sibling of new-remote-claude.sh; shares lib-remote-claude.sh.
 #
 # Usage:
-#   archive-remote-claude.sh archive <name>   Park a session: remove from the boot registry and kill its
+#   archive-remote-claude.sh archive <name>   Park a session: remove from the live registry and kill its
 #                                             tmux/remote-control (drops off your phone). History is kept;
 #                                             the row + session-id move to the archive file.
 #   archive-remote-claude.sh revive  <name>   Bring a parked session back: move it to the live registry and
-#                                             launch it now, resuming its conversation. Returns on reboot again.
+#                                             launch it now, resuming its conversation.
 #   archive-remote-claude.sh list             List archived sessions (NAME  WORKDIR  SESSION_ID).
-#   archive-remote-claude.sh sweep            Health view of the LIVE registry (what boot-resumes): per-session
+#   archive-remote-claude.sh sweep            Health view of the LIVE registry: per-session
 #                                             STATUS/age/tmux-presence + case-collision scan. Read-only.
 #
 # <name> accepts any case/spacing; it is normalized to Title-Case-Hyphen the same way new-remote-claude.sh
@@ -23,7 +23,7 @@ case "$cmd" in
   archive|revive)
     raw="${2:-}"
     [ -n "$raw" ] || { echo "ERR_USAGE: archive-remote-claude.sh $cmd <name>" >&2; exit 2; }
-    # Pass the raw name through — rc_archive/rc_revive resolve it case-insensitively against the
+    # Pass the raw name through: rc_archive/rc_revive resolve it case-insensitively against the
     # actual stored names, so any casing/spacing matches (e.g. "mcp dev lab" -> "MCP-Dev-Lab").
     if [ "$cmd" = "archive" ]; then rc_archive "$raw"; else rc_revive "$raw"; fi
     ;;

@@ -5,11 +5,19 @@ description: Synthesize durable state before a /compact, then closeout. On compa
 
 # Pre compact synthesis
 
-You make sure the next Claude, the one that wakes post compact reading only the compaction summary plus durable files, continues without losing the thread. Compaction is a pause, not death (operating-doctrine P2).
+You make sure the same agent continues after compaction without losing the thread, using its summary and durable files. Compaction is a pause, not death (`CONTEXT/how-i-work.md` P2).
 
 Four places survive a compact verbatim: git, auto-memory, the task list, and durable anchor files. The conversation does not. So anything worth carrying forward lands in one of those four before the compact fires. A perfect compact is one where post-compact-you resumes cold from files alone and reaches the same decisions.
 
 The PreCompact shell hook (`~/OPS/.claude-config/hooks/pre-compact.sh`) already wrote the mechanical snapshot (git state, branch, recent commits) under `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<workspace>/pre-compact-<ts>.md`. Your job is the thoughtful synthesis on top of it, plus the closeout hygiene pass. Work fast and complete: 60 to 90 seconds on a light session, five minutes on a heavy one. Speed never outranks completeness. Knowledge that dies with the context is the one loss this skill prevents.
+
+## Choose the break proactively
+
+At a completed research wave, a reviewed change, or a settled plan before a large build, take a compaction break on your own judgment. Do not wait for the context-watch warning: context-watch and automatic compaction are safety nets, and a break taken at a clean seam costs less than one forced mid-step. A fresh compaction followed by no substantive work does not need another cycle.
+
+Checkpoint before a ceiling, not only before a compact. When a usage window (the plan's rolling or weekly limit) nears full, a spend limit is close, or a lane dies on a 429, write the anchor now. A limit can stop every lane and the foreman in the same minute, and a context window never gets the chance to warn: a monthly spend cap once stopped two build lanes mid-change, and the checkpoint written minutes earlier carried the resume.
+
+Save exact user decisions, boundaries, unresolved questions, failed approaches, and hard-to-reconstruct identifiers in the anchor before requesting compaction. An API acknowledgement or a completed chat reply does not prove compaction happened. Read [self-compact-cycle.md](self-compact-cycle.md) for the arming order and the checks a host compactor must pass.
 
 ## Pause or close first
 
@@ -22,20 +30,21 @@ This is the PAUSE ritual. The session continues after `/compact`, so it does NOT
 
 Explicit "compact" / "pre-compact" and the `[context-watch]` nag are unambiguous pause signals. Proceed, no need to ask.
 
+Objectives complete is not a close signal either. When the tracked list empties, write the durable state (this skill), then say the work is done and offer close, archive, or keep open; the close itself waits for the operator's explicit word. A close bills time, writes to external systems, and ends the session you are speaking from, so it is the operator's call, never an inference. Never chain synthesis straight into session-close on your own.
+
 ## The four artifacts
 
 Walk in order. State each one's state in a sentence, then act, or surface for confirmation when the action is irreversible.
 
 1. Git. `git status --short` per repo touched. Uncommitted changes? Local commits ahead of remote? Messages meaningful to a cold reader? Surface dirty state, never silently commit or push. Push to main is irreversible; never assume authorization.
-2. Auto-memory. Walk the session's moments for lessons worth keeping (operator feedback, a surprising discovery, a non-obvious project fact, an external-system reference). Save anything unsaved under `~/.claude/projects/<workspace>/memory/` with the standard four-type frontmatter, and index it. Skip code patterns, ephemeral state, CLAUDE.md duplicates. Then commit and push the mirror at `~/OPS/.claude-memory/`, or it dies at the next clean clone (see anti-patterns for why this one commit is allowed).
+2. Auto-memory. Walk the session's moments for lessons worth keeping (operator feedback, a surprising discovery, a non-obvious project fact, an external-system reference). Save anything unsaved under `~/.claude/projects/<workspace>/memory/` with the standard four-type frontmatter, and index it. Skip code patterns, ephemeral state, CLAUDE.md duplicates. Then commit and push the mirror at `~/OPS/.claude-memory/`, or it dies at the next clean clone (see anti-patterns for why this one commit is allowed). Push only when `~/OPS/.claude-config/bin/origin-private-check ~/OPS` exits 0: memory must never reach a public origin. On any other exit, keep the commit local and tell the Operator the reason it printed.
 3. Task list. Mark done tasks completed, delete speculative ones, add follow-on work that emerged. The summary preserves the list verbatim, so a clean list means a clean summary.
 4. Durable anchor. Choose ONE by session type:
-   - Fleet (AC_ROOT + AC_NAME set, journal exists): run `ac-pre-compact --silent`. Do not duplicate elsewhere.
-   - Solo project with a `SESSION_HANDOFF.md`: update it with what shipped, what is queued, and pointers, then commit and push it.
-   - Solo project without one: offer to create it if the session was significant. Do not impose.
-   - Solo outside a project: git plus memory plus the task list carry it.
+   - Project with a `SESSION_HANDOFF.md`: update it with what shipped, what is queued, and pointers, then commit and push it.
+   - Project without one: offer to create it if the session was significant. Do not impose.
+   - Outside a project: git plus memory plus the task list carry it.
 
-Lead every anchor's reading order with the OPS standing layer (`CONTEXT/operating-doctrine.md`, `working-preferences.md`) before project state, and confirm OPS is synced (`git -C ~/OPS pull --ff-only`). A session that re-grounds in project facts but not the doctrine drifts from how the operator wants work done.
+Lead every anchor's reading order with the OPS standing layer (`CONTEXT/how-i-work.md`; `CONTEXT/core.md` is always loaded) before project state, and confirm OPS is synced (`git -C ~/OPS pull --ff-only`). A session that re-grounds in project facts but not the doctrine drifts from how the operator wants work done.
 
 ## The resume protocol block
 
@@ -63,19 +72,21 @@ The fifth stage makes the workspace clean and the docs true. Run on every closeo
 1. Run the machine gate: `~/OPS/.claude-config/bin/verify-ops.sh --quiet`. Fix every FAIL now or surface it with a reason.
 2. Flush the memory cache. Every flush-queue line gets one of five dispositions (folded, split, kept, promoted-to-doctrine, promoted-to-standing-orders) and is then deleted. This is a gate, not a suggestion.
 3. Docs reflect reality, per repo touched: CHANGELOG line, no doc claim made false, shipped IDEAS entries removed. "Fix it in a follow-up" is the violation this kills.
-4. Sweep scratch files this session created.
-5. Stamp it: `mkdir -p ~/.local/state/ops && date -Is > ~/.local/state/ops/last-closeout`.
+4. Sweep scratch files this session created, and prune merged branches and worktrees where `.claude-config/bin/branch-gc` is installed (optional tool; the detail is in `closeout-hygiene.md`).
+5. Reconcile pending items in every repo this session touched: delete what the work completed, correct what drifted, route new pending work to its home (`closeout-hygiene.md` step 5).
+6. Update the operator's notes vault if they keep one (optional, `closeout-hygiene.md` step 6).
+7. Stamp it: `mkdir -p ~/.local/state/ops && date -Is > ~/.local/state/ops/last-closeout`.
 
 Before you flush, feed the work-log: one narrative line so a multi-compact session's eventual close reads what happened. Compaction never logs time or touches a ticket. If the session shipped a migration or refactor, prose docs are not enough; see the migration vectors in `closeout-hygiene.md`.
 
 ## Process and exit
 
-1. Read the latest `pre-compact-<ts>.md` snapshot if it exists; do not redo its mechanical work. If it is missing, run the hook manually, then continue.
-2. Diagnose session type (fleet, solo-with-handoff, solo-bare) and branch.
+1. Read the latest `pre-compact-<ts>.md` snapshot if it exists; do not redo its mechanical work. Check its branch and cwd lines are this session's before trusting it. If it is missing, run the hook manually, then continue.
+2. Diagnose session type (project with a handoff, project without one, outside a project) and branch.
 3. Walk the four artifacts in order, acting or surfacing per artifact.
 4. Append the work-log line, then run closeout hygiene.
 5. Print the readiness summary.
-6. Choose the exit. In tmux, a wrap-up trigger IS the go: run the whole self-compact cycle (`self-compact-cycle.md`), do not prepare and wait. Take the manual exit (print the summary, let the operator fire `/compact`) only when not in tmux, when the operator explicitly claimed the compact ("I'll compact myself", "hold off"), or when an ASK OPERATOR item is still open. Never compact over an unanswered question. On the manual exit, have the operator fire `/compact <instruction>` with the preservation instruction so a manual compact keeps the same detail the automated cycle does; the single source of that text is the `PRESERVE` variable in `~/OPS/.claude-config/bin/compact-cycle.sh`, so point at it rather than restating the points here.
+6. Choose the exit. The default is the manual exit: print the readiness summary and the operator fires `/compact`. Self-compaction needs a host compactor that verifies completion, and OPS ships none; when the host provides one, take the automated exit through `self-compact-cycle.md` and run the whole cycle rather than preparing and waiting. Take the manual exit even then when the operator explicitly claimed the compact ("I'll compact myself", "hold off") or an ASK OPERATOR item is still open. Never compact over an unanswered question. On the manual exit, name the host: T3 Code and a Codex terminal take bare `/compact` (T3 sends `/compact <text>` as ordinary chat, so the preservation has to live in the anchor); a Claude Code terminal takes `/compact <instruction>`, and the instruction in `self-compact-cycle.md` keeps the detail a lossy default summary drops.
 
 ## Readiness summary
 
@@ -98,10 +109,10 @@ Keep it tight. Four to five lines, no wall of text.
 - Never silently commit, push, or merge during synthesis, with one exception: the `~/OPS/.claude-memory/` mirror, which is pure additive sync the operator wants automated. Surface even that before committing; if told to skip, skip.
 - Never push to main without authorization. An earlier in-conversation "push to main" does not cover pre-compact housekeeping commits.
 - Never invent a handoff doc for a project without one. Offer, do not impose.
-- Never duplicate fleet `ac-pre-compact` work. If AC_ROOT is set and the script exists, dispatch to it.
 - Do not over-save memories. A bare session produces zero new ones, and that is correct.
 
 ## Edge cases
 
-- Context low (<30%) but the user says compact: confirm they want it now; synthesis is fine to run regardless.
+- Context low but the user explicitly says compact: preserve state and take the exit without asking again (the automated exit when a host compactor exists, the manual `/compact` otherwise).
 - Dirty tree, user mid-thought: surface, do not act. They may want the work-in-progress to die with the session.
+- No native task tools: keep task state in the durable anchor and continue its NEXT ACTION after compaction without asking whether to proceed.

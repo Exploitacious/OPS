@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# hooklib.sh — shared helpers for the OPS hooks. SOURCED, never executed.
+# hooklib.sh: shared helpers for the OPS hooks. SOURCED, never executed.
 #
 # The hooks originally parsed their PreToolUse / compaction JSON payloads with
 # an inline `python3 -c ...` heredoc. Windows (Git Bash) has NO `python3` shim
-# — winget ships python.exe / py.exe only — so every such call resolved to 127
+# (winget ships python.exe / py.exe only), so every such call resolved to 127
 # and the surrounding `|| exit 0` silently DISABLED the hook: git-guard's hard
 # gates, secrets-guard, and the compaction resume banner all became no-ops.
 #
@@ -59,7 +59,7 @@ sys.stdout.write("" if cur is None else str(cur))' "$path" 2>/dev/null)"; then
 
 # Resolve a Python interpreter: python3 (Linux/macOS) then python / py (Windows
 # has NO python3 shim). Prints the command name; returns 2 if none found. Used
-# to run python-shebang'd helpers (e.g. ac-memory-index) portably instead of
+# to run python-shebang'd helpers (e.g. bin/memory-index) portably instead of
 # relying on the dead `#!/usr/bin/env python3` line on Windows.
 hook_python() {
   # VERIFY each candidate actually reports "Python 3" before returning it: on
@@ -87,12 +87,49 @@ hook_pathnorm() {
   fi
 }
 
-# work_session_key — the stable per-session key for session-scoped state files
+# Validate the two forms deploy creates: a symlink or a small import file.
+# A filename mentioned in prose, a fenced example, or an import of a different
+# checkout cannot prove boot. Match the real target, not just its basename.
+hook_core_rule_matches() {
+  local rule="$1" core="$2" expected resolved line imported=""
+  local import_re='^([^[:space:]\\]|\\[[:space:]])+$'
+  [ -f "$core" ] && [ -s "$core" ] && [ -r "$core" ] \
+    && [ -f "$rule" ] && [ -r "$rule" ] || return 1
+  expected="$(readlink -f "$core" 2>/dev/null)" || return 1
+  [ -n "$expected" ] || return 1
+  if [ -L "$rule" ]; then
+    resolved="$(readlink -f "$rule" 2>/dev/null)" || return 1
+  else
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        ''|'#'*) continue ;;
+        @*) [ -z "$imported" ] || return 1; imported="${line#@}" ;;
+        *) return 1 ;;
+      esac
+    done < "$rule"
+    # Claude ends imports at unescaped whitespace; quoting the path does not
+    # escape it. Windows deploy normalizes slashes and escapes each space.
+    [[ "$imported" =~ $import_re ]] || return 1
+    imported="${imported//\\ / }"
+    imported="$(hook_pathnorm "$imported")"
+    case "$imported" in
+      \~/*) imported="$HOME/${imported:2}" ;;
+      /*) ;;
+      *) imported="$(dirname "$rule")/$imported" ;;
+    esac
+    [ -f "$imported" ] && [ -r "$imported" ] || return 1
+    resolved="$(readlink -f "$imported" 2>/dev/null)" || return 1
+  fi
+  [ "$resolved" = "$expected" ]
+}
+
+# work_session_key: the stable per-session key for session-scoped state files
 # under ~/.claude-compact-cycle/ (session-start stamp, work-log, resume baton).
 # MUST match the resume-baton key formula in the pre-compact-synthesis skill so
 # all surfaces agree on one name for a session:
 #     tmux name | tr ':. ' '---' | keep [A-Za-z0-9-]
-# In tmux: the live session name — stable for the life of the session, which is
+# In tmux: the live session name, stable for the life of the session, which is
 # why session-work-init.sh registers LAST at boot. Outside tmux: fall back to
 # the encoded cwd (the workspace-key convention) so a non-tmux session still
 # keys deterministically. Prints the key; never fails.

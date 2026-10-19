@@ -1,145 +1,144 @@
-# BOOTSTRAP — first-launch configuration of a fresh OPS copy
+# BOOTSTRAP: first-launch configuration of a fresh OPS copy
 
-You are reading this because `CLAUDE.md` startup step 0 found no
-`CONTEXT/.bootstrapped` marker. This copy of OPS has never met its Operator.
-Your job this session is to run the bootstrap: interview the new user, write
-their identity and preferences into `CONTEXT/`, and hand them a harness that
-already knows who they are. On a fresh copy, the bootstrap IS the session —
-do not run the normal startup sequence, and do not try to read `about-me.md`
-or `brand-voice.md`; they ship as unfilled templates. You are about to rewrite them with the Operator's real content.
+You are reading this because `CONTEXT/.bootstrapped` does not exist (the
+first-launch gate in `AGENTS.md`, also named in `CONTEXT/core.md`). This copy
+of OPS has never met its Operator. Your job this session is the bootstrap:
+interview the new user, write who they are and how they want work run into
+`CONTEXT/`, and hand them a harness that already knows them. On a fresh copy
+the bootstrap IS the session: do not start normal work, and do not treat
+`USER.md` or `voice.md` as real; they ship as templates you are about to
+replace.
 
 ## Prime directive
 
-The shipped `CONTEXT/` files (`operating-doctrine.md`, `foreman-charter.md`,
-`fleet-doctrine.md`, `project-kata.md`, and the generic `working-preferences.md`)
-are already correct doctrine — the *how we work* layer. What's missing is the
-*who* layer: `about-me.md`, `brand-voice.md`, and the handful of
-Operator-specific knobs inside `working-preferences.md` and `project-kata.md`.
-Bootstrap fills the *who* without disturbing the *how*.
+The doctrine already ships and stays generic: `core.md` (always loaded),
+`how-i-work.md` (P1-P15 and the situational rules), `model-roles.md`, and
+`project-kata.md`. The template sync (`harness-update`) keeps updating those
+files, so bootstrap never edits them, with one exception named in Stage 1
+(the kata's Operator overlays). What is missing is the *who* layer, and it
+lives only in files no template sync touches:
+
+- `CONTEXT/USER.md`: who the Operator is and who matters around them.
+- `CONTEXT/voice.md`: how they write (the voice slot).
+- `CONTEXT/standing-orders.md`: their rulings, each dated with its why. A
+  ruling overrides the matching default in `how-i-work.md` without editing
+  it.
+- The slots `CONTEXT/work-tracking.md`, `team.md`, and `tools.md`.
 
 Run it in the harness's own idiom, because you are configuring that harness:
-- **AskUserQuestion, multiple-choice-first.** Every question is a clickable
-  form with concrete options and a pre-filled recommended default, per
-  `CONTEXT/working-preferences.md` § "How to Ask Me Questions". Typing is the
-  fallback, not the ask.
+
+- **The structured question tool, multiple-choice first.** Every question is
+  a clickable form with concrete options and a recommended default
+  (`how-i-work.md` § Intake detail). Typing is the fallback.
 - **Never ask what you can detect.** Stage 0 recon answers the stack and
-  environment questions for free. Asking a user to type what `git config`
-  already knows is exactly the friction this harness exists to kill.
-- **Document the why as you write.** Files you generate follow the same
-  standard as everything else here (`operating-doctrine.md` Principle 1) —
-  a non-obvious choice gets its reason next to it.
-- **Stages are resumable.** The `.bootstrapped` marker records the last stage
-  completed. Stage 1 makes the harness fully usable; Stages 2 and 3 are
-  offered, not forced. A user can stop after Stage 1 and come back days later.
+  environment questions for free.
+- **Document the why as you write** (P1): a non-obvious choice gets its
+  reason next to it, and every standing order carries its why.
+- **Stages are resumable.** The marker records the last stage completed.
+  Stage 1 makes the harness fully usable; Stages 2 and 3 are offered, not
+  forced.
 
 ---
 
-## Stage 0 — Recon (silent; before any question)
+## Stage 0: Recon (silent; before any question)
 
 Detect what the machine already knows so you never ask for it. Run these
-read-only probes, absorb the results, and use them to pre-populate the stack
-section of `about-me.md` and the recommended defaults in every Stage 1
-question. Report a one-line summary of what you found before the first
-question ("Here's what the box already told me — correct anything wrong"),
-so recon is transparent, not spooky.
+read-only probes, absorb the results, and use them to pre-fill `USER.md` and
+the recommended defaults in every Stage 1 question. Report a one-line summary
+before the first question ("Here's what the box already told me; correct
+anything wrong"), so recon is transparent.
 
 - **Identity the box already has:**
   ```bash
   git config --get user.name; git config --get user.email
   gh auth status 2>&1 | head
   ```
-- **Installed toolchain** (probe presence, don't install anything):
+- **Installed toolchain** (probe presence, install nothing):
   ```bash
   for t in docker node python3 pwsh go rustc psql terraform kubectl; do \
     command -v "$t" >/dev/null && printf '%s %s\n' "$t" "$($t --version 2>&1 | head -1)"; done
   ```
-- **MCP servers already configured:** run `claude mcp list` if available, and
-  check the deferred-tool surface (ToolSearch) for connected servers — those
-  reveal which platforms the Operator already wired up (data feeds, ticketing,
-  finance, cloud). Named MCP servers are strong signal for the domain.
+- **MCP servers already configured:** `claude mcp list` if available, and the
+  deferred-tool surface (ToolSearch) for connected servers. Named servers are
+  strong signal for the domain and for the `tools.md` slot.
+- **The boot:** confirm the core is loaded: `~/.claude/rules/ops-core.md`
+  should resolve to `CONTEXT/core.md` (`readlink -f`). If it does not, tell
+  the Operator to run `.claude-config/deploy.sh` before going on: without it,
+  later sessions start without the core.
 - **Existing Claude Code setup:** list `~/.claude/skills/` and read
-  `~/.claude/settings.json` (model aliases, effort, env) if present — a
-  returning user may carry preferences worth honoring rather than overwriting.
-  Note the values of `permissions.defaultMode`,
+  `~/.claude/settings.json`. Note the values of `permissions.defaultMode`,
   `skipDangerousModePermissionPrompt`, `remoteControlAtStartup`, and
-  `autoCompactEnabled`: Round F discloses them and asks about them. Never edit
-  this file: on Linux and macOS it is a symlink into the Operator's tracked
-  linuxploitacious checkout.
+  `autoCompactEnabled`: Round F discloses them and asks about them. Never
+  edit this file: on Linux and macOS it is a symlink into the Operator's
+  tracked linuxploitacious checkout.
 - **Do the pinned models answer on this plan:**
   ```bash
   .claude-config/bin/model-probe.sh --list   # what the settings pin; no API call
   .claude-config/bin/model-probe.sh          # one short request per distinct id
   ```
-  Report only: it prints `ok`, `FAIL`, or `UNSURE` per pinned id and never edits
-  settings. User hooks, plugin sync, tools, and transcript persistence are
-  disabled; the CLI can update its own cache/auth state, and policy-managed
-  hooks still apply. Model availability is plan-dependent and most Operators
-  don't know their own entitlements, so check it and report the result in the
-  recon summary instead of asking. If an id FAILs, report the CLI error and
-  what that pin serves (`CONTEXT/model-roles.md`), and point the
-  Operator at "Settings, pins, and the shared Stage-1 file" in that file; do
-  not edit a settings file to work around it. A failed request can also mean
-  an authentication, network, or CLI problem, not a missing entitlement.
-  `UNSURE` (a timeout or a usage
-  limit) says nothing about entitlement; mention it and move on.
-- **Repos under `~`:** a shallow scan for `.git` dirs (e.g.
-  `find ~ -maxdepth 3 -name .git -type d 2>/dev/null | head -40`) sketches
-  what the Operator actually builds — languages, org names, project count.
+  Report only: it prints `ok`, `FAIL`, or `UNSURE` per pinned id and never
+  edits settings. If an id FAILs, report the CLI error and what that pin
+  serves (`CONTEXT/model-roles.md`), and point the Operator at "Settings,
+  pins, and the shared Stage-1 file" in that file; do not edit a settings file
+  to work around it. A failure can also mean authentication, network, or CLI
+  trouble, not a missing entitlement. `UNSURE` (a timeout or a usage limit)
+  says nothing about entitlement.
+- **T3 Code host:** `ls -d ~/.t3/runtime/versions/*/t3 2>/dev/null` (or a
+  `T3CODE_HOME` in the environment). If present, Round G applies.
+- **Repos under `~`:** a shallow scan for `.git` dirs
+  (`find ~ -maxdepth 3 -name .git -type d 2>/dev/null | head -40`) sketches
+  what the Operator builds.
 
-Recon is inference, not truth (P3): everything you infer here is a *default to
-confirm* in Stage 1, never a fact you write unverified.
+Recon is inference, not truth (P3): everything inferred here is a default to
+confirm in Stage 1, never a fact written unverified.
 
 ---
 
-## Stage 1 — Core (~15 min; makes the harness usable)
+## Stage 1: Core (about 15 minutes; makes the harness usable)
 
-Run as a small number of AskUserQuestion rounds. Lead every option list with
-the recon-derived recommendation. Keep it to the decisions that actually
-change behavior — resist turning this into a form-filling marathon.
+Run a small number of question rounds. Lead every option list with the
+recon-derived recommendation, and keep to the decisions that change behavior.
 
-**Round A — Identity.**
+**Round A: Identity.**
 - Name (pre-fill from `git config user.name`).
-- Role / title, in their words (free text; offer a couple of recon-inferred
-  guesses as options).
+- Role or title, in their words (offer a couple of recon-inferred guesses).
 - Organization type: `Solo / freelance` · `Small team or startup` ·
   `Established company` · `Enterprise` · `Other`.
-- Primary domain: infer candidates from repos + MCP servers, offer them plus
-  `Other`. This is the single most load-bearing answer — it colors every
-  later default and the domain-partner skill.
+- Primary domain: candidates inferred from repos and MCP servers, plus
+  `Other`. The most load-bearing answer: it colors every later default.
+- People: who gates their decisions, and whether they want a team roster
+  now (`team.md`) or later.
 
-**Round B — What they'll use the harness for.** Multi-select where useful:
-`Building / automation / integration` · `Writing & documents` ·
-`Research & analysis` · `Client or stakeholder deliverables` ·
+**Round B: What they will use the harness for.** Multi-select:
+`Building / automation / integration` · `Writing and documents` ·
+`Research and analysis` · `Client or stakeholder deliverables` ·
 `Ops / infrastructure` · `Data / trading / quant` · `Other`. Their picks set
-the emphasis of `about-me.md` and which AskUserQuestion patterns in `CLAUDE.md`
-matter most.
+the emphasis of `USER.md`.
 
-**Round C — Autonomy posture.** Explain the trade honestly, then let them
+**Round C: Autonomy posture.** Explain the trade honestly, then let them
 choose:
-- `Full autonomy — the go is the switch` **(recommended default)**: plan hard
-  up front, then run end-to-end with zero re-prompts, merging green reviewed
-  work without asking. This is what the shipped `working-preferences.md` and
-  `foreman-charter.md` are tuned for.
-- `Checkpoint mode`: pause at each major step for confirmation before
-  proceeding.
+- `Full autonomy: the go is the switch` **(recommended default)**: plan hard
+  up front, then run end to end with zero re-prompts, merging green reviewed
+  work without asking. This is what `core.md` § "Intake, then autonomy"
+  describes.
+- `Checkpoint mode`: pause at each major step for confirmation.
 - `Confirmation-heavy`: confirm before any write, commit, or external action.
 
-  Whatever they pick, edit `working-preferences.md` § "Before Starting Any
-  Task" item 3 and the "go is the switch" language to match — and leave a
-  one-line note saying which posture was chosen and why, so a future session
-  doesn't silently revert it.
+  Record anything other than the default as a dated standing order that
+  names the posture and why, so a later session neither reverts it nor
+  silently applies the core's default over it.
 
-**Round D — Prioritization frameworks.** The shipped default is Theory of
-Constraints + Improvement Kata + Phoenix Project lens (see
-`working-preferences.md` § "Framework Alignment"). Offer: `Keep all three` ·
-`Keep some` (multi-select which) · `Swap in my own` (capture theirs) ·
-`Drop — no framework overlay`. Rewrite the "Framework Alignment" section to
-reflect the choice; don't leave defaults they rejected.
+**Round D: Prioritization frameworks.** The shipped defaults are Theory of
+Constraints, Improvement Kata, and the Phoenix Project lens
+(`how-i-work.md` § Framework alignment). Offer: `Keep all three` ·
+`Keep some` (multi-select) · `Swap in my own` (capture theirs) ·
+`Drop the framework overlay`. Record any change as a standing order; leave
+`how-i-work.md` itself untouched.
 
-**Round E — Output defaults.** Confirm or override: default document format
-(`.docx` / `.md` / other), conversation register (casual vs formal), and
-whether they want the rich-Artifact treatment for complex data offered by
-default. Fold answers into `working-preferences.md` § "Output Defaults".
+**Round E: Output defaults.** Confirm or override the default document
+format (`.docx` / `.md` / other), the conversation register (casual or
+formal), and whether a rendered visual page for complex data is offered by
+default. Record overrides as standing orders.
 
 **Round F: Permission mode (always asked; never skipped or defaulted
 silently).** Before the question, tell the Operator plainly what the Stage-1
@@ -222,156 +221,141 @@ Check it took: in a new shell, launch `claude`; the footer shows the normal
 mode, Remote Control has not connected, and a shell command without an
 existing approval asks before it runs. Check IDE launchers separately.
 Record the choice in the marker (`permissions=keep`, `permissions=shell`, or
-`permissions=managed`) and as a dated line under `working-preferences.md`
-§ "Standing Orders", so a later session never quietly reverts it.
+`permissions=managed`) and as a dated row in `CONTEXT/standing-orders.md`,
+so a later session never quietly reverts it.
+
+**Round G: T3 Code browser (T3 hosts only; skip when recon found no T3).**
+T3 Code's headless browser (its page previews and browser tools) needs a
+one-time setup on each host: `sudo <t3 binary> browser setup`, where the
+binary is the newest `~/.t3/runtime/versions/<version>/t3`. It installs the
+browser's system libraries and, on Ubuntu 23.10 and later, an AppArmor profile
+scoped to T3's chrome-headless-shell (`/etc/apparmor.d/t3-chrome-headless-shell`);
+it never changes the system-wide user-namespace restriction. Recommend
+`Enable it now` and show the exact command:
+
+```bash
+t3="$(ls -1d ~/.t3/runtime/versions/*/t3 | sort -V | tail -1)"; sudo "$t3" browser setup
+```
+
+On the Operator's yes, run it if passwordless sudo is available
+(`sudo -n true`); otherwise hand them the command to run. It is a system-wide
+change, so it needs that yes. `DEPLOYMENT.md` § "T3 Code hosts" has the
+detail.
+
+On a T3 Code host, note for Round F: T3 sets each thread's permission mode
+from its own settings, so the shell-function option above does not reach T3
+threads; the managed-settings option does.
 
 ### What Stage 1 writes
 
-1. **`CONTEXT/about-me.md`** — created fresh from the answers, with the
-   recon-derived stack. Use this section shape (it mirrors what the rest of
-   the harness expects to read):
-   - Opening: who they are, role, org, domain — one tight paragraph.
-   - "What I Actually Do Day to Day" — their real work areas.
-   - "Current Priorities" — a short ranked list.
-   - "Technical Stack" — populated from Stage 0 recon, confirmed in Round A.
-   - Optional "Leadership Structure" only if they named a team/reporting line.
-   Write only what they gave you. Do not invent clients, teammates, or
-   metrics — an honest short file beats a padded one.
+1. **`CONTEXT/USER.md`**, replacing the template: every EXAMPLE block, the
+   banner, and the `USER-TEMPLATE: unfilled` canary line (`verify-ops.sh`
+   check 21 fails on a bootstrapped copy that still carries it). Keep the
+   section shape; write only what the Operator gave you or confirmed from
+   recon. Do not invent clients, teammates, or metrics; an honest short file
+   beats a padded one.
 
-2. **`CONTEXT/brand-voice.md`** — a *starter* file, so the normal startup
-   sequence never hits a missing read before Stage 2 runs. Seed it with the
-   standard three-register skeleton (see Stage 2 for the full structure) and
-   whatever register cues Round E surfaced, and open the changelog with a row
-   marked "Stage 1 starter — refine via Stage 2." State in the file that voice
-   has not yet been evidence-captured.
+2. **`CONTEXT/voice.md`**, a starter, so a writing task never meets an empty
+   slot before Stage 2. Keep the section shape, fill the three registers with
+   whatever cues Round E and the interview surfaced, mark the rest "not yet
+   captured", and open the changelog with a row "Stage 1 starter; refine in
+   Stage 2". Remove the template banner and the synthetic samples.
 
-3. **`CONTEXT/working-preferences.md`**: edited in place per Rounds C, D, E, and F (the permission choice as a dated Standing Orders line).
-   It already ships generic; you are adjusting the Operator-specific knobs,
-   not rewriting it.
+3. **`CONTEXT/standing-orders.md`**: replace the EXAMPLE row with one dated
+   row per ruling from Rounds C through F (the permission choice always gets
+   a row), each with its why.
 
-4. **`CONTEXT/project-kata.md` § Operator overlays** — fill the overlays
-   section at the bottom with what you now know (default LICENSE, which file
-   plays the spec slot, default org/cluster name for `PROJECTS/<org>/<repo>`).
-   `working-preferences.md` § "Project Work" already promises bootstrap does
-   this — deliver on it.
+4. **`CONTEXT/project-kata.md` § Operator overlays**: the default LICENSE,
+   which file plays the spec slot, and the default org or cluster name for
+   `PROJECTS/<org>/<repo>`. This is the one doctrine file bootstrap edits;
+   a later template sync shows it as a CONFLICT to port by hand.
 
-5. **`CONTEXT/work-tracking.md`** — fill in the Operator's real time / ticket /
-   board tools from Round A recon (which PSA or ticketing system, how time gets
-   logged, any kanban board, a personal task tracker), replacing the EXAMPLE
-   blocks; delete any block for a surface they don't use. This is the only file
-   the `session-close` reconciliation gate reads to learn how to log time and
-   update work items at close. Leave it accurate or leave it empty — the gate
-   degrades gracefully when a surface is unconfigured — but never leave stale
-   EXAMPLE content pretending to be a real system.
+5. **The slots.** `CONTEXT/work-tracking.md`: the Operator's real time,
+   ticket, and board tools (which system, how time is logged), replacing the
+   EXAMPLE blocks and deleting any block for a surface they do not use. This
+   is the file the `session-close` reconciliation gate reads; leave it
+   accurate or empty, never stale EXAMPLE content posing as a real system.
+   `team.md` and `tools.md`: fill what Round A and recon gave you, or leave
+   the templates (every skill that reads them degrades gracefully).
 
-6. **Seed the auto-memory pool.** Write a handful of durable "who the Operator
-   is" entries into the cross-project auto-memory pool (`.claude-memory/`,
-   adopted via `ac-memory-init`), following `CONTEXT/foreman-charter.md`
-   § "Where knowledge goes". Capture role, domain, stack, and the chosen
-   autonomy posture — the facts every future session should inherit without
-   re-reading. Pointers only, never secret values (secrets-guard blocks those).
+6. **Seed the auto-memory pool.** Write a few durable "who the Operator is"
+   entries into the cross-project memory pool, routed per `core.md`
+   § "Memory and where knowledge goes", then make sure the pool is git-synced:
+   `.claude-config/bin/memory-init` (deploy runs it; rerun it if this
+   session's memory dir is not yet a symlink into `.claude-memory/`).
+   Pointers only, never secret values (`secrets-guard` blocks them).
 
-7. **Write the marker.** Create `CONTEXT/.bootstrapped` recording the stage and
-   date (see "The marker" below). Its presence is what flips `CLAUDE.md`
-   startup step 0 from bootstrap to normal operation. After this write, the
-   harness is fully usable.
+7. **Write the marker.** Create `CONTEXT/.bootstrapped` recording the stage,
+   the date, and the Round F choice (see "The marker"). Its presence flips the
+   first-launch gate to normal operation. After this write, the harness is
+   fully usable.
 
-### Closing move of Stage 1 — the first domain partner
+### Closing move of Stage 1: the first domain partner
 
 Before you finish, offer to scaffold the Operator's first **domain-partner
-skill** via the `meta-skill-creator` skill. The pattern: a co-pilot skill
-built around THEIR domain (from Round A) — the questions it always asks, the
-context it always loads, the outputs it always produces. This is how OPS stops
-being a generic harness and becomes *theirs*. Offer it; if they say yes, invoke
-`meta-skill-creator` and build it. If not, note that they can ask for it
-anytime.
-
-Then offer Stage 2 (voice) — runnable now or whenever they next have writing
-samples handy.
+skill** with `meta-skill-creator`: a co-pilot skill built around their domain
+from Round A (the questions it always asks, the context it always loads, the
+outputs it always produces). This is how OPS becomes theirs. Offer it; build
+it on a yes, or note they can ask anytime. Then offer Stage 2.
 
 ---
 
-## Stage 2 — Voice (offered at end of Stage 1; runnable anytime)
+## Stage 2: Voice (offered at the end of Stage 1; runnable anytime)
 
-Goal: replace the Stage 1 starter `brand-voice.md` with an evidence-based voice
-profile, so deliverables actually sound like the Operator instead of like a
-model's house style.
+Goal: replace the Stage 1 starter `voice.md` with an evidence-based profile,
+so deliverables sound like the Operator instead of a model's house style.
 
 **State the privacy boundary first, plainly:** all analysis runs locally on
-this machine. You read their writing here, extract patterns here, and write the
-result to `CONTEXT/brand-voice.md` here. Nothing is uploaded, sent, or shared.
-Say this before you ask them to point at anything.
+this machine. You read their writing here, extract patterns here, and write
+the result to `CONTEXT/voice.md` here. Nothing is uploaded or shared. Say this
+before you ask them to point at anything.
 
-**Preferred path — mine a real corpus.** Ask them to point you at any local
-body of their own writing:
-- A sent-mail export (`.mbox`, `.eml`, a folder of saved messages).
-- Chat / channel logs they've exported (Slack, Teams, Discord).
-- Their own writing already on the box: `README`s, PR descriptions, commit
-  messages (`git log --author=<them> --format='%B'`), docs, past deliverables.
+**Preferred path: mine a real corpus.** Ask them to point at local writing of
+their own: a sent-mail export (`.mbox`, `.eml`, a folder of saved messages),
+exported chat logs, or writing already on the box (READMEs, PR descriptions,
+`git log --author=<them> --format='%B'`, docs, past deliverables). Read a
+representative sample and fill every section of `voice.md`: tone, the three
+registers with a real example each, words they use and avoid (pulled from the
+corpus, not guessed), formatting, the client deliverable brand kit (their real
+logo file, colors, fonts, section order, contact block; or an honest "no brand
+kit yet; ask before styling deliverables"), email and chat patterns, verbatim
+writing samples labeled by register, and the changelog.
 
-Read a representative sample and extract the **three-register structure** the
-harness expects — the same shape used across the doctrine:
-1. **Tone descriptors** — a few lines on how they read overall.
-2. **Code-switching** — the three registers, each with observed traits and a
-   verbatim example:
-   - *Casual / internal chat* — the rawest register (length, slang, profanity,
-     shorthand).
-   - *Professional email* — greetings, sign-offs, warmth, how they follow up,
-     apologize, give feedback, schedule.
-   - *Deliverable* — structure, precision, the quality bar.
-3. **Words & phrases they use** / **words & phrases to avoid** — pulled from
-   the corpus, not guessed.
-4. **Formatting preferences** — inferred from how they actually format.
-5. **Writing samples** — a handful of verbatim excerpts, labeled by register,
-   as calibration anchors.
-6. **Changelog** table — so the profile is explicitly a living document; invite
-   the Operator to refine it as you observe more.
-7. **Client Deliverable Brand Kit** — the section `brand-voice.md` ships as an
-   EXAMPLE block. Ask the Operator for (or locate on the box) their real logo
-   file, brand colors, fonts, default document section order, and contact
-   block — current models produce markedly better office documents when handed
-   these specifics. If a design system or brand kit already exists elsewhere
-   (a website repo, a marketing folder), keep it the source of truth and
-   record only the essentials plus a pointer. If no brand assets exist yet,
-   write that down explicitly in the section — a truthful "no brand kit yet;
-   ask before styling deliverables" beats an invented palette.
+Ground every claim in the text (P3): quote real lines; never fabricate a
+sample. An honest profile from ten real emails beats an invented one.
 
-Ground every claim in the text (P3) — quote real lines; never fabricate a
-"sample." An honest profile built from ten real emails beats an invented one.
+**Fallback: no corpus.** Run a calibration exercise: take one neutral
+paragraph and present three rewrites (terse and direct, warm and casual,
+formal and structured) as options. Have them pick and react; iterate two or
+three rounds until the samples read like them. Record the converged samples
+and stated preferences, and note in the changelog that the profile is
+preference-based pending a real corpus.
 
-**Fallback — no corpus available.** Run a calibration exercise instead: take
-one neutral paragraph and, using AskUserQuestion, present three rewrites of it
-(terse/direct, warm/casual, formal/structured) as preview options. Have them
-pick and react; iterate two or three rounds until the samples read like them.
-Record the converged samples and the stated preferences as the starter voice,
-and note in the changelog that it's preference-based pending a real corpus.
-
-Overwrite `CONTEXT/brand-voice.md` with the result — every section, including
-the Client Deliverable Brand Kit (filled, or honestly marked empty) — and bump
-the marker to `stage=2`.
+Overwrite `CONTEXT/voice.md` with the result and bump the marker to
+`stage=2`.
 
 ---
 
-## Stage 3 — Tune (propose ~a week of real use in)
+## Stage 3: Tune (propose after about a week of real use)
 
-Once the Operator has actually used the harness for a while, close the loop.
-Review what the sessions revealed — the corrections they made, the defaults
-they kept overriding, the preferences that showed up in auto-memory — and
-propose a concrete set of edits to `working-preferences.md` (and
-`brand-voice.md` where voice drifted from the captured profile). Present the
-proposal as a diff-style summary via AskUserQuestion (accept / adjust / skip
-each item); apply what they approve. Bump the marker to `stage=3`.
+Once the Operator has used the harness for a while, close the loop. Review
+what the sessions revealed (corrections they made, defaults they kept
+overriding, preferences that showed up in auto-memory) and propose concrete
+changes: new or revised standing orders, `USER.md` updates, and `voice.md`
+where the voice drifted from the captured profile. Present them as a
+diff-style list (accept / adjust / skip each); apply what they approve. Bump
+the marker to `stage=3`.
 
-Stage 3 is a proposal, not an ambush — surface it when the current task allows,
-don't interrupt live work to run it.
+Stage 3 is a proposal, not an ambush: surface it when the current task
+allows, never in the middle of live work.
 
 ---
 
 ## The marker
 
-`CONTEXT/.bootstrapped` is a tiny state file. Its presence gates `CLAUDE.md`
-startup step 0; its `stage` value tells a later session what remains to offer.
-Write it as simple key=value lines, e.g.:
+`CONTEXT/.bootstrapped` is a small state file. Its presence gates first
+launch; its `stage` value tells a later session what remains to offer. Write
+it as key=value lines:
 
 ```
 stage=1
@@ -380,11 +364,16 @@ permissions=<keep, shell, or managed: the Round F choice>
 ```
 
 Bump `stage` to `2` after voice capture and `3` after the tune pass. Never
-delete the marker to "re-run" bootstrap — re-running a stage is a matter of
-re-invoking that stage's flow, not tricking the startup gate.
+delete the marker to "re-run" bootstrap; re-running a stage means invoking
+that stage's flow, not tricking the gate.
 
 ---
 
 When Stage 1 is written and the marker is set, tell the Operator plainly that
-OPS is now configured and usable, recap what you captured, and point them at
-Stage 2. From the next session on, `CLAUDE.md` startup runs normally.
+OPS is configured and usable, recap what you captured, and point them at
+Stage 2. From the next session on, startup runs normally.
+
+A copy that predates this layout (it has `about-me.md`, `brand-voice.md`,
+`working-preferences.md`, or `boot-digest.md`) is not a fresh copy: migrate it
+per `DEPLOYMENT.md` § "Migrating to the core boot" instead of re-running
+bootstrap.

@@ -1,6 +1,6 @@
 # .claude-handoffs
 
-Cross-session, cross-profile **handoff batons** — the manual proxy for
+Cross-session, cross-profile **handoff batons**: the manual proxy for
 Claude Code's native `--resume` when resume can't reach (switching
 accounts/profiles, or moving between machines).
 
@@ -15,35 +15,37 @@ too).
 
 Batons are keyed by **project** so parallel sessions on different projects
 never surface or clobber each other's handoffs. The key is the git repo
-toplevel (or the cwd if not in a repo), computed by `key.sh` — the single
+toplevel (or the cwd if not in a repo), computed by `key.sh`, the single
 source of truth used by **both** the notifier hook and the skill, so they
 never drift.
 
 ## Layout
 
-- `key.sh` — emits the project key for the current cwd. Used by
+- `key.sh`: emits the project key for the current cwd. Used by
   `handoff-check.sh` and the `session-handoff` skill.
-- `pending/<project-key>.md` — the in-flight baton for one project. At most
+- `pending/<project-key>.md`: the in-flight baton for one project. At most
   one pending per project; concurrent projects each get their own file. YAML
   frontmatter: `status: pending | consumed`, `project_key`, who wrote it
   (WORK/PERSONAL), timestamp, machine, cwd, git position, and an optional
   pointer to a project's own `SESSION_HANDOFF.md`.
-- `archive/<project-key>-<written_at>.md` — consumed batons, for history.
-- `ACTIVE_HANDOFF.md` — **legacy** single-baton path. No longer written.
+- `archive/<project-key>-<written_at>.md`: consumed batons, for history.
+- `ACTIVE_HANDOFF.md`: **legacy** single-baton path. No longer written.
   `handoff-check.sh` still surfaces one IF its recorded `cwd` matches the
   current session (graceful migration); resume archives it like any other.
 
 ## Flow
 
-1. **Write** — in the leaving session: say *"hand off"* / *"pass to the
+1. **Write**: in the leaving session: say *"hand off"* / *"pass to the
    next session"* (or `/session-handoff`). Runs the full four-artifact
    synthesis (git, memory, tasks), computes the project key, then writes
-   `pending/<key>.md` and commits + pushes it.
-2. **Notify** — the next session in **that same project** (either profile,
+   `pending/<key>.md`, commits it, and pushes it when
+   `.claude-config/bin/origin-private-check` verifies the OPS origin private
+   (the git-guard hook blocks the push otherwise).
+2. **Notify**: the next session in **that same project** (either profile,
    any machine) fires the shared `handoff-check.sh` SessionStart hook, which
    prints a one-line banner if a PENDING baton exists for the project's key.
-   Sessions in other projects see nothing. Notify only — never auto-loads.
-3. **Resume** — say *"resume handoff"* / *"pick up where I left off"*.
+   Sessions in other projects see nothing. Notify only; it never auto-loads.
+3. **Resume**: say *"resume handoff"* / *"pick up where I left off"*.
    Reads the project's baton + referenced files + memory, summarizes state,
    then moves it to `archive/` (marked consumed) so it won't re-fire.
 

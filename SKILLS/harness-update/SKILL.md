@@ -1,16 +1,6 @@
 ---
 name: harness-update
-description: >
-  Use when the Operator says "update the harness", "sync from the template",
-  "pull upstream OPS changes", "what's new upstream", or asks to bring in a
-  specific upstream improvement. Syncs a private, personalized OPS copy with the
-  public upstream OPS template. Template copies share no git history with upstream,
-  so plain merge is impossible; this is the supported path. Runs the scan to
-  classify every file NEW, UPDATE, CONFLICT, IDENTICAL, summarizes the upstream
-  CHANGELOG in plain terms, asks the Operator what to apply, fast-forwards the safe
-  classes, ports conflicts by pattern, runs the gates, lands one commit. Identity,
-  memory, and handoff surfaces are hard-excluded; CONFLICT is never auto-applied.
-  Claude Code only.
+description: "Use when the Operator says update the harness, sync from the template, or pull upstream OPS changes. Scans, classifies, ports conflicts, lands one commit."
 ---
 
 # Harness update
@@ -36,9 +26,25 @@ last_synced=<sha of the upstream commit last pulled>
 
 Created on the first successful sync, updated at commit time. Without it the scan runs first-sync mode: a full tree compare with no baseline, so every difference is CONFLICT and UPDATE is not computable. With it, the scan diffs only what upstream changed since `last_synced` and tells an untouched-local UPDATE from a diverged-local CONFLICT. It lives under `.claude-config/` because the repo root is canonical-file-gated (`CONTEXT/project-kata.md` rule 1).
 
+A marker written before 2026-10-19 names a commit from before the template's history rewrite (a private name removed from one old commit). The scan translates it to its rewritten twin, which has the same tree, prints a NOTE, and stays in delta mode; step 7 then writes the new sha.
+
+## Updating a copy that predates this skill
+
+An older copy may have no marker, no `harness-update-scan.sh`, and none of this skill. Run everything straight from the template, from inside the copy:
+
+```
+git -C ~/OPS remote add ops-template https://github.com/Exploitacious/OPS.git   # once
+git -C ~/OPS fetch ops-template
+git -C ~/OPS show ops-template/main:SKILLS/harness-update/SKILL.md              # this procedure
+f=$(mktemp); git -C ~/OPS show ops-template/main:.claude-config/bin/harness-update-scan.sh > "$f"
+(cd ~/OPS && bash "$f")                                                          # report only
+```
+
+The scanner is self-contained by contract (it finds its root from the working directory and loads no helper file), so a temp copy works in any layout. Because the working directory decides which repo it scans, every command below runs from inside the copy, `(cd ~/OPS && ...)`; run anywhere else, the scan refuses with `ERR_NOREPO` and changes nothing. With no marker it runs a first sync: every file that differs is CONFLICT, so nothing applies itself, and the walk through the flow below is per feature, with the Operator deciding bring in, adapt, or defer. `--apply-safe` from the temp copy only copies NEW files on a first sync. Step 7 writes the first marker, and from then on scans are deltas.
+
 ## The flow
 
-1. Scan, report-only. Run `~/OPS/.claude-config/bin/harness-update-scan.sh`. It ensures the `ops-template` remote exists (HTTPS, no SSH key needed to read a public template), fetches it, and prints a classified report plus a summary line. It touches and commits nothing. Add `--verbose` to list IDENTICAL files too.
+1. Scan, report-only. Run `(cd ~/OPS && .claude-config/bin/harness-update-scan.sh)`. It ensures the `ops-template` remote exists (HTTPS, no SSH key needed to read a public template), fetches it, and prints a classified report plus a summary line. It touches and commits nothing. Add `--verbose` to list IDENTICAL files too.
 
 2. Summarize the upstream CHANGELOG for the Operator in plain terms. The scan already fetched `ops-template`, so read what changed and translate it out of repo-speak:
 
@@ -51,20 +57,20 @@ Created on the first successful sync, updated at commit time. Without it the sca
 
 3. Ask the Operator what to apply. Two decisions. Apply the safe classes (NEW + UPDATE) now? For each CONFLICT, how: port by pattern (recommended, carry the mechanic not the bytes), skip (leave the local version), or show the diff first (`git -C ~/OPS diff ops-template/main -- <path>`) then decide. Never bundle conflicts into one yes/no; each is its own judgment.
 
-4. Apply. Safe classes in one shot: `~/OPS/.claude-config/bin/harness-update-scan.sh --apply-safe`. It copies NEW + UPDATE only, never CONFLICT, never a hard-excluded file, never a deletion, never a commit. Then hand-port each approved CONFLICT: read the upstream version for structure and intent, rewrite it against the local tree's shape, leave unapproved ones alone. This is `CONTRIBUTING.md`'s porting discipline run public to private: port the pattern, do not paste the file.
+4. Apply. Safe classes in one shot: `(cd ~/OPS && .claude-config/bin/harness-update-scan.sh --apply-safe)`. It copies NEW + UPDATE only, never CONFLICT or MODE, never a hard-excluded file, never a deletion, never a commit. For each MODE line, ask the Operator, then run the `chmod` it names if the bit was not set on purpose. Then hand-port each approved CONFLICT: read the upstream version for structure and intent, rewrite it against the local tree's shape, leave unapproved ones alone. This is `CONTRIBUTING.md`'s porting discipline run public to private: port the pattern, do not paste the file.
 
-5. Translate paths on a renamed fork. Upstream assumes a root of `~/OPS` and `ops-*` unit and agent names. If this copy renamed itself, detected by comparing the root the local `CLAUDE.md` states against upstream's `~/OPS`, every copied and ported file needs a translation pass. After `--apply-safe`, sweep the applied files for `~/OPS`, `ops-template`, and `ops-*` names and rewrite them to the local convention. A verbatim upstream path in a renamed fork is a silent breakage.
+5. Translate paths on a renamed fork. Upstream assumes a root of `~/OPS` and `ops-*` unit and agent names. If this copy renamed itself, detected by comparing the checkout root and the local `AGENTS.md` (or `CLAUDE.md`, when present) against upstream's `~/OPS`, every copied and ported file needs a translation pass. After `--apply-safe`, sweep the applied files for `~/OPS`, `ops-template`, and `ops-*` names and rewrite them to the local convention. A verbatim upstream path in a renamed fork is a silent breakage.
 
 6. Run the gates on what changed, before committing:
 
    ```
-   ~/OPS/.claude-config/bin/verify-ops.sh          # drift gate (or local equivalent)
+   ~/OPS/.claude-config/bin/verify-ops.sh          # drift gate (a renamed copy runs its own equivalent)
    ~/OPS/.claude-config/bin/secrets-scan.sh <changed files>
    bash -n <each changed shell script>
    node --check <each changed .js>
    ```
 
-   `verify-ops.sh` is the drift gate; `secrets-scan.sh` catches a credential riding in on a ported file. All green before step 7. A red gate is a stop, not a note.
+   `verify-ops.sh` is this copy's drift gate (a renamed copy runs its renamed equivalent); `secrets-scan.sh` catches a credential riding in on a ported file. All green before step 7. A red gate is a stop, not a note.
 
 7. One commit, update the marker. Land a single Conventional Commit listing the features pulled, for example `chore(harness): sync upstream OPS (remote-session reboot-resume, secrets-scan hardening)`. In the same commit, write the marker's `last_synced` to the fetched sha (`git -C ~/OPS rev-parse ops-template/main`; the scan prints it too), creating `.claude-config/ops-upstream-ref` if this was the first sync. The marker makes the next sync a clean delta.
 
@@ -75,8 +81,9 @@ Created on the first successful sync, updated at commit time. Without it the sca
 | Class | Meaning | Action |
 |---|---|---|
 | NEW | Upstream has it, local doesn't | Safe copy (`--apply-safe`) |
-| UPDATE | Upstream changed it; local still matches the last synced copy | Safe fast-forward (`--apply-safe`) |
+| UPDATE | Upstream changed it (content, mode, or both); local still matches the last synced copy | Safe fast-forward (`--apply-safe`) |
 | CONFLICT | Changed upstream and locally (or first sync, no baseline) | Port by pattern, skip, or diff; never auto-apply |
+| MODE | Same content, but the exec bit differs from upstream and from the last synced copy (or first sync) | Ask, then `chmod a+x` or `a-x` by hand; never auto-applied |
 | IDENTICAL | Same on both sides | Nothing |
 | REMOVED | Upstream deleted it; local still has it | Manual call; the scan never auto-deletes |
 
@@ -86,7 +93,7 @@ Local-only files, the Operator's own content absent upstream, are never listed. 
 
 These never sync in either direction and never appear in the report, because naming a private file is itself a boundary crossing:
 
-- `CONTEXT/` identity files: `about-me.md`, `brand-voice.md`, `working-preferences.md`, `.bootstrapped`, and everything under `CONTEXT/projects/` (per-project lessons name real projects). The doctrine files in `CONTEXT/` (`operating-doctrine.md`, `project-kata.md`, and the rest) are portable and do sync; they show up as UPDATE or CONFLICT like any template file.
+- `CONTEXT/` identity files: the operator's identity, voice, and standing-orders files, `.bootstrapped`, and everything under `CONTEXT/projects/` (per-project lessons name real projects). The authoritative list is `is_excluded` in `harness-update-scan.sh`, so read that function instead of trusting a copy of the list here: the identity files changed names when the doctrine layout moved (`USER.md`, `voice.md`, and `standing-orders.md` replace `about-me.md`, `brand-voice.md`, and `working-preferences.md`), and a copy that predates the move still carries the old names. The other doctrine files in `CONTEXT/` (`project-kata.md` and the rest) are portable and do sync; they show up as UPDATE or CONFLICT like any template file.
 - `.claude-memory/`, `.claude-handoffs/`: memory and in-flight batons.
 - `NOTES/`, `DELIVERABLES/`, `PROJECTS/`, `ARCHIVE/`: the Operator's work.
 

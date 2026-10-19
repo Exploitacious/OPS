@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
 # Shared library for remote-controlled Claude sessions.
-# Sourced by start-remote-claude.sh (@reboot boot) and new-remote-claude.sh (on-demand).
+# Sourced by new-remote-claude.sh and archive-remote-claude.sh.
 # Single source of truth for naming, launching, resume-vs-create, and the session registry.
+#
+# Sessions are hand-run: the registry records what the launcher started so a
+# session can be resumed, parked, or revived BY NAME. Nothing reads it at boot,
+# and no hook adds rows on its own. (The @reboot resume and the SessionStart
+# auto-register are retired: they revived finished sessions into stale context
+# and fought tmux-resurrect over the same server.)
 # Paths derive from $HOME; override any of them via the RC_* env vars below.
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 ENVFILE="${RC_ENVFILE:-$HOME/.claude-mcp.env}"          # optional MCP secrets; sourced with 2>/dev/null (may not exist)
 DEFAULT_WORKDIR="${RC_DEFAULT_WORKDIR:-$HOME}"
-REGISTRY="${RC_REGISTRY:-$HOME/.claude-remote-sessions.tsv}"           # live — boot script launches these. NAME<TAB>WORKDIR<TAB>SESSION_ID[<TAB>CONFIG_DIR]
-ARCHIVE="${RC_ARCHIVE:-$HOME/.claude-remote-sessions.archive.tsv}"    # parked — same schema, IGNORED on boot; revivable with full history
+REGISTRY="${RC_REGISTRY:-$HOME/.claude-remote-sessions.tsv}"           # live: sessions the launcher started. NAME<TAB>WORKDIR<TAB>SESSION_ID[<TAB>CONFIG_DIR]
+ARCHIVE="${RC_ARCHIVE:-$HOME/.claude-remote-sessions.archive.tsv}"    # parked: same schema; revivable with full history
 
 # CONFIG_DIR (optional 4th column) enables a SECONDARY Claude Code profile. A session launched under
 # CLAUDE_CONFIG_DIR=<dir> (e.g. a personal account beside a work one) keeps its transcript under
-# <dir>/projects, so resume must search there and relaunch with that env — otherwise the session silently
+# <dir>/projects, so resume must search there and relaunch with that env; otherwise the session silently
 # starts FRESH under the default profile. Empty/missing 4th column means the default $HOME/.claude profile;
 # every reader tolerates 3-column rows ($4 absent -> default).
-
-# Sessions the boot script always guarantees (self-healing). Defined here so the boot loop and the
-# archive guard share one source of truth — a guaranteed name must never be archived (boot re-seeds
-# it with a fresh id, which would orphan its archived history).
-RC_GUARANTEED_NAMES=(  )  # sessions the boot script always keeps registered + running; e.g. ( "Main" )
-rc_is_guaranteed() {  # arg: name -> 0 if guaranteed
-  local n; for n in "${RC_GUARANTEED_NAMES[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1
-}
 
 # Title-Case each word, hyphen-join (Life / Kali-Yoga / Development). Preserves existing caps.
 # Strips everything outside [A-Za-z0-9-]: quotes would break the launch line rc_launch builds,
@@ -33,11 +31,11 @@ rc_normalize_name() {
     | sed 's/--*/-/g; s/^-//; s/-$//'
 }
 
-# Kernel-native UUID — no python3 dependency (pyenv shim won't resolve in a bare @reboot cron env).
+# Kernel-native UUID: no python3 dependency (a pyenv shim may not resolve in a minimal env).
 rc_new_uuid() { cat /proc/sys/kernel/random/uuid; }
 
-# Does a transcript for this session-id exist on disk? (encoding-agnostic — searches all project dirs.)
-# args: session_id [config_dir] — searches <config_dir>/projects so secondary profiles resolve; an empty
+# Does a transcript for this session-id exist on disk? (encoding-agnostic: searches all project dirs.)
+# args: session_id [config_dir]; searches <config_dir>/projects so secondary profiles resolve; an empty
 # or absent config_dir falls back to the default $HOME/.claude.
 rc_transcript_exists() {
   local sid="$1" cfg="${2:-}"; [ -n "$cfg" ] || cfg="$HOME/.claude"
@@ -60,7 +58,7 @@ rc_register() {  # args: name workdir session_id [config_dir]  (upsert). Empty c
   fi
   mv "$tmp" "$REGISTRY"
 }
-rc_deregister() {  # arg: name  (stop it returning on reboot)
+rc_deregister() {  # arg: name  (forget it: no resume or park by name afterwards)
   [ -f "$REGISTRY" ] || return 0
   local tmp; tmp="$(mktemp)"
   awk -F'\t' -v n="$1" '$1!=n' "$REGISTRY" > "$tmp"
@@ -90,7 +88,7 @@ rc_launch() {
     launchflag="--session-id '$sid'"; mode="create"
   fi
 
-  # Prefix CLAUDE_CONFIG_DIR only for a non-default profile — the default launch line stays byte-identical.
+  # Prefix CLAUDE_CONFIG_DIR only for a non-default profile; the default launch line stays byte-identical.
   local cfgprefix="" profile="default"
   if [ "$cfgdir" != "$HOME/.claude" ]; then
     cfgprefix="CLAUDE_CONFIG_DIR='$cfgdir' "
@@ -109,9 +107,9 @@ rc_launch() {
 }
 
 # Archive helpers ------------------------------------------------------------
-# Archiving parks a session: its row moves from the live registry to the archive file (so the boot
-# script no longer launches it) and its running tmux session is killed (so it leaves your phone/desktop).
-# Nothing is destroyed — the transcript persists on disk keyed by session-id, and the archive row keeps
+# Archiving parks a session: its row moves from the live registry to the archive file and its running
+# tmux session is killed (so it leaves your phone/desktop).
+# Nothing is destroyed: the transcript persists on disk keyed by session-id, and the archive row keeps
 # the exact id + workdir needed to revive it later with full history.
 
 # Resolve any user-typed name (any case/spacing) to the actual stored NAME in a registry file, by a
@@ -126,17 +124,13 @@ rc_resolve_name() {  # args: input_name file
   ' "$2"
 }
 
-rc_archive() {  # arg: name (any casing/spacing) — live registry -> archive, kill tmux. Preserves id + workdir + history.
+rc_archive() {  # arg: name (any casing/spacing): live registry -> archive, kill tmux. Preserves id + workdir + history.
   local input="$1" name
   name="$(rc_resolve_name "$input" "$REGISTRY")"
   if [ -z "$name" ]; then
     local aname; aname="$(rc_resolve_name "$input" "$ARCHIVE")"
     if [ -n "$aname" ]; then echo "SKIP name=$aname (already archived)"; return 0; fi
     echo "ERR_NOT_FOUND name=$input (not in live registry)" >&2; return 6
-  fi
-  if rc_is_guaranteed "$name"; then
-    echo "ERR_GUARANTEED name=$name (guaranteed session — boot re-seeds it fresh; archiving would orphan its history)" >&2
-    return 5
   fi
   local row workdir sid cfg
   row="$(rc_lookup "$name")"   # WORKDIR<TAB>SESSION_ID<TAB>CONFIG_DIR
@@ -162,7 +156,7 @@ rc_archive() {  # arg: name (any casing/spacing) — live registry -> archive, k
   echo "OK archived name=$name session_id=$sid workdir=$workdir tmux=$tmuxstate (revive: archive-remote-claude.sh revive $name)"
 }
 
-rc_revive() {  # arg: name (any casing/spacing) — archive -> live registry, then launch now (resumes history via -r).
+rc_revive() {  # arg: name (any casing/spacing): archive -> live registry, then launch now (resumes history via -r).
   local input="$1" name
   name="$(rc_resolve_name "$input" "$ARCHIVE")"
   if [ -z "$name" ]; then
@@ -175,7 +169,7 @@ rc_revive() {  # arg: name (any casing/spacing) — archive -> live registry, th
   workdir="$(printf '%s' "$row" | cut -f1)"
   sid="$(printf '%s' "$row" | cut -f2)"
   cfg="$(printf '%s' "$row" | cut -f3)"
-  rc_register "$name" "$workdir" "$sid" "$cfg"    # back onto the live registry (returns on reboot again)
+  rc_register "$name" "$workdir" "$sid" "$cfg"    # back onto the live registry
   local tmp; tmp="$(mktemp)"                      # remove from archive
   awk -F'\t' -v n="$name" '$1!=n' "$ARCHIVE" > "$tmp"
   mv "$tmp" "$ARCHIVE"
@@ -194,10 +188,10 @@ rc_transcript_path() {  # args: session_id [config_dir]
   find "$cfg/projects" -maxdepth 2 -name "$sid.jsonl" -print -quit 2>/dev/null
 }
 
-# Health view of the LIVE registry — the surface that actually boot-resumes. For each row shows a
-# STATUS flag, transcript age, whether it is really in tmux, and its profile, so stale/zombie rows
-# that would silently reboot into old context are visible at a glance. Read-only: parks nothing.
-#   ZOMBIE  in the registry but NOT in tmux -> reboot spawns a fresh/old session from its id
+# Health view of the LIVE registry. For each row shows a STATUS flag, transcript age, whether it is
+# really in tmux, and its profile, so finished-but-unparked rows are visible at a glance.
+# Read-only: parks nothing.
+#   GONE    in the registry but NOT in tmux -> resume it by name (new-remote-claude.sh) or park it
 #   STALE   transcript older than RC_STALE_DAYS (default 7) -> likely a finished purpose left unparked
 #   IDLE    live in tmux but not attached (normal for a background session)
 #   OK      live + attached (or freshly active)
@@ -205,9 +199,9 @@ rc_transcript_path() {  # args: session_id [config_dir]
 # canonically-named one may hold the row; a stray like "dev" vs "Dev" would otherwise clobber it).
 rc_sweep() {
   local stale_days="${RC_STALE_DAYS:-7}" now; now="$(date +%s)"
-  echo "LIVE registry ($REGISTRY) — these boot-resume on reboot:"
+  echo "LIVE registry ($REGISTRY): resumable and parkable by name:"
   if [ ! -s "$REGISTRY" ]; then
-    echo "  (empty — nothing boots)"
+    echo "  (empty)"
   else
     printf '  %-8s %-24s %-5s %-6s %-9s %s\n' STATUS NAME AGE TMUX PROFILE SESSION_ID
     while IFS=$'\t' read -r name workdir sid cfg; do
@@ -231,9 +225,9 @@ rc_sweep() {
       else
         tmuxstate="gone"
       fi
-      # status priority: ZOMBIE (not in tmux) > STALE (old transcript) > IDLE (detached) > OK
+      # status priority: GONE (not in tmux) > STALE (old transcript) > IDLE (detached) > OK
       if [ "$tmuxstate" = "gone" ]; then
-        status="ZOMBIE"
+        status="GONE"
       elif [ -n "$tp" ] && [ "$age_days" -ge "$stale_days" ]; then
         status="STALE"
       elif [ "$tmuxstate" = "live" ]; then
@@ -254,7 +248,7 @@ rc_sweep() {
       done | awk -F'\t' '{c[$1]++; raw[$1]=raw[$1] " [" $2 "]"} END{for(k in c) if(c[k]>1) printf "  %s  <- %s\n", k, raw[k]}')"
     if [ -n "$collisions" ]; then
       echo
-      echo "COLLISIONS (multiple live tmux sessions map to one registry name — park/rename the stray):"
+      echo "COLLISIONS (multiple live tmux sessions map to one registry name; park or rename the stray):"
       printf '%s\n' "$collisions"
     fi
   fi
@@ -262,5 +256,5 @@ rc_sweep() {
   local acount=0
   [ -f "$ARCHIVE" ] && acount="$(awk 'NF>0' "$ARCHIVE" | grep -c .)"
   echo
-  echo "Archived (parked, do NOT boot): $acount   —   park a live one: archive-remote-claude.sh archive <name>"
+  echo "Archived (parked): $acount   (park a live one: archive-remote-claude.sh archive <name>)"
 }

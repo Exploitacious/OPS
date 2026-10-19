@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# claude-window-ping.sh — cron-fired dumb pipe that opens the Claude 5-hour
+# claude-window-ping.sh: cron-fired dumb pipe that opens the Claude 5-hour
 # usage window on one or more Claude Code profiles by sending one headless
 # "ping" to a brand-new session per profile. The window countdown starts at
-# times the Operator chooses, with nobody at the keyboard — useful when your
+# times the Operator chooses, with nobody at the keyboard: useful when your
 # working day has predictable blocks and you want the shared window clock
 # already running when you sit down.
 #
 # Install (machine-local; cron times are system-local; pick times that fit
-# your day — e.g. one ping per 5-hour block you want pre-armed):
+# your day: e.g. one ping per 5-hour block you want pre-armed):
 #   crontab -e
 #   45 5  * * * $HOME/OPS/.claude-config/bin/claude-window-ping.sh
 #   0  11 * * * $HOME/OPS/.claude-config/bin/claude-window-ping.sh
@@ -17,11 +17,11 @@
 # Default is the single default profile. An Operator running a second profile
 # (e.g. a personal account via CLAUDE_CONFIG_DIR) lists both:
 #   CC_WINDOW_PING_PROFILES="default=$HOME/.claude personal=$HOME/.claude-personal"
-# (set it on the crontab line or in a wrapper — cron does not read your shell
+# (set it on the crontab line or in a wrapper: cron does not read your shell
 # rc). A pair without "=" is a config typo: it is skipped, logged, and lands
 # in last-status.tsv with rc=2 so the briefing flags it.
 #
-# Knobs: CC_WINDOW_PING_MODEL (default "sonnet" — the cheapest real round-trip
+# Knobs: CC_WINDOW_PING_MODEL (default "sonnet": the cheapest real round-trip
 # opens the window exactly the same), CC_WINDOW_PING_TIMEOUT (seconds per
 # profile, default 180; worst-case wall time is N_profiles x timeout).
 # Test hooks (used by claude-window-ping-selftest.sh, harmless otherwise):
@@ -29,9 +29,8 @@
 #
 # MCP is stripped (--strict-mcp-config + empty config) so the ping is a pure
 # text round-trip: no servers spun up, minimal tokens, fast exit. Runs from
-# $HOME so no project context loads. Cron runs outside tmux, so
-# remote-session-register.sh's tmux guard keeps ping sessions out of the
-# reboot-resume registry. A non-blocking flock serializes overlapping
+# $HOME so no project context loads. Cron runs outside tmux, so the ping
+# never lands in the remote-session registry. A non-blocking flock serializes overlapping
 # invocations (second run exits quietly).
 #
 # Surfaces: appends ~/.local/state/window-ping/ping.log; rewrites
@@ -65,7 +64,7 @@ PING_TIMEOUT="${CC_WINDOW_PING_TIMEOUT:-180}"
 now() { date '+%F %H:%M'; }
 ts()  { date '+%F %T %Z'; }
 
-# cron PATH is minimal — resolve the binary explicitly, PATH as fallback.
+# cron PATH is minimal: resolve the binary explicitly, PATH as fallback.
 CLAUDE_BIN="${CC_WINDOW_PING_BIN:-$HOME/.local/bin/claude}"
 [ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude || true)"
 if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then

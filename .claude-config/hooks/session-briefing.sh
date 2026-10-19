@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# session-briefing.sh — SessionStart briefing dashboard.
+# session-briefing.sh: SessionStart briefing dashboard.
 #
 # Orients the operator the moment a session boots: the default worker model
 # tier, the config posture (compaction / effort / model), the project-lessons
@@ -61,12 +61,23 @@ printf '============================================================\n'
 printf ' Worker:  %s\n' "$gate"
 printf ' Config:  autocompact %s  ·  effort %s  ·  main=%s  ·  opus=%s\n' "$acs" "$eff" "$main_model" "$fallback_model"
 printf ' Ultra:   ultracode is session-set via the alias (--settings); /effort to change\n'
-# Boot surface: the claude() launch shim appends the charter + boot-digest to the
-# cached system prompt and exports OPS_BOOT_SHA (first 8 hex of the sha1 of the
-# exact appended string), so a running session sees the exact version it booted
-# with. sha=unset means the shim did not run (bare `command claude`, or a host
-# that predates the shim upgrade).
-printf ' Boot:    charter+digest in system-prompt (sha %s) · source=%s\n' "${OPS_BOOT_SHA:-unset}" "${_src:-unknown}"
+# Boot surface: CONTEXT/core.md loads as the user rule ~/.claude/rules/ops-core.md
+# (deploy.sh links it), on every launch path. Report whether that rule resolves
+# to this checkout's core, so a session that booted without it says so at once
+# instead of quietly running on defaults. An import file (deploy.ps1's fallback)
+# counts when it names this core.
+_core="$OPS_DIR/CONTEXT/core.md"
+_rule="$CFG/rules/ops-core.md"
+if hook_core_rule_matches "$_rule" "$_core"; then
+  if [ -L "$_rule" ]; then
+    _boot="core.md loaded via rules/ops-core.md"
+  else
+    _boot="core.md loaded via rules/ops-core.md (import)"
+  fi
+else
+  _boot="core.md NOT linked (run .claude-config/deploy.sh)"
+fi
+printf ' Boot:    %s · source=%s\n' "$_boot" "${_src:-unknown}"
 
 # --- project lessons pointer (two-tier memory: project knowledge lives on-demand here) ---
 LESSONS_DIR="$OPS_DIR/CONTEXT/projects"
@@ -74,7 +85,7 @@ case "$(pwd)" in
   */OPS/PROJECTS/*)
     if ls "$LESSONS_DIR"/*-lessons.md >/dev/null 2>&1; then
       nles="$(ls -1 "$LESSONS_DIR"/*-lessons.md 2>/dev/null | wc -l | tr -d ' ')"
-      printf ' Lessons: project knowledge in CONTEXT/projects/*-lessons.md (%s files) — read the one for this project\n' "$nles"
+      printf ' Lessons: project knowledge in CONTEXT/projects/*-lessons.md (%s files); read the one for this project\n' "$nles"
     fi
     ;;
 esac
@@ -104,9 +115,9 @@ MEM="$CFG/projects/$ENCODED_CWD/memory/MEMORY.md"
 if [ -f "$MEM" ]; then
   sz="$(wc -c < "$MEM" 2>/dev/null | tr -d ' ')"
   if [ "${sz:-0}" -gt 24576 ]; then
-    printf ' Memory:  index ~%sKB OVER the 24KB platform ceiling (truncating NOW) — closeout flush overdue\n' "$(( ${sz:-0} / 1024 ))"
+    printf ' Memory:  index ~%sKB OVER the 24KB platform ceiling (truncating NOW): closeout flush overdue\n' "$(( ${sz:-0} / 1024 ))"
   elif [ "${sz:-0}" -gt 16384 ]; then
-    printf ' Memory:  flush debt — index ~%sKB > 16KB soft budget; next closeout evicts to budget\n' "$(( ${sz:-0} / 1024 ))"
+    printf ' Memory:  flush debt: index ~%sKB > 16KB soft budget; next closeout evicts to budget\n' "$(( ${sz:-0} / 1024 ))"
   fi
 fi
 
@@ -132,7 +143,7 @@ if [ -f "$CLOSE" ]; then
   [ "${age_days:-0}" -ge 3 ] && hyg="$hyg last closeout ${age_days}d ago ·"
 fi
 # work-tracking backstop: a session that did work but never ran session-close (so
-# its reconciliation gate never fired) leaves a session-start stamp behind —
+# its reconciliation gate never fired) leaves a session-start stamp behind:
 # session-close deletes it on reconcile. A stamp whose tmux session is GONE =
 # abandoned, its work likely unreconciled. Skip this session's own key and any
 # still-live tmux (paused / parallel sessions are not abandoned).
@@ -146,7 +157,7 @@ if [ -d "$RUN" ]; then
     [ -n "$CUR_KEY" ] && [ "$k" = "$CUR_KEY" ] && continue
     raw="$(grep -m1 '^tmux=' "$st" 2>/dev/null | cut -d= -f2-)"
     if [ -n "$raw" ] && [ "$raw" != "-" ] && command -v tmux >/dev/null 2>&1; then
-      tmux has-session -t "$raw" 2>/dev/null && continue   # still alive — not abandoned
+      tmux has-session -t "$raw" 2>/dev/null && continue   # still alive, not abandoned
     else
       # no tmux to check against: only flag if the stamp is clearly stale (>18h)
       mt="$(stat -c %Y "$st" 2>/dev/null || echo "$_now")"
@@ -154,11 +165,11 @@ if [ -d "$RUN" ]; then
     fi
     _orphans=$((_orphans + 1))
   done
-  [ "${_orphans:-0}" -gt 0 ] && hyg="$hyg ${_orphans} session(s) abandoned without a work-tracking reconciliation — work may be unlogged (run session-close to reconcile) ·"
+  [ "${_orphans:-0}" -gt 0 ] && hyg="$hyg ${_orphans} session(s) abandoned without a work-tracking reconciliation; work may be unlogged (run session-close to reconcile) ·"
 fi
 # unadopted memory pools: real dirs (not symlinks) mean git-sync misses them
 for md in "$CFG"/projects/*/memory; do
-  [ -d "$md" ] && [ ! -L "$md" ] && hyg="$hyg unadopted memory pool ($(basename "$(dirname "$md")")) — run ac-memory-init ·" && break
+  [ -d "$md" ] && [ ! -L "$md" ] && hyg="$hyg unadopted memory pool ($(basename "$(dirname "$md")")): run .claude-config/bin/memory-init ·" && break
 done
 if [ -n "$hyg" ]; then
   printf ' Hygiene:%s\n' "${hyg% ·}"
@@ -167,19 +178,19 @@ fi
 # --- window-ping health (quiet-when-clean): the cron dumb-pipe that opens the
 # 5h usage window at fixed times (bin/claude-window-ping.sh). Silent when the
 # feature isn't installed on this machine (no status file) or the last run was
-# clean and recent; loud when a profile ping failed or cron stopped firing —
+# clean and recent; loud when a profile ping failed or cron stopped firing:
 # either way the Operator's window never started and nobody was there to see.
 WP="$HOME/.local/state/window-ping/last-status.tsv"
 if [ -f "$WP" ]; then
   wpfail="$(awk -F'\t' '$2 != "0" {printf "%s rc=%s @ %s; ", $1, $2, $3}' "$WP" 2>/dev/null)"
   if [ -n "$wpfail" ]; then
-    printf ' Ping:    last window-ping FAILED — %ssee ~/.local/state/window-ping/ping.log\n' "$wpfail"
+    printf ' Ping:    last window-ping FAILED: %ssee ~/.local/state/window-ping/ping.log\n' "$wpfail"
   else
     wp_mt="$(stat -c %Y "$WP" 2>/dev/null || echo 0)"
     wp_age_h="$(( ( $(date +%s) - wp_mt ) / 3600 ))"
     wp_stale_h="${CC_WINDOW_PING_STALE_HOURS:-25}"   # >25h = no ping in a day; cron likely dead
     [ "$wp_mt" -gt 0 ] && [ "$wp_age_h" -ge "$wp_stale_h" ] && \
-      printf ' Ping:    window-ping has not fired in %sh (cron dead?) — check crontab + ping.log\n' "$wp_age_h"
+      printf ' Ping:    window-ping has not fired in %sh (cron dead?); check crontab + ping.log\n' "$wp_age_h"
   fi
 fi
 printf '============================================================\n'

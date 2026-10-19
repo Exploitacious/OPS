@@ -39,7 +39,7 @@ To receive files the operator pushed to this box, screenshots included, use the 
 1. Resolve each file to a concrete path and confirm it exists before sending. Absolute is safest.
 2. Run `~/OPS/.claude-config/bin/grabit <path> [<path> ...]`.
 3. Report what was sent and where it lands, for example "to your Downloads on `<device>`".
-4. If `$SSH_CONNECTION` is unset, a rare non-SSH or cron session, auto-detect fails. Fall back to `--to <device>`; the current device is recorded in the `reference-grabit-file-transfer` memory.
+4. If `$SSH_CONNECTION` is unset, a rare non-SSH or cron session, auto-detect fails. Fall back to `--to <device>`; list the tailnet devices with `grabit --list`, and the device list and transfer modes are in `~/OPS/.claude-config/bin/README.md` under grabit.
 5. On error, surface the exact message. Do not silently retry in a different mode.
 
 ## Anti-patterns
@@ -52,4 +52,8 @@ To receive files the operator pushed to this box, screenshots included, use the 
 
 ## Deep context
 
-Full mechanics and one-time box setup (`sudo tailscale set --operator=$USER`, which lets push run sudo-free) live in the `reference-grabit-file-transfer` memory and `~/OPS/.claude-config/bin/README.md`. Read those only if a transfer misbehaves or you are provisioning a new box.
+Full mechanics and one-time box setup (`sudo tailscale set --operator=$USER`, which lets push run sudo-free) live in `~/OPS/.claude-config/bin/README.md` under grabit. Read that only if a transfer misbehaves or you are provisioning a new box.
+
+## Other agent runtimes
+
+`grabit` is a plain shell binary, so a Codex or OpenCode thread on the same box sends a file exactly the same way, `~/OPS/.claude-config/bin/grabit <path>`, with the same constraint: local agent sessions only, over the tailnet. The `$SSH_CONNECTION` auto-detect and the `--to <device>` fallback behave identically on every runtime.
