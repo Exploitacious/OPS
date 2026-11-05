@@ -18,7 +18,8 @@
 #   6. Write the ultracode-only claude() shim to ~/.<shell>rc.local
 #   7. Check the git identity, then initialize Claude Code auto-memory git-sync
 #      (bin/memory-init)
-#   8. Schedule the daily backup cron entry
+#   8. Schedule the daily backup cron entry (only when the OPS repo has an
+#      `origin` remote; with none it prints that and schedules nothing)
 #   9. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
 #  10. Seed the trust anchor
 #
@@ -46,7 +47,7 @@ NO_SYSTEM="${OPS_DEPLOY_NO_SYSTEM:-0}"
 for arg in "$@"; do
   case "$arg" in
     --no-system) NO_SYSTEM=1 ;;
-    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "deploy.sh: unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -656,6 +657,16 @@ BACKUP_SCRIPT="${CONFIG_DIR}/backup/daily-sync.sh"
 CRON_TAG="# OPS Daily Backup"
 CRON_LINE="0 9 * * * ${BACKUP_SCRIPT} ${CRON_TAG}"
 
+# The nightly job backs the copy up to its `origin` remote. A copy with no
+# remote is a supported setup (OPS works without GitHub), but there the job's
+# OPS stage fails on every run ("'origin' does not appear to be a git
+# repository") and the session briefing then reports a failed backup in every
+# session, so a copy with no origin is not scheduled. daily-sync.sh itself is
+# unchanged: a copy that has a remote and cannot push still logs and reports
+# loudly. An entry that is already installed is never touched.
+HAS_ORIGIN=0
+git -C "$OPS_ROOT" remote get-url origin >/dev/null 2>&1 && HAS_ORIGIN=1
+
 if [[ "$NO_SYSTEM" == 1 ]]; then
   msg_warn "--no-system: crontab not touched. Manual: $CRON_LINE"
 elif [[ ! -f "$BACKUP_SCRIPT" ]]; then
@@ -664,7 +675,13 @@ else
   chmod +x "$BACKUP_SCRIPT"
 
   if crontab -l 2>/dev/null | grep -qF "$CRON_TAG"; then
-    msg_ok "Cron job already installed."
+    if [[ "$HAS_ORIGIN" == 1 ]]; then
+      msg_ok "Cron job already installed."
+    else
+      msg_warn "Cron job already installed, but this copy has no git remote, so each nightly run logs an error. Add a GitHub remote (DEPLOYMENT.md), or remove the entry with: crontab -e"
+    fi
+  elif [[ "$HAS_ORIGIN" != 1 ]]; then
+    msg_warn "No git remote: the nightly backup is not scheduled. Add a GitHub remote (DEPLOYMENT.md), then rerun deploy."
   else
     if (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -; then
       msg_ok "Cron job installed (daily at 9:00 AM): $BACKUP_SCRIPT"

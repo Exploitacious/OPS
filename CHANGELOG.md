@@ -4,6 +4,24 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-05: a copy with no git remote does not schedule the nightly backup
+
+OPS works without GitHub, but deploy installed the nightly backup on every run. With no
+`origin` remote its OPS stage logged `'origin' does not appear to be a git repository` each
+night, and the session briefing then showed `Backup: ... did not finish clean` in every
+session. `deploy.sh` and `deploy.ps1` now schedule the job (the user cron entry, the `OPS
+Daily Backup` task) only when the OPS repo has an `origin` remote. With none they print `No
+git remote: the nightly backup is not scheduled. Add a GitHub remote (DEPLOYMENT.md), then
+rerun deploy.` and go on; that is not a failure. An entry or task that already exists is
+never touched (a warning names the fix when there is no remote), and `daily-sync.sh` is
+unchanged, so a copy with a remote that cannot push still reports loudly. Note that the job
+also runs the nightly project pull and `branch-gc --apply`: a copy with no remote runs those
+by hand (README, "The daily backup"). `tests/deploy-cron-test.sh` covers deploy.sh (origin:
+installed once; none, another remote name or no repository: nothing written and the line
+printed; an existing entry byte-identical with and without an origin), and
+`tests/deploy-windows-test.ps1` covers the same rules for the scheduled task. `deploy.sh
+--help` also prints its last two header lines again.
+
 ## 2026-11-05: synced org skills stay out of your OPS repo
 
 Claude Code syncs claude.ai org and Anthropic skills into `~/.claude/skills/synced`, and

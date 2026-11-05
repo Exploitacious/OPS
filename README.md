@@ -215,7 +215,8 @@ idempotent and safe to re-run after any pull. On Linux, in order:
    `~/.bashrc.local`.
 7. Check the git identity, then link each Claude auto-memory directory into
    `.claude-memory/` (`memory-init --auto-commit`).
-8. Install the daily backup cron entry.
+8. Install the daily backup cron entry, when the copy has an `origin` remote
+   (with none it prints one line and schedules nothing; see "The daily backup").
 9. Retire the caveman and ponytail plugins through the `claude plugin` CLI.
 10. Mark `$HOME` trusted in `~/.claude.json`, so the repos under it raise no
     folder-trust prompt.
@@ -273,6 +274,20 @@ Bash). Each run:
    request provably carried and parks their worktrees in a 7-day trash.
 
 The script always exits 0, so a failure cannot be seen from the exit code.
+
+**No GitHub remote.** A copy with no `origin` remote is a supported setup: OPS
+works without GitHub. Deploy then does not schedule the job, because its first
+stage would fail on every run (`'origin' does not appear to be a git
+repository`) and the session briefing would report a failed backup in every
+session. It prints `No git remote: the nightly backup is not scheduled.` and
+goes on; an entry already in your crontab (or the `OPS Daily Backup` task on
+Windows) is never touched. The job also does the project pull and the branch
+cleanup above, so a copy with no remote has neither nightly: run
+`PROJECTS/sync-check.sh --auto` and `.claude-config/bin/branch-gc --apply` by
+hand when you want them (branch cleanup also runs at pre-compaction and
+closeout). To turn the backup on, add a private GitHub remote
+(`git -C ~/OPS remote add origin <url>`, see the push gate above) and rerun
+`deploy.sh`.
 It logs to `.claude-config/backup/sync.log` instead, and the session briefing's
 `Backup:` line repeats the last run's errors and skipped pushes at the next
 boot.
