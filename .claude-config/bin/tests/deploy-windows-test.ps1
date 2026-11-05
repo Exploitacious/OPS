@@ -239,6 +239,88 @@ esac
     }
     finally { $env:USERPROFILE = $previousProfile }
 
+    # The nightly task is registered only when the OPS repo has an origin remote
+    # (deploy.sh follows the same rule; a copy with no remote would log an error
+    # every night and the briefing would report a failed backup). Run the real
+    # block with the ScheduledTask cmdlets replaced by recorders; git is the
+    # real git, on throwaway repos.
+    $taskBlock = Extract-Block '# --- Register daily backup scheduled task ---' '# --- Mount the shared skills'
+    $bashLine = '$BashExe = Resolve-BashExe'
+    Assert ($taskBlock.Contains($bashLine)) 'The task block no longer resolves bash with Resolve-BashExe'
+    $taskBlock = $taskBlock.Replace($bashLine, '$BashExe = $FixtureBash')
+    $taskRoot = Join-Path $fixture 'task'
+    Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $taskRoot -Force | Out-Null
+    $FixtureBash = Join-Path $taskRoot 'bash'
+    [IO.File]::WriteAllText($FixtureBash, '')
+    function New-TaskRepo {
+        param([string]$Name, [string]$Remote, [switch]$NoGit)
+        $dir = Join-Path $taskRoot $Name
+        Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path (Join-Path $dir '.claude-config/backup') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $dir '.claude-config/backup/daily-sync.sh'), '')
+        if (-not $NoGit) { $null = @(& git init -q $dir 2>&1) }
+        if ($Remote) { $null = @(& git -C $dir remote add $Remote 'git@example.invalid:acme/ops-copy.git' 2>&1) }
+        return $dir
+    }
+    function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) [pscustomobject]@{ Execute = $Execute; Arguments = $Argument } }
+    function New-ScheduledTaskTrigger { param([switch]$Daily, $At) 'trigger' }
+    function New-ScheduledTaskSettingsSet {
+        param([switch]$StartWhenAvailable, [switch]$RunOnlyIfNetworkAvailable, $MultipleInstances, $ExecutionTimeLimit, [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries)
+        'settings'
+    }
+    function Register-ScheduledTask {
+        param($TaskName, $Action, $Trigger, $Settings, $Description, [switch]$Force)
+        $script:registerCalls++; $script:registeredAction = $Action
+    }
+    function Get-ScheduledTask {
+        param($TaskName, $ErrorAction)
+        if ($script:registerCalls -gt 0) { [pscustomobject]@{ Actions = @($script:registeredAction) } }
+        elseif ($script:taskExists) { [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'old'; Arguments = 'old' }) } }
+    }
+    function Write-Warn { param($Msg) $script:taskWarns += @("$Msg") }
+    function Write-Good { param($Msg) $script:taskGoods += @("$Msg") }
+    function Invoke-TaskBlock {
+        param([string]$Root, [bool]$System = $true, [bool]$Existing = $false)
+        $script:registerCalls = 0; $script:registeredAction = $null; $script:taskExists = $Existing
+        $script:taskWarns = @(); $script:taskGoods = @()
+        $OpsRoot = $Root; $BackupDir = Join-Path $Root '.claude-config/backup'; $NoSystem = -not $System
+        Invoke-Expression $taskBlock
+    }
+    $noRemote = 'No git remote: the nightly backup is not scheduled. Add a GitHub remote (DEPLOYMENT.md), then rerun deploy.'
+
+    Invoke-TaskBlock -Root (New-TaskRepo 'with-origin' 'origin')
+    Assert ($script:registerCalls -eq 1) "With an origin the task was not registered once ($script:registerCalls)"
+    Assert (@($script:taskGoods | Where-Object { $_ -like 'Daily backup task registered + verified*' }).Count -eq 1) "No verified-registration line: $($script:taskGoods -join ' | ')"
+    Assert (@($script:taskWarns | Where-Object { $_ -like 'No git remote*' }).Count -eq 0) 'The no-remote line was printed with an origin'
+    Write-Host 'PASS: origin present: the daily backup task is registered and verified as before'
+
+    Invoke-TaskBlock -Root (New-TaskRepo 'no-origin')
+    Assert ($script:registerCalls -eq 0) 'With no origin the task was registered'
+    Assert (@($script:taskWarns | Where-Object { $_ -ceq $noRemote }).Count -eq 1) "The no-remote line is missing or reworded: $($script:taskWarns -join ' | ')"
+    Assert ($script:taskGoods.Count -eq 0) 'A registration success line was printed with no origin'
+    Write-Host 'PASS: no origin: nothing is registered and the one no-remote line is printed'
+
+    Invoke-TaskBlock -Root (New-TaskRepo 'other-remote' 'upstream')
+    Assert ($script:registerCalls -eq 0 -and @($script:taskWarns | Where-Object { $_ -ceq $noRemote }).Count -eq 1) 'A remote named upstream was treated as an origin'
+    Invoke-TaskBlock -Root (New-TaskRepo 'not-a-repo' -NoGit)
+    Assert ($script:registerCalls -eq 0 -and @($script:taskWarns | Where-Object { $_ -ceq $noRemote }).Count -eq 1) 'A directory that is not a repository was treated as having an origin'
+    Write-Host 'PASS: no origin: a remote under another name, or no repository at all, does not count'
+
+    Invoke-TaskBlock -Root (Join-Path $taskRoot 'no-origin') -Existing $true
+    Assert ($script:registerCalls -eq 0) 'An existing task with no origin was re-registered'
+    Assert (@($script:taskWarns | Where-Object { $_ -like 'Daily backup task already registered, but this copy has no git remote*Unregister-ScheduledTask*' }).Count -eq 1) "An existing task with no origin did not say so and name the fix: $($script:taskWarns -join ' | ')"
+    Assert (@($script:taskWarns | Where-Object { $_ -like 'No git remote: the nightly backup is not scheduled*' }).Count -eq 0) 'Claimed not scheduled while a task exists'
+    Write-Host 'PASS: an existing task with no origin is left alone and the fix is named'
+
+    Invoke-TaskBlock -Root (Join-Path $taskRoot 'with-origin') -System $false
+    Invoke-TaskBlock -Root (Join-Path $taskRoot 'no-origin') -System $false
+    Assert ($script:registerCalls -eq 0) '-NoSystem registered a task'
+    Write-Host 'PASS: -NoSystem registers nothing'
+
+    foreach ($fn in 'New-TaskRepo', 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet', 'Register-ScheduledTask', 'Get-ScheduledTask', 'Write-Good', 'Invoke-TaskBlock') {
+        Remove-Item "Function:\$fn" -ErrorAction SilentlyContinue
+    }
+    function Write-Warn { param($Msg) }
+
     # Execute only the actual summary in a child process so exit 1 is observable.
     $summaryStart = $script:deployText.IndexOf('# --- Summary ---')
     $summaryEnd = $script:deployText.IndexOf('if ($Host.Name', $summaryStart)

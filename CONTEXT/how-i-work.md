@@ -106,7 +106,8 @@ only when the why is not obvious, and no AI attribution.
 For an eligible green `MERGEABLE` PR, use `gh pr merge --squash` and report
 the SHA. Never add `--delete-branch`: worktrees share a ref store and that
 flag can rotate another session's checkout. `.claude-config/bin/branch-gc`
-cleans up instead: nightly from `backup/daily-sync.sh` on every repo it
+cleans up instead: nightly from `backup/daily-sync.sh` (scheduled only on a
+copy with an `origin` remote) on every repo it
 manages (`~/OPS`, `~/OPS/PROJECTS/<org>/<repo>`, `~/linuxploitacious`), at
 pre-compaction for the repo holding the cwd, and at closeout on each repo
 touched. It deletes a branch only when a merged PR's head or the default

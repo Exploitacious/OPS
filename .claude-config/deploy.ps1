@@ -16,7 +16,8 @@
       4. Initialize Claude Code auto-memory git-sync (bin/memory-init.ps1)
       5. Seed the trust anchor ($HOME trusted, no folder-trust prompt)
       6. Emit the always-on ultracode shim to the profile.local.ps1 seam
-      7. Register the daily backup scheduled task (dynamic bash + WorkingDirectory)
+      7. Register the daily backup scheduled task (dynamic bash + WorkingDirectory),
+         only when the OPS repo has an origin remote
       8. Mount the shared skills: clone the public skill source under
          PROJECTS/ when absent, then run bin/skills-vendor.sh sync in Git Bash
       9. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
@@ -478,6 +479,27 @@ function Resolve-BashExe {
 
 $BashExe = Resolve-BashExe
 
+# The nightly task backs the copy up to its `origin` remote. A copy with no
+# remote is a supported setup (OPS works without GitHub), but there the task's
+# OPS stage fails on every run ("'origin' does not appear to be a git
+# repository") and the session briefing then reports a failed backup in every
+# session, so a copy with no origin is not scheduled. daily-sync.sh itself is
+# unchanged: a copy that has a remote and cannot push still logs and reports
+# loudly. A task that is already registered is never touched. Same rule as
+# deploy.sh.
+function Test-GitOrigin {
+    param([string]$Repo)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $null = @(& git -C $Repo remote get-url origin 2>&1)
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch { return $false }
+    finally { $ErrorActionPreference = $prevEap }
+}
+$HasOrigin = Test-GitOrigin -Repo $OpsRoot
+
 if ($NoSystem) {
     Write-Warn "-NoSystem: daily backup task not registered."
 }
@@ -487,6 +509,14 @@ elseif (-not $BashExe) {
 }
 elseif (-not (Test-Path $BackupScript)) {
     Write-Warn "Backup script not found at $BackupScript -- skipping backup task."
+}
+elseif (-not $HasOrigin) {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Write-Warn "Daily backup task already registered, but this copy has no git remote, so each nightly run logs an error. Add a GitHub remote (DEPLOYMENT.md), or remove the task: Unregister-ScheduledTask -TaskName '$TaskName'"
+    }
+    else {
+        Write-Warn "No git remote: the nightly backup is not scheduled. Add a GitHub remote (DEPLOYMENT.md), then rerun deploy."
+    }
 }
 else {
     try {

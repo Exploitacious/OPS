@@ -202,6 +202,24 @@ In order:
    always exits 0, so the session briefing's `Backup:` line repeats the last
    run's OPS-stage errors and skipped pushes at boot. Skipped with `--no-system`.
 
+   **Only with an `origin` remote.** A copy with no remote is a supported setup
+   (OPS works without GitHub), but there every run's OPS stage would log
+   `'origin' does not appear to be a git repository` and the briefing would
+   report a failed backup in every session. With no `origin` (a remote under
+   another name does not count: the sync script pushes `origin`), deploy prints
+   `No git remote: the nightly backup is not scheduled. Add a GitHub remote
+   (DEPLOYMENT.md), then rerun deploy.` and installs nothing; it is not a
+   failure. An entry already in your crontab is left alone: on a copy with no
+   remote deploy warns that it will log an error each night and names
+   `crontab -e`. The job is also what pulls your project repos and runs
+   `branch-gc --apply` nightly, so without it run `PROJECTS/sync-check.sh
+   --auto` and `.claude-config/bin/branch-gc --apply` by hand (branch cleanup
+   also runs at pre-compaction and closeout). To turn the backup on later:
+   `git -C ~/OPS remote add origin <url>` (a private repo; see the push gate
+   below), then rerun `deploy.sh`. A copy that has a remote and cannot push is
+   a different case and stays loud: the script's own error reaches the
+   briefing as before.
+
    **The push gate.** Your copy holds your memory, context, and notes, so the
    two automatic pushes (memory-init's and the daily backup's) run only when
    `.claude-config/bin/origin-private-check` verifies that every push URL of
@@ -272,7 +290,9 @@ which is tied to the public linuxploitacious repo); the git identity check
 (step 7); auto-memory git-sync
 (`bin\memory-init.ps1`, behind the same push gate as step 8); the trust
 anchor; the ultracode shim in the seam; an `OPS Daily Backup` scheduled task
-that runs `daily-sync.sh` in Git Bash (skipped with `-NoSystem`); the skill mount
+that runs `daily-sync.sh` in Git Bash (skipped with `-NoSystem`, and when the
+repo has no `origin` remote: it prints the same no-remote line; a task already
+registered is left alone); the skill mount
 (clone, then `skills-vendor.sh sync` through Git Bash); plugin retirement (same
 CLI calls as step 9); and a Git Bash pin plus the guard self-test.
 
@@ -302,8 +322,8 @@ git -C ~/linuxploitacious status --short -- claude/.claude/settings.json
 bash ~/OPS/.claude-config/bin/verify-ops.sh
 
 # Backup scheduler
-crontab -l | grep OPS                       # Linux
-schtasks /Query /TN "OPS Daily Backup"      # Windows
+crontab -l | grep OPS                       # Linux (no line on a copy with no origin remote: deploy skips it)
+schtasks /Query /TN "OPS Daily Backup"      # Windows (same: not registered without an origin remote)
 
 # The backup may push (expect exit 0 and the line
 # "origin-private-check: private: github.com/<you>/<repo> is private";
