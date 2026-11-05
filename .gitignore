@@ -33,6 +33,10 @@ desktop.ini
 # skills-vendor.sh staging dirs: an interrupted sync leaves one, and the next
 # sync cleans it; until then the daily backup must not commit a mirror copy.
 SKILLS/.vendor.*/
+# Claude Code syncs claude.ai org and Anthropic skills into ~/.claude/skills/synced, and
+# deploy.sh links ~/.claude/skills to SKILLS/. Those skills belong to the org and refresh at
+# every session start; the daily backup's `git add -A` would commit them into this repo.
+SKILLS/synced/
 
 # --- PROJECTS: repo subdirs (2nd-level) are their own repos (ignored).
 # Cluster folders (1st-level: ExampleOrg/, AnotherOrg/, etc.)

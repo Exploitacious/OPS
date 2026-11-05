@@ -422,6 +422,21 @@ ln -s "$HOME/pool-removed" "$HOME/.claude/projects/-gone/memory"
 run check_memory_links
 chk "dangling memory link -> WARN naming memory-init" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q -- '-gone' && printf '%s' "$OUT" | grep -q 'memory-init'; echo $?)"
 
+# 26. SKILLS/synced (Claude Code's claude.ai skill sync) is gitignored and not an OPS skill: the
+# index check skips it, and a copy already committed WARNs with the untrack command.
+new_case skills-synced
+mkdir -p "$OPS/SKILLS/synced/org-skill"
+printf -- '---\nname: org-skill\n---\n' > "$OPS/SKILLS/synced/org-skill/SKILL.md"
+cp "$SRC_OPS/.gitignore" "$OPS/.gitignore"
+git -C "$OPS" init -q
+run check_skills_index
+chk "untracked synced dir -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
+chk "the shipped .gitignore ignores SKILLS/synced" "$(git -C "$OPS" check-ignore -q SKILLS/synced/org-skill/SKILL.md; echo $?)"
+git -C "$OPS" add -f SKILLS/synced/org-skill/SKILL.md
+git -C "$OPS" -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture
+run check_skills_index
+chk "committed synced dir -> WARN with the untrack command" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'rm -r --cached --quiet SKILLS/synced'; echo $?)"
+
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"
   exit 0

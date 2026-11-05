@@ -4,6 +4,16 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-05: synced org skills stay out of your OPS repo
+
+Claude Code syncs claude.ai org and Anthropic skills into `~/.claude/skills/synced`, and
+`deploy.sh` links `~/.claude/skills` to `SKILLS/`, so those skills landed in `SKILLS/synced/`.
+Nothing ignored them, and the daily backup's `git add -A` committed them to each owner's OPS
+repo. `.gitignore` now ignores `SKILLS/synced/`. `verify-ops` check 9 skips that directory in
+the README index and WARNs, with the untrack command, when a copy is already committed
+(ignoring a path does not untrack files already in the repo). `verify-ops-selftest` case 26
+covers all three.
+
 ## 2026-10-19: one always-loaded core, private-only pushes, lane-aware hooks, the sandbox, and a CI gate
 
 OPS booted through a foreman charter and an identity digest that a `claude()`
