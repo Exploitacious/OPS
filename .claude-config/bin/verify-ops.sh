@@ -151,14 +151,19 @@ check_secrets() {
   fi
 }
 
-# 9. SKILLS/README index covers every skill dir.
+# 9. SKILLS/README index covers every skill dir. SKILLS/synced is Claude Code's claude.ai skill
+# sync (gitignored), not an OPS skill; a copy already committed is flagged so the owner untracks it.
 check_skills_index() {
   local missing=""
   for d in "$OPS"/SKILLS/*/; do
     local b; b="$(basename "$d")"
+    [ "$b" = synced ] && continue
     grep -q "$b" "$OPS/SKILLS/README.md" || missing="$missing $b"
   done
   [ -z "$missing" ] && ok "SKILLS README indexes all entries" || warn "skills absent from SKILLS/README.md index:$missing"
+  if [ -n "$(git -C "$OPS" ls-files -- SKILLS/synced 2>/dev/null | head -1)" ]; then
+    warn "SKILLS/synced is tracked: claude.ai org skills are committed to this repo; untrack them with: git -C \"$OPS\" rm -r --cached --quiet SKILLS/synced && git -C \"$OPS\" commit -m 'chore(skills): stop tracking synced org skills'"
+  fi
 }
 
 # 10. projects-map covers every repo dir under every org cluster.
