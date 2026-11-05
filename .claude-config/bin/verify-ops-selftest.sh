@@ -428,6 +428,9 @@ new_case skills-synced
 mkdir -p "$OPS/SKILLS/synced/org-skill"
 printf -- '---\nname: org-skill\n---\n' > "$OPS/SKILLS/synced/org-skill/SKILL.md"
 cp "$SRC_OPS/.gitignore" "$OPS/.gitignore"
+# The index check is a substring match and the shipped README says "un-synced"; reword it so
+# only the skip, not that word, can keep the synced dir out of the index.
+sed -i 's/synced/sync-ed/g' "$OPS/SKILLS/README.md"
 git -C "$OPS" init -q
 run check_skills_index
 chk "untracked synced dir -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
