@@ -26,8 +26,18 @@
 #     gate: pushed to a private origin, held for a public one; an unreachable
 #     origin is still a failed pull, never a first push
 #
-# Run:  bash ~/OPS/.claude-config/bin/tests/daily-sync-test.sh
+#   - no origin remote: the day's commit is kept, the OPS stage logs one INFO
+#     line and no ERROR or WARN, nothing is pulled or pushed, and the project
+#     and branch-gc stages still run; a remote under another name is no origin;
+#     an origin that exists but cannot be reached, or has only a push URL, is
+#     still a failed pull (ERROR), and so is a `git remote` that fails
+#
+# It names branch-gc (a stub in its fixture, never the real tool), so like the
+# other suites that do it starts with the sandbox guard (verify-ops check 24):
+#   ~/OPS/.claude-config/bin/sandbox-run --no-bind --no-net --ro-bind ~/OPS -- \
+#     bash ~/OPS/.claude-config/bin/tests/daily-sync-test.sh
 set -uo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97
 
 CFG="$(cd "$(dirname "$0")/../.." && pwd)"
 SYNC="$CFG/backup/daily-sync.sh"
@@ -57,11 +67,17 @@ case "${*: -1}" in
 esac
 exit 1
 STUB
-# Every git call passes through this wrapper, which records any stash.
+# Every git call passes through this wrapper, which records any stash and any
+# call that talks to a remote (the no-origin cases assert there are none).
+# FAIL_GIT_REMOTE=1 makes a bare `git remote` fail, as a broken config would.
 REAL_GIT="$(command -v git)"
 cat > "$WORK/bin/git" <<STUB
 #!/usr/bin/env bash
-for a in "\$@"; do [ "\$a" = stash ] && printf '%s\n' "\$*" >> "$WORK/stash-calls"; done
+for a in "\$@"; do
+  [ "\$a" = stash ] && printf '%s\n' "\$*" >> "$WORK/stash-calls"
+  case "\$a" in pull|push|fetch|ls-remote) printf '%s\n' "\$*" >> "$WORK/remote-calls" ;; esac
+done
+if [ "\${FAIL_GIT_REMOTE:-}" = 1 ] && [ "\$*" = remote ]; then echo "fatal: bad config line 1 in file .git/config" >&2; exit 128; fi
 exec "$REAL_GIT" "\$@"
 STUB
 chmod +x "$WORK/bin/gh" "$WORK/fake-ssh" "$WORK/bin/git"
@@ -313,5 +329,97 @@ grep -q 'OPS: backup pushed successfully' "$LOG" || fail "missing remote branch,
 [ "$(git -C "$EMPTY" rev-parse refs/heads/main)" = "$(local_head)" ] || fail "missing remote branch, private origin: main was not created on origin"
 if grep -q 'OPS: ERROR' "$LOG"; then fail "missing remote branch, private origin: logged as an error"; fi
 pass "an origin with no branch yet is a first push through the gate: held for a public origin, pushed to a private one"
+
+# --- No origin remote: commit locally, one INFO line, every stage still runs -----
+# (2026-11-06: deploy stopped scheduling the job on a copy with no origin, so
+# such a copy also lost its nightly project pull and branch-gc. The job is
+# scheduled again everywhere, and this stage is what tells "no origin" apart.)
+# A fresh copy made with `git init` (the template copied, never cloned), with a
+# branch-gc stub so the third stage leaves a trace too.
+export HOME="$WORK/local-home"
+OPS="$HOME/OPS"; LOG="$OPS/.claude-config/backup/sync.log"
+git init -q -b main "$OPS" || fail "fixture: git init the local-only copy"
+mkdir -p "$OPS/.claude-config/bin" "$OPS/PROJECTS"
+cp "$CHECK" "$OPS/.claude-config/bin/origin-private-check"
+printf '.claude-config/backup/sync.log\n' > "$OPS/.gitignore"
+printf '#!/usr/bin/env bash\necho "projects stage ran ($1)"\n' > "$OPS/PROJECTS/sync-check.sh"
+printf '#!/usr/bin/env bash\necho "branch-gc stage ran ($1)"\n' > "$OPS/.claude-config/bin/branch-gc"
+chmod +x "$OPS/.claude-config/bin/branch-gc"
+git -C "$OPS" add -A && git -C "$OPS" commit -q -m seed || fail "fixture: seed the local-only copy"
+NO_ORIGIN_DIRTY="OPS: INFO no origin remote: the day's commit is kept locally; nothing pulled or pushed"
+NO_ORIGIN_CLEAN="OPS: INFO no origin remote: no local changes to commit; nothing pulled or pushed"
+ops_lines() { grep -E '^\[[^]]*\] OPS: ' "$LOG" | sed 's/^\[[^]]*\] //'; }
+all_stages_ran() {
+    grep -q 'projects stage ran (--auto)' "$LOG" && grep -q 'PROJECTS: sync-check.sh --auto completed' "$LOG" \
+      || fail "$1: the project stage did not run"
+    grep -q 'branch-gc stage ran (--apply)' "$LOG" && grep -q 'BRANCH-GC: branch-gc --apply completed' "$LOG" \
+      || fail "$1: the branch-gc stage did not run"
+    grep -q '===== daily-sync complete =====' "$LOG" || fail "$1: the run did not complete"
+}
+
+dirty_tree local
+head_before="$(local_head)"; rm -f "$WORK/remote-calls"
+run_sync
+[ "$(ops_lines)" = "$NO_ORIGIN_DIRTY" ] || fail "no origin: the OPS stage did not log exactly the one INFO line: $(ops_lines)"
+[ "$(git -C "$OPS" log -1 --format=%s)" = "Daily Backup $(date '+%Y-%m-%d')" ] && [ "$(git -C "$OPS" rev-parse HEAD^)" = "$head_before" ] \
+  || fail "no origin: the day's commit was not made"
+[ -z "$(git -C "$OPS" status --porcelain)" ] && git -C "$OPS" cat-file -e HEAD:untracked-local.md \
+  || fail "no origin: the day's work is not all in the day's commit"
+[ ! -s "$WORK/remote-calls" ] || fail "no origin: git talked to a remote: $(cat "$WORK/remote-calls")"
+all_stages_ran "no origin"
+no_stash "no origin"
+pass "no origin: the day's commit is kept, one INFO line and no ERROR or WARN, nothing pulled or pushed, every stage ran"
+
+head_before="$(local_head)"
+run_sync
+[ "$(ops_lines)" = "$NO_ORIGIN_CLEAN" ] || fail "no origin, clean tree: not the one INFO line: $(ops_lines)"
+[ "$(local_head)" = "$head_before" ] || fail "no origin, clean tree: a commit was made"
+[ ! -s "$WORK/remote-calls" ] || fail "no origin, clean tree: git talked to a remote: $(cat "$WORK/remote-calls")"
+all_stages_ran "no origin, clean tree"
+pass "no origin, clean tree: nothing committed, the INFO line says so, every stage ran"
+
+# A remote under another name is not an origin: the backup only ever pulls and
+# pushes origin, so the copy is local only (deploy used the same rule).
+git -C "$OPS" remote add upstream "$WORK/never-contacted.git"
+printf 'upstream day\n' > "$OPS/upstream-day.md"
+run_sync
+[ "$(ops_lines)" = "$NO_ORIGIN_DIRTY" ] || fail "remote named upstream: not read as no origin: $(ops_lines)"
+[ ! -s "$WORK/remote-calls" ] || fail "remote named upstream: git talked to a remote: $(cat "$WORK/remote-calls")"
+git -C "$OPS" remote remove upstream
+pass "a remote under another name does not count as an origin"
+
+# An origin that exists but cannot be reached is a failed pull, an ERROR, as
+# on any copy: never "no origin". A local path that does not exist fails
+# without any network, so the case is deterministic.
+git -C "$OPS" remote add origin "$WORK/no-such-dir/ops.git"
+printf 'dead origin day\n' > "$OPS/dead-origin.md"
+head_before="$(local_head)"
+run_sync
+grep -q "OPS: ERROR pull --rebase failed; the day's commit is kept locally, nothing pushed" "$LOG" \
+  || fail "unreachable origin on a local copy: not an ERROR: $(ops_lines)"
+if grep -q 'OPS: INFO no origin remote' "$LOG"; then fail "unreachable origin: read as no origin"; fi
+[ "$(git -C "$OPS" rev-parse HEAD^)" = "$head_before" ] && git -C "$OPS" cat-file -e HEAD:dead-origin.md \
+  || fail "unreachable origin on a local copy: the day's commit was not kept"
+all_stages_ran "unreachable origin on a local copy"
+pass "an origin that exists but cannot be reached is still an ERROR, never 'no origin'"
+
+# An origin with a push URL and no fetch URL is still an origin (git lists it):
+# the pull fails loudly instead of the copy passing as local only.
+git -C "$OPS" config --unset remote.origin.url
+git -C "$OPS" config remote.origin.pushurl "$WORK/no-such-dir/ops.git"
+run_sync
+grep -q 'OPS: ERROR pull --rebase failed' "$LOG" || fail "origin with only a push URL: not an ERROR: $(ops_lines)"
+if grep -q 'OPS: INFO no origin remote' "$LOG"; then fail "origin with only a push URL: read as no origin"; fi
+git -C "$OPS" remote remove origin
+pass "an origin with only a push URL is still an origin: the failed pull is an ERROR"
+
+# When git cannot list the remotes at all, that is an ERROR, not a local copy.
+printf 'broken config day\n' > "$OPS/broken-config.md"
+FAIL_GIT_REMOTE=1 run_sync
+grep -q 'OPS: ERROR could not list the git remotes; nothing pulled or pushed: fatal: bad config line 1' "$LOG" \
+  || fail "git remote failing: not an ERROR: $(ops_lines)"
+if grep -q 'OPS: INFO no origin remote' "$LOG"; then fail "git remote failing: read as no origin"; fi
+all_stages_ran "git remote failing"
+pass "a git remote that cannot list the remotes is an ERROR, not 'no origin'"
 
 echo "ALL PASS"

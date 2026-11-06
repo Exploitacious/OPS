@@ -239,11 +239,11 @@ esac
     }
     finally { $env:USERPROFILE = $previousProfile }
 
-    # The nightly task is registered only when the OPS repo has an origin remote
-    # (deploy.sh follows the same rule; a copy with no remote would log an error
-    # every night and the briefing would report a failed backup). Run the real
-    # block with the ScheduledTask cmdlets replaced by recorders; git is the
-    # real git, on throwaway repos.
+    # The nightly task is registered on every copy, with or without an origin
+    # remote (deploy.sh follows the same rule): daily-sync.sh decides what a
+    # copy with no origin does, so the block never runs git. Run the real block
+    # with the ScheduledTask cmdlets replaced by recorders; the repos are real,
+    # made with the real git, and a git recorder is in scope only for the block.
     $taskBlock = Extract-Block '# --- Register daily backup scheduled task ---' '# --- Mount the shared skills'
     $bashLine = '$BashExe = Resolve-BashExe'
     Assert ($taskBlock.Contains($bashLine)) 'The task block no longer resolves bash with Resolve-BashExe'
@@ -281,42 +281,45 @@ esac
     function Invoke-TaskBlock {
         param([string]$Root, [bool]$System = $true, [bool]$Existing = $false)
         $script:registerCalls = 0; $script:registeredAction = $null; $script:taskExists = $Existing
-        $script:taskWarns = @(); $script:taskGoods = @()
+        $script:taskWarns = @(); $script:taskGoods = @(); $script:gitCalls = @()
         $OpsRoot = $Root; $BackupDir = Join-Path $Root '.claude-config/backup'; $NoSystem = -not $System
+        # Records the call, then runs the real git, so a remote check brought
+        # back into the block fails both on the call and on what it decides.
+        function git { $script:gitCalls += @("$args"); & (Get-Command git -CommandType Application | Select-Object -First 1) @args }
         Invoke-Expression $taskBlock
     }
-    $noRemote = 'No git remote: the nightly backup is not scheduled. Add a GitHub remote (DEPLOYMENT.md), then rerun deploy.'
+    function Assert-Registered {
+        param([string]$Label)
+        Assert ($script:registerCalls -eq 1) "${Label}: the task was not registered once ($script:registerCalls)"
+        Assert (@($script:taskGoods | Where-Object { $_ -like 'Daily backup task registered + verified*' }).Count -eq 1) "${Label}: no verified-registration line: $($script:taskGoods -join ' | ')"
+        Assert ($script:taskWarns.Count -eq 0) "${Label}: a warning was printed: $($script:taskWarns -join ' | ')"
+        Assert ($script:gitCalls.Count -eq 0) "${Label}: the task block ran git: $($script:gitCalls -join ' | ')"
+    }
 
     Invoke-TaskBlock -Root (New-TaskRepo 'with-origin' 'origin')
-    Assert ($script:registerCalls -eq 1) "With an origin the task was not registered once ($script:registerCalls)"
-    Assert (@($script:taskGoods | Where-Object { $_ -like 'Daily backup task registered + verified*' }).Count -eq 1) "No verified-registration line: $($script:taskGoods -join ' | ')"
-    Assert (@($script:taskWarns | Where-Object { $_ -like 'No git remote*' }).Count -eq 0) 'The no-remote line was printed with an origin'
+    Assert-Registered 'origin present'
     Write-Host 'PASS: origin present: the daily backup task is registered and verified as before'
 
     Invoke-TaskBlock -Root (New-TaskRepo 'no-origin')
-    Assert ($script:registerCalls -eq 0) 'With no origin the task was registered'
-    Assert (@($script:taskWarns | Where-Object { $_ -ceq $noRemote }).Count -eq 1) "The no-remote line is missing or reworded: $($script:taskWarns -join ' | ')"
-    Assert ($script:taskGoods.Count -eq 0) 'A registration success line was printed with no origin'
-    Write-Host 'PASS: no origin: nothing is registered and the one no-remote line is printed'
+    Assert-Registered 'no origin'
+    Write-Host 'PASS: no origin: the task is registered and verified the same way, with no warning'
 
     Invoke-TaskBlock -Root (New-TaskRepo 'other-remote' 'upstream')
-    Assert ($script:registerCalls -eq 0 -and @($script:taskWarns | Where-Object { $_ -ceq $noRemote }).Count -eq 1) 'A remote named upstream was treated as an origin'
+    Assert-Registered 'remote named upstream'
     Invoke-TaskBlock -Root (New-TaskRepo 'not-a-repo' -NoGit)
-    Assert ($script:registerCalls -eq 0 -and @($script:taskWarns | Where-Object { $_ -ceq $noRemote }).Count -eq 1) 'A directory that is not a repository was treated as having an origin'
-    Write-Host 'PASS: no origin: a remote under another name, or no repository at all, does not count'
+    Assert-Registered 'not a repository'
+    Write-Host 'PASS: no origin: a remote under another name, or no repository at all, is registered the same way'
 
     Invoke-TaskBlock -Root (Join-Path $taskRoot 'no-origin') -Existing $true
-    Assert ($script:registerCalls -eq 0) 'An existing task with no origin was re-registered'
-    Assert (@($script:taskWarns | Where-Object { $_ -like 'Daily backup task already registered, but this copy has no git remote*Unregister-ScheduledTask*' }).Count -eq 1) "An existing task with no origin did not say so and name the fix: $($script:taskWarns -join ' | ')"
-    Assert (@($script:taskWarns | Where-Object { $_ -like 'No git remote: the nightly backup is not scheduled*' }).Count -eq 0) 'Claimed not scheduled while a task exists'
-    Write-Host 'PASS: an existing task with no origin is left alone and the fix is named'
+    Assert-Registered 'existing task, no origin'
+    Write-Host 'PASS: an existing task on a copy with no origin is re-registered like any other, with no warning'
 
     Invoke-TaskBlock -Root (Join-Path $taskRoot 'with-origin') -System $false
     Invoke-TaskBlock -Root (Join-Path $taskRoot 'no-origin') -System $false
     Assert ($script:registerCalls -eq 0) '-NoSystem registered a task'
     Write-Host 'PASS: -NoSystem registers nothing'
 
-    foreach ($fn in 'New-TaskRepo', 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet', 'Register-ScheduledTask', 'Get-ScheduledTask', 'Write-Good', 'Invoke-TaskBlock') {
+    foreach ($fn in 'New-TaskRepo', 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet', 'Register-ScheduledTask', 'Get-ScheduledTask', 'Write-Good', 'Invoke-TaskBlock', 'Assert-Registered') {
         Remove-Item "Function:\$fn" -ErrorAction SilentlyContinue
     }
     function Write-Warn { param($Msg) }

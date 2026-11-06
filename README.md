@@ -215,8 +215,8 @@ idempotent and safe to re-run after any pull. On Linux, in order:
    `~/.bashrc.local`.
 7. Check the git identity, then link each Claude auto-memory directory into
    `.claude-memory/` (`memory-init --auto-commit`).
-8. Install the daily backup cron entry, when the copy has an `origin` remote
-   (with none it prints one line and schedules nothing; see "The daily backup").
+8. Install the daily backup cron entry (on every copy, with or without an
+   `origin` remote; see "The daily backup").
 9. Retire the caveman and ponytail plugins through the `claude plugin` CLI.
 10. Mark `$HOME` trusted in `~/.claude.json`, so the repos under it raise no
     folder-trust prompt.
@@ -274,23 +274,21 @@ Bash). Each run:
    request provably carried and parks their worktrees in a 7-day trash.
 
 The script always exits 0, so a failure cannot be seen from the exit code.
-
-**No GitHub remote.** A copy with no `origin` remote is a supported setup: OPS
-works without GitHub. Deploy then does not schedule the job, because its first
-stage would fail on every run (`'origin' does not appear to be a git
-repository`) and the session briefing would report a failed backup in every
-session. It prints `No git remote: the nightly backup is not scheduled.` and
-goes on; an entry already in your crontab (or the `OPS Daily Backup` task on
-Windows) is never touched. The job also does the project pull and the branch
-cleanup above, so a copy with no remote has neither nightly: run
-`PROJECTS/sync-check.sh --auto` and `.claude-config/bin/branch-gc --apply` by
-hand when you want them (branch cleanup also runs at pre-compaction and
-closeout). To turn the backup on, add a private GitHub remote
-(`git -C ~/OPS remote add origin <url>`, see the push gate above) and rerun
-`deploy.sh`.
 It logs to `.claude-config/backup/sync.log` instead, and the session briefing's
 `Backup:` line repeats the last run's errors and skipped pushes at the next
 boot.
+
+**No GitHub remote.** A copy with no `origin` remote is a supported setup: OPS
+works without GitHub, and deploy schedules the job there too. Steps 2 and 3
+are skipped: the run commits the day's work (step 1), logs `OPS: INFO no
+origin remote: the day's commit is kept locally; nothing pulled or pushed`
+instead of an error, and still does steps 4 and 5. The briefing then says
+`Backup:  local only (no origin remote)`, so work that never leaves the
+machine does not read as backed up. A remote under another name does not
+count; the script pulls and pushes only `origin`. To back the copy up, add a
+private GitHub remote (`git -C ~/OPS remote add origin <url>`, see the push
+gate above); the next run pulls and pushes every local commit. An origin that
+exists but cannot be reached is still a failed pull, reported as an error.
 
 ## Skill mounts
 

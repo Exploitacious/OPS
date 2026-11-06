@@ -4,7 +4,30 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-06: a copy with no git remote keeps its nightly job
+
+The 2026-11-05 change below stopped deploy from scheduling the nightly job on a copy with
+no `origin` remote, which also cost that copy the job's nightly project pull and
+`branch-gc --apply`. The job is scheduled on every copy again, and `daily-sync.sh` is now
+the one place that decides what a copy with no origin does: it commits the day's work as
+always, then logs `OPS: INFO no origin remote: the day's commit is kept locally; nothing
+pulled or pushed` (or `no local changes to commit` on a clean day) instead of an error, and
+the project and branch-gc stages run as on any copy. "No origin" is read from the local
+config (`git remote` lists no `origin`), so an origin that exists but cannot be reached is
+still a failed pull and an `ERROR`, and a `git remote` that fails is an `ERROR` too. The
+session briefing reads the INFO line as `Backup:  local only (no origin remote)`, neither a
+failure nor quiet; an `ERROR` or `WARN` in the same run still wins. `deploy.sh` and
+`deploy.ps1` no longer look at the remotes, so their no-remote messages are gone; a copy
+deployed on 2026-11-05 without an origin gets its job back on the next `deploy.sh` run. Kept
+from that change: its deploy test harnesses (now asserting the job is scheduled with and
+without an origin, and that the cron and task blocks run no git) and the `deploy.sh --help`
+fix. Tests: `daily-sync-test.sh` (no origin, dirty and clean days, a remote named
+`upstream`, an unreachable origin, an origin with only a push URL, a failing `git remote`),
+`deploy-cron-test.sh`, `deploy-windows-test.ps1` and `session-briefing-backup-test.sh`.
+
 ## 2026-11-05: a copy with no git remote does not schedule the nightly backup
+
+Superseded by the 2026-11-06 entry above: the job is scheduled on every copy again.
 
 OPS works without GitHub, but deploy installed the nightly backup on every run. With no
 `origin` remote its OPS stage logged `'origin' does not appear to be a git repository` each
