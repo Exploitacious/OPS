@@ -493,6 +493,9 @@ if "push" in args:
         (ops / "README.md").write_text("ops\n")
         self.git("add", "README.md", at=ops)
         self.git("commit", "-q", "-m", "seed", at=ops)
+        # An origin, so the backup stage pulls (a copy with no origin skips the
+        # pull by design). It is never contacted: the interceptor fakes the pull.
+        self.git("remote", "add", "origin", "git@example.invalid:acme/ops.git", at=ops)
         self.git_interceptor('''
 if "pull" in args:
     with (root / "order").open("a") as f: f.write("pull\\n")

@@ -194,21 +194,34 @@ fi
 # WARN lines back from sync.log and say them here, with their continuation
 # lines: each line already names its reason and its fix. Only the log's tail is
 # read: a run is a few dozen lines, and the project stage adds one per repo.
+# A copy with no origin remote logs "OPS: INFO no origin remote" instead: its
+# commit stayed on this machine by design, so that run reads as "local only",
+# never as a failure and never as quiet (quiet means backed up off the box).
+# An ERROR or WARN in the same run still wins: that is the line to act on.
 SYNC_LOG="$OPS_DIR/.claude-config/backup/sync.log"
 if [ -f "$SYNC_LOG" ]; then
   bk="$(tail -n 3000 "$SYNC_LOG" 2>/dev/null | awk '
-    /\] ===== daily-sync start =====/ { n = 0; cont = 0; ts = substr($0, 2, 16); next }
+    /\] ===== daily-sync start =====/ { n = 0; cont = 0; local_only = 0; ts = substr($0, 2, 16); next }
     {
       msg = $0; sub(/^\[[^]]*\] /, "", msg)
       if (msg ~ /^OPS: (ERROR|WARN) /) { sub(/^OPS: /, "", msg); line[++n] = msg; cont = 1; next }
       if (cont && msg ~ /^     /) { sub(/^ +/, "", msg); line[n] = line[n] "; " msg; next }
       cont = 0
+      if (msg ~ /^OPS: INFO no origin remote/) local_only = 1
     }
-    END { if (n) { printf "%s|", ts; for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " / " : ""), line[i] } }')"
+    END {
+      if (n) { printf "fail|%s|", ts; for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " / " : ""), line[i] }
+      else if (local_only) printf "local|%s|", ts
+    }')"
   if [ -n "$bk" ]; then
+    bk_kind="${bk%%|*}"; bk="${bk#*|}"
     bk_ts="${bk%%|*}"; bk_msg="${bk#*|}"
-    [ "${#bk_msg}" -le 400 ] || bk_msg="${bk_msg:0:397}..."
-    printf ' Backup:  the nightly backup at %s did not finish clean: %s (full log: %s)\n' "$bk_ts" "$bk_msg" "${SYNC_LOG/#$HOME/\~}"
+    if [ "$bk_kind" = local ]; then
+      printf ' Backup:  local only (no origin remote): the nightly run at %s kept the work in local commits, nothing pulled or pushed; to back it up off this machine, add a private origin (DEPLOYMENT.md step 8)\n' "$bk_ts"
+    else
+      [ "${#bk_msg}" -le 400 ] || bk_msg="${bk_msg:0:397}..."
+      printf ' Backup:  the nightly backup at %s did not finish clean: %s (full log: %s)\n' "$bk_ts" "$bk_msg" "${SYNC_LOG/#$HOME/\~}"
+    fi
   fi
 fi
 

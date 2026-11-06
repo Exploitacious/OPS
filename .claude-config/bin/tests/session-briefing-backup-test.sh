@@ -9,6 +9,9 @@
 #   - read only the LAST run: an earlier run's problem that a later clean run
 #     resolved stays quiet
 #   - stay quiet on a clean run and when there is no log at all
+#   - say "local only (no origin remote)" when the last run logged the no-origin
+#     INFO line: neither a failure nor quiet, and an ERROR or WARN in the same
+#     run still wins
 # It also pins the memory flush-queue count beside it (same hook, same boot).
 # HOME and the OPS copy are fixtures in this test's own temp dir.
 set -uo pipefail
@@ -61,6 +64,34 @@ case "$line" in
   *) bad "failed stage: $line" ;;
 esac
 case "$line" in *"push skipped"*) bad "failed stage: an older run's line leaked in" ;; *) ok "failed stage: no older run's line" ;; esac
+
+# A copy with no origin remote: daily-sync logs one INFO line, and the briefing
+# says "local only", neither a failure nor quiet (quiet reads as backed up).
+LOCAL_LINE=' Backup:  local only (no origin remote): the nightly run at 2026-10-21 09:00 kept the work in local commits, nothing pulled or pushed; to back it up off this machine, add a private origin (DEPLOYMENT.md step 8)'
+for info in "OPS: INFO no origin remote: the day's commit is kept locally; nothing pulled or pushed" \
+            "OPS: INFO no origin remote: no local changes to commit; nothing pulled or pushed"; do
+  { run_block "2026-10-20 09:00:01" "OPS: ERROR pull --rebase failed; nothing pushed: fatal: 'origin' does not appear to be a git repository"
+    run_block "2026-10-21 09:00:01" "$info"; } > "$LOG"
+  out="$(briefing)"
+  [ "$(grep '^ Backup:' <<< "$out")" = "$LOCAL_LINE" ] && ok "no origin (${info:28:12}): reported as local only" \
+    || bad "no origin (${info:28:12}): $(grep '^ Backup:' <<< "$out")"
+  case "$out" in *"did not finish clean"*|*"ERROR"*) bad "no origin: an older run's error leaked in, or read as a failure" ;; *) ok "no origin: not a failure" ;; esac
+done
+
+# Once an origin is added and a run pushes, the local-only line goes away.
+{ run_block "2026-10-21 09:00:01" "OPS: INFO no origin remote: the day's commit is kept locally; nothing pulled or pushed"
+  run_block "2026-10-22 09:00:01" "OPS: backup pushed successfully (origin-private-check: private: github.com/acme/ops is private)"; } > "$LOG"
+out="$(briefing)"
+case "$out" in *"Backup:"*) bad "a later pushed run still reported local only" ;; *) ok "no origin, then a pushed run: quiet" ;; esac
+
+# An ERROR or WARN in the same run wins over the INFO line: that is the one to act on.
+run_block "2026-10-23 09:00:01" "OPS: INFO no origin remote: the day's commit is kept locally; nothing pulled or pushed" \
+  "OPS: WARN could not restore the mode of note.md (was 600)" > "$LOG"
+line="$(grep '^ Backup:' <<< "$(briefing)")"
+case "$line" in
+  *"did not finish clean: WARN could not restore the mode of note.md (was 600)"*) ok "no origin plus a WARN: the WARN is reported" ;;
+  *) bad "no origin plus a WARN: $line" ;;
+esac
 
 # The memory flush queue (secrets-guard's write-time nudges) is counted at boot.
 mkdir -p "$HOME/.claude-compact-cycle"

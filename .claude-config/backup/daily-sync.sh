@@ -32,6 +32,17 @@
 #     pull failed on every run, so nothing was ever backed up. When the pull
 #     fails and `git ls-remote --exit-code` says the branch is absent (exit 2,
 #     not a network or auth error), the run pushes through the gate instead.
+#   - No origin remote: a copy with no remote named `origin` is a supported
+#     setup (OPS works without GitHub). The day's work is still committed, then
+#     the OPS stage logs one INFO line ("no origin remote ...: nothing pulled or
+#     pushed") and returns success; the project and branch-gc stages run as on
+#     any other copy, and the briefing reads the INFO line as "local only". The
+#     test is `git remote` listing no `origin`, which reads only the local
+#     config: an origin that exists but cannot be reached (offline, a dead URL,
+#     no credentials) is never taken for "no origin" and stays a failed pull,
+#     an ERROR. deploy schedules this job on every copy and leaves this choice
+#     to this script (an earlier deploy skipped the schedule on such copies, so
+#     they lost the nightly project pull and branch cleanup too).
 
 set -uo pipefail
 
@@ -164,6 +175,27 @@ backup_ops() {
             return 1
         fi
         committed=1
+    fi
+
+    # No origin remote: the commit above is the whole backup (see Design).
+    # `git remote` reads only the local config, so a network or auth failure
+    # can never land here, and an origin that is configured but broken (a bad
+    # URL, a pushurl with no url) falls through to the pull and fails loudly.
+    # A `git remote` that itself fails is an ERROR, not a no-origin copy. The
+    # match is in bash, not `printf | grep -q`: under pipefail an early grep
+    # exit can fail the pipe and read as "no origin" on a copy that has one.
+    local remotes
+    if ! remotes="$(git remote 2>&1)"; then
+        log "OPS: ERROR could not list the git remotes; nothing pulled or pushed: $(printf '%s' "$remotes" | tail -1)"
+        return 1
+    fi
+    if [[ $'\n'"$remotes"$'\n' != *$'\n'origin$'\n'* ]]; then
+        if [ "$committed" = 1 ]; then
+            log "OPS: INFO no origin remote: the day's commit is kept locally; nothing pulled or pushed"
+        else
+            log "OPS: INFO no origin remote: no local changes to commit; nothing pulled or pushed"
+        fi
+        return 0
     fi
 
     # Then pull, so the tree stays current across hosts. --no-autostash: the
