@@ -37,7 +37,7 @@ Commits are candidates, not attributions: a commit in the window may belong to a
 
 Optional wider sweep: to catch a repo the stamp did not name, sweep `~/OPS/PROJECTS/*/*` for window activity, apply the SAME automation filter, label it "other repos with commits in the window (parallel session or cron, confirm before logging)", and make the operator confirm. Never auto-attribute a swept repo.
 
-No stamp for this KEY? The tmux name can change across a crash or resume (a session that booted as `projecta` can resume as `main`), so `session-start-$KEY` may not match even though the session did stamp. Try the newest stamp as a candidate and sanity-check its cwd and boot_repo against where you are:
+No stamp for this KEY? Under T3 Code the key is `t3-<session id>`, stable across compaction and resume with one stamp per thread, so a missing stamp there means the session never stamped; do not borrow the newest stamp, which may be another thread's in the same directory. Under tmux the key is the session name, which can change across a crash or resume (a session that booted as `projecta` can resume as `main`), so `session-start-$KEY` may not match even though the session did stamp. There, try the newest stamp as a candidate and sanity-check its cwd and boot_repo against where you are:
 
 ```bash
 ls -t "$RUN"/session-start-* 2>/dev/null | head -1   # most-recent session; confirm its cwd matches
@@ -45,9 +45,55 @@ ls -t "$RUN"/session-start-* 2>/dev/null | head -1   # most-recent session; conf
 
 If nothing matches (a session predating the stamp, or non-tmux), say so, fall back to the cwd repo plus `git status` plus a best `--since` estimate, and lean harder on asking the operator what the session covered. Never attribute off a mismatched stamp.
 
+### Cross-check from this session's own transcript
+
+The stamp names the repos a session started in; the transcript names the repos it actually worked in. When `$CLAUDE_CODE_SESSION_ID` is set, this session's transcript is `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/$CLAUDE_CODE_SESSION_ID.jsonl`. The git root of every path its tool calls named is a candidate set to confirm from your own context (a repo it only read needs nothing, and a harness checkout or tool cache can appear in it):
+
+```bash
+T="$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" -maxdepth 2 -name "${CLAUDE_CODE_SESSION_ID:?}.jsonl" 2>/dev/null | head -1)"
+python3 -I - "$T" <<'PY'
+import json, os, re, subprocess, sys
+home = os.path.expanduser("~")
+path_re = re.compile(re.escape(home) + r"/[\w.@+-]+(?:/[\w.@+-]+)*")
+seen = set()
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if rec.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            args = block.get("input") or {}
+            for key in ("file_path", "path", "command"):
+                val = args.get(key)
+                if isinstance(val, str):
+                    val = val.replace("~/", home + "/").replace("$HOME/", home + "/")
+                    seen.update(path_re.findall(val))
+roots = set()
+for p in seen:
+    d = p if os.path.isdir(p) else os.path.dirname(p)
+    while d and d != home and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    if d and d != home:
+        r = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        if r.returncode == 0:
+            roots.add(r.stdout.strip())
+print("\n".join(sorted(roots)))
+PY
+```
+
+For each repo it lists: `git -C <repo> status --short`, `git -C <repo> branch --show-current`, `git -C <repo> log --oneline origin/HEAD..HEAD`, and `git -C <repo> worktree list`. If no transcript is found (a session lost in a rescue, or another host's layout), say so and fall back to the stamp above; never invent a repo list.
+
+The memory side: the `~/.claude-compact-cycle/memory-flush-queue` lines whose pool this session wrote to and whose time falls in its window, plus `git -C ~/OPS status --short -- .claude-memory/`. Queue lines carry no session id, so a line from a concurrent session in the same pool can look like yours; disposition only what you recognize and leave the rest.
+
 ## A leftover stamp the briefing flagged
 
-The boot briefing scans `~/.claude-compact-cycle/session-start-*` and warns when a prior session's stamp was left behind, meaning that session ended without a work-tracking reconciliation and its work may be unlogged. It only warns; finishing the judgment is a close's job, because the briefing has no work-tracking access and must never block boot on a network call. If a warning fired and you are closing, you may reconcile that window too:
+A scan the boot briefing starts in the background (at most every 30 minutes, off the boot path) reads `~/.claude-compact-cycle/session-start-*` and flags a prior session's leftover stamp only when real commits landed in its window, meaning that session ended without a work-tracking reconciliation and its work may be unlogged; an idle leftover stays quiet. The warning the briefing shows can be up to 30 minutes old, and a stamp a close removed stops counting at the next boot. It only warns and never removes a stamp; finishing the judgment is a close's job, because the briefing has no work-tracking access and must never block boot on a network call. If a warning fired and you are closing, you may reconcile that window too:
 
 ```bash
 RUN="$HOME/.claude-compact-cycle"

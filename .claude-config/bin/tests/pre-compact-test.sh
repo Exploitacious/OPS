@@ -9,6 +9,11 @@
 #   - any other repo, a non-GitHub origin, a sub-agent lane's compaction
 #     (agent_id in the payload) and PRE_COMPACT_BRANCH_GC=0 never run it
 #   - the compaction itself is never held up: the hook returns 0 at once
+# It also pins the snapshot's "Deferred tools used before this compaction"
+# section: the deferred tools called since the previous compaction, most recent
+# first, listed before the reading order so post-compact-resume.sh can tell the
+# resumed session which tools to re-select, and no section at all when there is
+# nothing to name or the transcript cannot be read.
 # branch-gc is a stub that records its arguments; HOME, CLAUDE_CONFIG_DIR and
 # every repo are fixtures in this test's own temp dir.
 #
@@ -91,6 +96,60 @@ for kind in lane off; do
   [ "$rc" = 0 ] && [ -n "$snap" ] && ! grep -q 'branch-gc (pre-compact)' "$snap" && [ ! -s "$CALLS" ] \
     && ok "$kind: snapshot written, branch-gc not run" || bad "$kind: rc=$rc snap=$snap calls=$(cat "$CALLS" 2>/dev/null)"
 done
+
+# 6. The deferred-tools section of the snapshot. A compaction drops every deferred tool's
+# schema; the hook records the ones this session called (mcp-reselect.py, from the
+# transcript) so the resume hook can name them. Plain directories (no repo), so the
+# branch-gc step has nothing to do and the snapshot is only what this section needs.
+tool_line()     { printf '{"type":"assistant","isSidechain":%s,"message":{"role":"assistant","content":[{"type":"text","text":"x"},{"type":"tool_use","id":"t","name":"%s","input":{}}]}}\n' "${2:-false}" "$1"; }
+boundary_line() { printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":1},"timestamp":"2026-10-01T00:00:00.000Z"}\n'; }
+SECTION="## Deferred tools used before this compaction"
+# deferred_run NAME PAYLOAD-TRANSCRIPT-ARG: run the hook from a fresh work dir NAME whose
+# transcript is already in $T/NAME.jsonl; $2 is "path" (payload names it) or "nopath".
+deferred_run() {
+  local d="$HOME/deferred/$1" payload
+  mkdir -p "$d"
+  if [ "$2" = path ]; then payload="{\"trigger\":\"manual\",\"reason\":\"test\",\"transcript_path\":\"$T/$1.jsonl\"}"
+  else payload='{"trigger":"manual","reason":"test"}'; fi
+  run_hook "$d" "$payload" >/dev/null
+  snapshot_for "$d"
+}
+# listed SNAPSHOT: the tool names under the section, one per line
+listed() { awk -v s="$SECTION" '$0 == s {on=1; next} on && /^## / {on=0} on && /^- / {sub(/^- /,""); print}' "$1"; }
+
+{ tool_line mcp__old__before_the_last_boundary; boundary_line
+  tool_line mcp__example-server__lookup; tool_line Bash; tool_line Monitor
+  tool_line mcp__example-other__read; tool_line mcp__example-server__lookup
+  tool_line mcp__sidechain__ignored true; } > "$T/since-boundary.jsonl"
+snap="$(deferred_run since-boundary path)"
+got="$(listed "$snap" | tr '\n' ' ')"
+[ "$got" = "mcp__example-server__lookup mcp__example-other__read Monitor " ] \
+  && ok "deferred tools: the calls since the previous boundary, most recent first, a repeat once, plain and sidechain tools left out" \
+  || bad "deferred tools: listed '$got'"
+grep -q "re-select each with ToolSearch" "$snap" && ok "deferred tools: the section tells the resumed session to re-select" || bad "deferred tools: no instruction in the section"
+[ "$(grep -n "^$SECTION" "$snap" | cut -d: -f1)" -lt "$(grep -n '^## Post-compact reading order' "$snap" | cut -d: -f1)" ] \
+  && ok "deferred tools: the section sits before the reading order, so a later appended line never lands inside it" || bad "deferred tools: section order"
+
+{ tool_line mcp__a__one; tool_line mcp__b__two; } > "$T/no-boundary.jsonl"
+snap="$(deferred_run no-boundary path)"
+[ "$(listed "$snap" | tr '\n' ' ')" = "mcp__b__two mcp__a__one " ] \
+  && ok "deferred tools: with no boundary in the transcript the whole window counts" || bad "deferred tools: no-boundary list '$(listed "$snap" | tr '\n' ' ')'"
+
+{ boundary_line; tool_line Bash; tool_line Read; } > "$T/plain-tools.jsonl"
+snap="$(deferred_run plain-tools path)"
+! grep -q "^$SECTION" "$snap" && grep -q '^## Git state' "$snap" \
+  && ok "deferred tools: only plain tools called, so no section and the snapshot is as before" || bad "deferred tools: section written for plain tools"
+
+rm -f "$T/missing.jsonl"
+snap="$(deferred_run missing path)"
+[ -n "$snap" ] && ! grep -q "^$SECTION" "$snap" && ok "deferred tools: a transcript that does not exist never blocks the snapshot" || bad "deferred tools: missing transcript (snapshot '$snap')"
+printf 'not json\n{broken\n' > "$T/garbage.jsonl"; tool_line mcp__a__one >> "$T/garbage.jsonl"
+snap="$(deferred_run garbage path)"
+[ "$(listed "$snap" | tr '\n' ' ')" = "mcp__a__one " ] && ok "deferred tools: garbage lines in the transcript are skipped" || bad "deferred tools: garbage transcript list '$(listed "$snap" | tr '\n' ' ')'"
+tool_line mcp__a__one > "$T/nopath.jsonl"
+snap="$(deferred_run nopath nopath)"
+[ -n "$snap" ] && ! grep -q "^$SECTION" "$snap" && grep -q '^## Git state' "$snap" \
+  && ok "deferred tools: a payload with no transcript_path writes the plain snapshot" || bad "deferred tools: no transcript_path"
 
 echo "pre-compact-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

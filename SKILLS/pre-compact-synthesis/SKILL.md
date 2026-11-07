@@ -1,6 +1,6 @@
 ---
 name: pre-compact-synthesis
-description: Synthesize durable state before a /compact, then closeout. On compact, pre-compact, wrap up, do the thing, or any milestone or natural-break rest stop.
+description: "Synthesize durable state before a /compact, then closeout. On compact, pre-compact, wrap up, do the thing, or any milestone or natural-break rest stop. Also the ask card: what do you need from me, catch me up, any decisions, decisions with implications."
 ---
 
 # Pre compact synthesis
@@ -11,6 +11,23 @@ Four places survive a compact verbatim: git, auto-memory, the task list, and dur
 
 The PreCompact shell hook (`~/OPS/.claude-config/hooks/pre-compact.sh`) already wrote the mechanical snapshot (git state, branch, recent commits) under `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<workspace>/pre-compact-<ts>.md`, and started `branch-gc --apply` in the background for the repo holding the cwd, which appends its result line to the snapshot. Your job is the thoughtful synthesis on top of it, plus the closeout hygiene pass. Work fast and complete: 60 to 90 seconds on a light session, five minutes on a heavy one. Speed never outranks completeness. Knowledge that dies with the context is the one loss this skill prevents.
 
+## The ask card
+
+Fill it whenever something is waiting on the Operator: they ask "what do you need from me", "catch me up", "any decisions", "decisions with implications" or "give me everything", and at every rest stop or close receipt that has an open item. A question like that is not a compaction: fill the card, post it, and stop; do not run the four artifacts. Long lists, bare IDs and unchecked claims are what make an Operator answer "what does this mean", so the shape is fixed.
+
+```
+Waiting on you (at most 3)
+1. <the thing by its plain name>: <why it matters, one line>. I recommend <X>. If you say nothing: <default>.
+2. ...
+
+Decided or handling (one line each; nothing here needs them)
+- <Landed | Running | Decided>: <the thing by name>, <outcome or next step>. <VERIFIED (source, time) | INFERRED | LANE>
+
+Time logged: <hours> on <item>, entries <ids>      (only when this session logged time per CONTEXT/work-tracking.md)
+```
+
+The seven rules that keep it short and checkable (three asks at most, the silent default, names not codes, every claim marked VERIFIED, INFERRED or LANE, re-check carried-over items, record each open ask, the pre-post check) are in `ask-card.md`; read it before posting a card.
+
 ## Choose the break proactively
 
 At a completed research wave, a reviewed change, or a settled plan before a large build, take a compaction break on your own judgment. Do not wait for the context-watch warning: context-watch and automatic compaction are safety nets, and a break taken at a clean seam costs less than one forced mid-step. A fresh compaction followed by no substantive work does not need another cycle.
@@ -19,6 +36,10 @@ Checkpoint before a ceiling, not only before a compact. When a usage window (the
 
 Save exact user decisions, boundaries, unresolved questions, failed approaches, and hard-to-reconstruct identifiers in the anchor before requesting compaction. An API acknowledgement or a completed chat reply does not prove compaction happened. Read [self-compact-cycle.md](self-compact-cycle.md) for the arming order and the checks a host compactor must pass.
 
+## Timed promises need a wake
+
+A thread resumes only on a message, a task notification, or a schedule. Before ending a turn that promises a time ("this lands after 6 PM", "next check at 21:13") or waits on an outside event, arm the wake. In T3 Code that is the `schedule_task` tool with a one-time run time (or an interval), bound to this thread, with a prompt that says what to check and ends by deleting its own schedule with `delete_scheduled_task`. Elsewhere use the host's scheduler, or a background command with an explicit timeout when the wait is short. Report the next run time you were given. If you cannot arm any of these, say plainly that the work waits for the Operator's next message; never end a turn on a time you have not armed.
+
 ## Pause or close first
 
 This is the PAUSE ritual. The session continues after `/compact`, so it does NOT touch work-tracking: time, tickets, or the board. That reconciliation belongs at the end of the work, in session-close.
@@ -26,7 +47,7 @@ This is the PAUSE ritual. The session continues after `/compact`, so it does NOT
 "Close out", "wrap up", and "done" are ambiguous. If the operator was actually finished and you pause-and-compact, their time and WIP never get reconciled. So on an ambiguous end-of-work phrase, ask one question first:
 
 - Continuing this work next session? Then PAUSE: run this skill, compact, leave work-tracking alone.
-- Done for the day or this purpose? Then hand to session-close, which runs this same synthesis, then reconciles time, tickets, and board per `CONTEXT/work-tracking.md`, then tears the session down.
+- Done for the day or this purpose? Then hand to session-close, which runs the same cleanup for the whole session, reconciles time, tickets, and board per `CONTEXT/work-tracking.md`, and tears the session down.
 
 Explicit "compact" / "pre-compact" and the `[context-watch]` nag are unambiguous pause signals. Proceed, no need to ask.
 
@@ -37,14 +58,16 @@ Objectives complete is not a close signal either. When the tracked list empties,
 Walk in order. State each one's state in a sentence, then act, or surface for confirmation when the action is irreversible.
 
 1. Git. `git status --short` per repo touched. Uncommitted changes? Local commits ahead of remote? Messages meaningful to a cold reader? Surface dirty state, never silently commit or push. Push to main is irreversible; never assume authorization.
-2. Auto-memory. Walk the session's moments for lessons worth keeping (operator feedback, a surprising discovery, a non-obvious project fact, an external-system reference). Save anything unsaved under `~/.claude/projects/<workspace>/memory/` with the standard four-type frontmatter, and index it. Skip code patterns, ephemeral state, CLAUDE.md duplicates. Then commit and push the mirror at `~/OPS/.claude-memory/`, or it dies at the next clean clone (see anti-patterns for why this one commit is allowed). Push only when `~/OPS/.claude-config/bin/origin-private-check ~/OPS` both exits 0 and ends with its verdict line, `origin-private-check: private: ...` or `origin-private-check: private by opt-in (ops.pushVerified=true): ...`: an empty or truncated copy of the gate also exits 0, which is why `daily-sync.sh`, `memory-init` and the git-guard push gate test the same pair. Memory must never reach a public origin. Otherwise keep the commit local and tell the Operator the reason the gate printed.
+2. Auto-memory. Walk the session's moments for lessons worth keeping (operator feedback, a surprising discovery, a non-obvious project fact, an external-system reference). Route each first per `CONTEXT/core.md`, "Memory and where knowledge goes". Save anything unsaved under `~/.claude/projects/<workspace>/memory/` with the standard four-type frontmatter, and index it. Skip code patterns, ephemeral state, CLAUDE.md duplicates. Then commit and push the mirror at `~/OPS/.claude-memory/`, or it dies at the next clean clone (see anti-patterns for why this one commit is allowed). Push only when `~/OPS/.claude-config/bin/origin-private-check ~/OPS` both exits 0 and ends with its verdict line, `origin-private-check: private: ...` or `origin-private-check: private by opt-in (ops.pushVerified=true): ...`: an empty or truncated copy of the gate also exits 0, which is why `daily-sync.sh`, `memory-init` and the git-guard push gate test the same pair. Memory must never reach a public origin. Otherwise keep the commit local and tell the Operator the reason the gate printed.
 3. Task list. Mark done tasks completed, delete speculative ones, add follow-on work that emerged. The summary preserves the list verbatim, so a clean list means a clean summary.
 4. Durable anchor. Choose ONE by session type:
    - Project with a `SESSION_HANDOFF.md`: update it with what shipped, what is queued, and pointers, then commit and push it.
    - Project without one: offer to create it if the session was significant. Do not impose.
    - Outside a project: git plus memory plus the task list carry it.
 
-Lead every anchor's reading order with the OPS standing layer (`CONTEXT/how-i-work.md`; `CONTEXT/core.md` is always loaded) before project state, and confirm OPS is synced (`git -C ~/OPS pull --ff-only`). A session that re-grounds in project facts but not the doctrine drifts from how the operator wants work done.
+Lead every anchor's reading order with the OPS standing layer (`CONTEXT/how-i-work.md`; `CONTEXT/core.md` is always loaded, and a foreman's hook prints `CONTEXT/foreman.md` again after the compact) before project state, and confirm OPS is synced (`git -C ~/OPS pull --ff-only`). A session that re-grounds in project facts but not the doctrine drifts from how the operator wants work done.
+
+Stamp from the clock, never from memory: every time written into an anchor, baton, ledger or finding is substituted as the line is written (`$(date '+%F %H:%M %Z')`) or read from `date` first, and a machine stamp already in tool output (`posted_at`, `generated_at`) beats a hand-written approximate time. A typed time drifts from the real one.
 
 ## The resume protocol block
 
@@ -56,7 +79,7 @@ Post-compact sessions over-assume: the summary states positive next-steps but le
 - VERIFY FIRST: <2-3 facts to re-confirm against code/files, not infer>
 - DO NOT: <tempting but out-of-scope things to leave alone>
 - DEAD ENDS: <already tried and abandoned, do not retry>
-- ASK OPERATOR: <open decisions to ask about, "none" if clean>
+- ASK OPERATOR: <open decisions to ask about, "none" if clean; each one also goes where the ask card records it>
 ```
 
 Tag every carried item DECIDED (act on it), PROPOSED (do not execute, it was only weighed), or OPEN (ask). This keeps autonomy on verified ground; the bias still stays toward acting.
@@ -72,7 +95,7 @@ The fifth stage makes the workspace clean and the docs true. Run on every closeo
 1. Run the machine gate: `~/OPS/.claude-config/bin/verify-ops.sh --quiet`. Fix every FAIL now or surface it with a reason.
 2. Flush the memory cache. Every flush-queue line gets one of five dispositions (folded, split, kept, promoted-to-doctrine, promoted-to-standing-orders) and is then deleted. This is a gate, not a suggestion.
 3. Docs reflect reality, per repo touched: CHANGELOG line, no doc claim made false, shipped IDEAS entries removed. "Fix it in a follow-up" is the violation this kills.
-4. Sweep scratch files this session created, and run `.claude-config/bin/branch-gc --apply` on each repo touched (worktrees go to a 7-day trash; the detail is in `closeout-hygiene.md`).
+4. Clean up after this session (`closeout-hygiene.md` step 4): its scratch files, `.claude-config/bin/branch-gc --apply` on each repo touched (worktrees go to a 7-day trash), the Docker images, containers and volumes it built, and its `$TMPDIR` scratch; say what was freed.
 5. Reconcile pending items in every repo this session touched: delete what the work completed, correct what drifted, route new pending work to its home (`closeout-hygiene.md` step 5).
 6. Update the operator's notes vault if they keep one (optional, `closeout-hygiene.md` step 6).
 7. Stamp it: `mkdir -p ~/.local/state/ops && date -Is > ~/.local/state/ops/last-closeout`.
@@ -98,11 +121,12 @@ Pre-compact synthesis complete.
 3. TaskCreate: <state>. <cleanups>.
 4. Durable anchor: <type>. <action>.
 5. Hygiene: verify-ops <ok/warn/fail>; <memories routed / docs fixed / scratch swept or "clean">.
+6. Waiting on you: the ask card, or "nothing".
 
 Ready to /compact when you are.
 ```
 
-Keep it tight. Four to five lines, no wall of text.
+Keep it tight. Five to six lines, no wall of text.
 
 ## Anti-patterns
 

@@ -97,12 +97,11 @@ check_changelog() {
 check_linerefs() {
   local hits f name mounted="" skills=()
   mounted=" $(awk -F'\t' '$1 !~ /^#/ && NF >= 2 {printf "%s ", $1}' "$OPS/SKILLS/VENDORED.tsv" 2>/dev/null)"
-  for f in "$OPS"/SKILLS/*/SKILL.md; do
-    [ -f "$f" ] || continue
+  while IFS= read -r f; do
     name="$(basename "$(dirname "$f")")"
     case "$mounted" in *" $name "*) continue ;; esac
     skills+=("$f")
-  done
+  done < <(_ops_own_skill_mds)
   hits="$(grep -rnE '(line ~?[0-9]{2,}|:[0-9]{3,}\))' \
     "$OPS/AGENTS.md" "$OPS/README.md" "$OPS/DEPLOYMENT.md" "$OPS/BOOTSTRAP.md" \
     "$OPS"/CONTEXT/*.md ${skills[@]+"${skills[@]}"} 2>/dev/null | grep -v 'verify-ops' | grep -v '"~line' | head -20)" || true
@@ -111,26 +110,115 @@ check_linerefs() {
 
 # 5. Doctrine citation range: 'Principle N' / bare 'P<N>' must exist in
 # how-i-work.md § Principles (headings "### P<N>. <title>").
+# A PSA project number (P, 8 digits, a dot, 4 digits, such as P20260101.0001) is
+# not a principle: it is matched whole and dropped, so a work-tracking file that
+# cites one cannot read as "P20260101" and fail every run. Every real P<N> and
+# Principle N citation is still checked.
 check_citations() {
-  local max n bad=""
+  local max n f bad=""
+  local -a skills=()
   max="$(grep -cE '^### P[0-9]+\. ' "$OPS/CONTEXT/how-i-work.md" 2>/dev/null)" || max=0
   [ "$max" -gt 0 ] || { warn "could not count principles in how-i-work.md"; return; }
+  while IFS= read -r f; do skills+=("$f"); done < <(_ops_own_skill_mds)
   while IFS= read -r n; do
     [ -n "$n" ] && [ "$n" -gt "$max" ] && bad="$bad P$n"
-  done < <(grep -rhoE '([Pp]rinciple |P)[0-9]+' \
-      "$OPS/AGENTS.md" "$OPS"/CONTEXT/*.md "$OPS"/SKILLS/*/SKILL.md 2>/dev/null \
-      | grep -oE '[0-9]+' | sort -u)
+  done < <(grep -rhoE '([Pp]rinciple |P)[0-9]+(\.[0-9]{4})?' \
+      "$OPS/AGENTS.md" "$OPS"/CONTEXT/*.md ${skills[@]+"${skills[@]}"} 2>/dev/null \
+      | grep -vE '^P[0-9]{8}\.[0-9]{4}$' | grep -oE '^([Pp]rinciple |P)[0-9]+' | grep -oE '[0-9]+' | sort -u)
   [ -z "$bad" ] && ok "doctrine citations in range (1..$max)" || fail "citations to nonexistent principles:$bad (doctrine has $max)"
 }
 
-# 6. Memory index size limits (binary truncates ~24.4KB).
+# 6. Each memory pool fits what loads it. The Stage-1 settings turn Claude
+# Code's native auto-memory load off (autoMemoryEnabled false) and register the
+# memory-digest.sh SessionStart hook, so the digest memory-index builds is the
+# memory load: it holds a fixed character budget (DIGEST_CAP in memory-index),
+# past which an entry keeps only its name, then drops out. memory-index
+# --digest-fit runs that same build once per pool, so a pool that WARNs here is
+# one whose entries lose their descriptions at boot. WARN, because the remedy is
+# a prune (the memory-prune skill) and the pool is the Operator's to prune. FAIL
+# when the indexer cannot measure a pool: the digest fails the same way at boot,
+# and a green line would hide a broken memory load. A partial run can print an
+# over-budget row before it crashes, so every requested pool must be accounted
+# for. A copy whose memory-index has no --digest-fit keeps the earlier check,
+# MEMORY.md against the native load's truncation near 24 KB.
 check_memory_indexes() {
-  local over=""
+  local idx="$OPS/.claude-config/bin/memory-index" py out rc line pool total desc named gone budget
+  local over="" errs="" measured=0
+  local -a pools=()
+  if [ ! -f "$idx" ] || ! grep -qF -- '--digest-fit' "$idx" 2>/dev/null; then
+    _memory_index_native_size
+    return
+  fi
+  for pool in "$OPS/.claude-memory"/*/; do [ -d "$pool" ] && pools+=("${pool%/}"); done
+  [ "${#pools[@]}" -gt 0 ] || { ok "no memory pools to fit"; return; }
+  py="$(hook_python 2>/dev/null)" || { warn "no Python 3: cannot measure the memory digest fit"; return; }
+  budget="$(sed -n 's/^DIGEST_CAP = \([0-9][0-9]*\).*/\1/p' "$idx" | head -n 1)"; budget="${budget:-9000}"
+  out="$("$py" -I "$idx" --digest-fit "${pools[@]}" 2>&1)"; rc=$?
+  # A fit line is tab-separated; anything else (a warning, a traceback) is not
+  # a measurement, and the pool it should have measured counts as missing.
+  while IFS= read -r line; do
+    case "$line" in *$'\t'*) ;; *) continue ;; esac
+    IFS=$'\t' read -r pool total desc named gone <<< "$line"
+    if [ "$total" = error ]; then errs="$errs ${pool##*/}($desc)"; continue; fi
+    if ! [[ "$total" =~ ^[0-9]+$ && "$desc" =~ ^[0-9]+$ && "$named" =~ ^[0-9]+$ && "$gone" =~ ^[0-9]+$ ]] \
+       || [ "$((desc + named + gone))" -ne "$total" ]; then
+      errs="$errs ${pool##*/}(unreadable fit line)"; continue
+    fi
+    measured=$((measured + 1))
+    [ $((named + gone)) -gt 0 ] && over="$over ${pool##*/}(${named} by name only, ${gone} not shown, of ${total})"
+  done <<< "$out"
+  [ "$measured" -eq "${#pools[@]}" ] || errs="$errs ($measured/${#pools[@]} pools measured)"
+  if [ -n "$errs" ] || [ "$rc" != 0 ]; then
+    fail "memory digest fit could not be measured (exit $rc):${errs:- $(printf '%s' "$out" | tail -n 1)}"
+  elif [ -n "$over" ]; then
+    warn "memory pool over the ${budget}-character digest budget (descriptions drop at boot; prune when you choose, with the memory-prune skill):$over"
+  else
+    ok "every memory pool fits the ${budget}-character digest with its descriptions"
+  fi
+}
+
+# The check before the digest, for a memory-index without --digest-fit: the
+# native load truncated MEMORY.md near 24.4 KB.
+_memory_index_native_size() {
+  local over="" idx sz
   while IFS= read -r idx; do
-    local sz; sz="$(wc -c < "$idx")"
+    sz="$(wc -c < "$idx")"
     [ "$sz" -gt 24576 ] && over="$over $(basename "$(dirname "$idx")")(${sz}B)"
   done < <(find "$OPS/.claude-memory" -maxdepth 2 -name MEMORY.md 2>/dev/null)
   [ -z "$over" ] && ok "all memory indexes under 24KB" || warn "memory index over 24KB limit (entries truncate; run /memory-prune):$over"
+}
+
+# 6b. Memory pool entry cap. A pool past POOL_CAP entries (memory-index; 60 when
+# it names none) holds more than the digest can describe, so the rest arrive by
+# name only or not at all. WARN only, never FAIL: a pool is the Operator's
+# content, and this gate never caps, prunes or blocks it; the memory-prune skill
+# offers the prune. memory-index --check prints the generated index, one line
+# per entry, which is the count here; it exits 0 or 2 (an entry needs a name:
+# or title: backfill, not this check's finding), and its own cap is a stderr
+# WARN, never an exit code. Any other exit is a FAIL, as is a missing
+# memory-index: the index and digest hooks run the same tool, so a pool it
+# cannot read is a broken memory load, not a pool under the cap.
+check_memory_pool_cap() {
+  local idx="$OPS/.claude-config/bin/memory-index" py pool name out rc n cap over="" errs="" seen=0
+  [ -f "$idx" ] || { fail "memory-index missing: cannot count memory pool entries, and the memory hooks have nothing to run"; return; }
+  py="$(hook_python 2>/dev/null)" || { warn "no Python 3: cannot count memory pool entries"; return; }
+  cap="$(sed -n 's/^POOL_CAP = \([0-9][0-9]*\).*/\1/p' "$idx" | head -n 1)"; cap="${cap:-60}"
+  for pool in "$OPS/.claude-memory"/*/; do
+    [ -d "$pool" ] || continue
+    pool="${pool%/}"; name="${pool##*/}"; seen=$((seen + 1))
+    out="$("$py" -I "$idx" --check "$pool" 2>/dev/null)"; rc=$?
+    case "$rc" in
+      0|2)
+        n="$(printf '%s\n' "$out" | grep -c .)"
+        [ "$n" -gt "$cap" ] && over="$over $name($n)" ;;
+      *) errs="$errs $name(exit $rc)" ;;
+    esac
+  done
+  [ -z "$errs" ] || fail "memory pool entries could not be counted (memory-index --check failed):$errs"
+  [ -z "$over" ] || warn "memory pool over the ${cap}-entry cap (the digest names or drops the rest; prune when you choose, with the memory-prune skill):$over"
+  if [ -z "$errs$over" ]; then
+    if [ "$seen" -eq 0 ]; then ok "no memory pools to cap"; else ok "every memory pool is within the ${cap}-entry cap ($seen pools)"; fi
+  fi
 }
 
 # 7. NOTES/ root holds only the MASTER/ vault.
@@ -140,22 +228,32 @@ check_notes_root() {
   [ -z "$stray" ] && ok "NOTES/ root clean (vault-only)" || fail "files misfiled at NOTES/ root (move into NOTES/MASTER/): $stray"
 }
 
-# 8. Secrets scan over memory pools + lessons files.
+# 8. Secrets scan over memory pools + lessons files. secrets-scan.sh exits 1 on
+# a hit and 2 when grep could not scan a line (its reason goes to stderr), so
+# the two are reported apart and the scanner's own words are kept: a scan that
+# could not read a line has proven nothing clean, but it found no secret either.
 check_secrets() {
-  local scan="$OPS/.claude-config/bin/secrets-scan.sh" out
+  local scan="$OPS/.claude-config/bin/secrets-scan.sh" out errf err="" rc=0
   [ -x "$scan" ] || { warn "secrets-scan.sh missing/not executable"; return; }
-  if out="$("$scan" "$OPS/.claude-memory" "$OPS/CONTEXT/projects" 2>/dev/null)"; then
-    ok "no literal secrets in memory/lessons"
-  else
-    fail "literal secrets detected (sanitize to SOPS/.env pointers):"$'\n'"$(echo "$out" | head -10)"
-  fi
+  errf="$(mktemp 2>/dev/null)" || errf=""
+  out="$("$scan" "$OPS/.claude-memory" "$OPS/CONTEXT/projects" 2>"${errf:-/dev/null}")" || rc=$?
+  if [ -n "$errf" ]; then err="$(head -n 5 -- "$errf" 2>/dev/null)"; rm -f -- "$errf"; fi
+  case "$rc" in
+    0) ok "no literal secrets in memory/lessons" ;;
+    1) fail "literal secrets detected (sanitize to SOPS/.env pointers):"$'\n'"$(printf '%s\n' "$out" | head -10)" ;;
+    2) fail "the secrets scanner could not read some lines, so memory/lessons are not proven clean (exit 2):"$'\n'"${err:-no reason given}" ;;
+    *) fail "the secrets scanner did not run (exit $rc):"$'\n'"${err:-no reason given}" ;;
+  esac
 }
 
 # 9. SKILLS/README index covers every skill dir. SKILLS/synced is Claude Code's claude.ai skill
 # sync (gitignored), not an OPS skill; a copy already committed is flagged so the owner untracks it.
+# A symlinked entry is a machine-local link to a skill another repo owns and indexes, not one of
+# this README's.
 check_skills_index() {
   local missing=""
   for d in "$OPS"/SKILLS/*/; do
+    [ -L "${d%/}" ] && continue
     local b; b="$(basename "$d")"
     [ "$b" = synced ] && continue
     grep -q "$b" "$OPS/SKILLS/README.md" || missing="$missing $b"
@@ -163,6 +261,80 @@ check_skills_index() {
   [ -z "$missing" ] && ok "SKILLS README indexes all entries" || warn "skills absent from SKILLS/README.md index:$missing"
   if [ -n "$(git -C "$OPS" ls-files -- SKILLS/synced 2>/dev/null | head -1)" ]; then
     warn "SKILLS/synced is tracked: claude.ai org skills are committed to this repo; untrack them with: git -C \"$OPS\" rm -r --cached --quiet SKILLS/synced && git -C \"$OPS\" commit -m 'chore(skills): stop tracking synced org skills'"
+  fi
+}
+
+# The SKILL.md files this checkout holds itself, one per line: SKILLS/<name>
+# entries that are real directories. A symlinked entry is a machine-local link
+# to a skill another repo owns, so it is linted there. Mounted skills
+# (SKILLS/VENDORED.tsv) are listed; a check that must skip them does so.
+_ops_own_skill_mds() {
+  local d
+  for d in "$OPS"/SKILLS/*/; do
+    [ -L "${d%/}" ] && continue
+    [ -f "${d}SKILL.md" ] && printf '%s\n' "${d}SKILL.md"
+  done
+  return 0
+}
+
+# 9b. Skill size. Every session loads the skill listing, and a SKILL.md body is
+# read whole when the skill is used: a file past 16 KB (16,384 bytes) or a line
+# past 1,500 characters is a wall the reader skims. Both limits are inclusive.
+# WARN, never FAIL: trimming a skill is an editing task (split it, or move detail
+# into a reference file beside it), and a skill the Operator wrote is theirs to
+# trim. Skipped: mounted skills (SKILLS/VENDORED.tsv, edited at their source
+# repo), SKILLS/synced (Claude Code's claude.ai sync), and a symlinked entry (a
+# skill another repo owns). FAIL only when the lint itself cannot run.
+check_skill_size() {
+  local py out rc name
+  local -a mounted=()
+  py="$(hook_python 2>/dev/null)" || { warn "no Python 3: cannot measure skill sizes"; return; }
+  while IFS= read -r name; do
+    [ -n "$name" ] && mounted+=("$name")
+  done < <(awk -F'\t' '$1 !~ /^#/ && NF >= 2 {print $1}' "$OPS/SKILLS/VENDORED.tsv" 2>/dev/null)
+  out="$("$py" -I - "$OPS/SKILLS" ${mounted[@]+"${mounted[@]}"} 2>&1 <<'PY'
+import os
+import sys
+
+root, skip = sys.argv[1], set(sys.argv[2:]) | {"synced"}
+LIMIT_BYTES, LIMIT_LINE = 16384, 1500
+try:
+    names = sorted(os.listdir(root))
+except OSError as exc:
+    print("ERROR\t%s" % exc)
+    sys.exit(1)
+for name in names:
+    d = os.path.join(root, name)
+    f = os.path.join(d, "SKILL.md")
+    if name in skip or os.path.islink(d) or not os.path.isdir(d):
+        continue
+    if os.path.islink(f) or not os.path.isfile(f):
+        continue
+    try:
+        with open(f, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        print("ERROR\t%s: %s" % (name, exc))
+        sys.exit(1)
+    longest, at = 0, 0
+    for i, line in enumerate(raw.decode("utf-8", "replace").split("\n"), 1):
+        if len(line) > longest:
+            longest, at = len(line), i
+    why = []
+    if len(raw) > LIMIT_BYTES:
+        why.append("%d bytes" % len(raw))
+    if longest > LIMIT_LINE:
+        why.append("line %d is %d characters" % (at, longest))
+    if why:
+        print("%s\t%s" % (name, ", ".join(why)))
+PY
+)"; rc=$?
+  if [ "$rc" != 0 ]; then
+    fail "skill size lint could not run: $(printf '%s' "$out" | tail -n 2 | tr '\n' ' ')"
+  elif [ -n "$out" ]; then
+    warn "SKILL.md over the size limit (16 KB, or a line over 1,500 characters; split it or move detail into a reference file): $(printf '%s\n' "$out" | awk -F'\t' '{printf "%s%s (%s)", (NR>1 ? "; " : ""), $1, $2}')"
+  else
+    ok "every SKILL.md this checkout holds is within 16 KB and 1,500 characters a line"
   fi
 }
 
@@ -760,9 +932,11 @@ main() {
   check_linerefs
   check_citations
   check_memory_indexes
+  check_memory_pool_cap
   check_notes_root
   check_secrets
   check_skills_index
+  check_skill_size
   check_projects_map
   check_handoffs
   check_autonomy_settings

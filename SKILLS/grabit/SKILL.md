@@ -1,6 +1,6 @@
 ---
 name: grabit
-description: "Use when the operator wants a real file off this headless box and onto their own machine: they say send me this, grab this, put it in my downloads, pull this off the box, or push this to my machine. Pushes the named file over Tailscale to their Downloads via the grabit binary, not in-chat file delivery. Local agent sessions only; runs a shell binary over the tailnet."
+description: "Use when the operator wants a real file off this headless box onto their own machine: send me this, grab this, put it in my downloads. Pushes it over Tailscale to their Downloads with the grabit binary, not in-chat delivery. Not for an image attached in a T3 message (a saved path: read it)."
 ---
 
 # grabit: send a file off the headless box
@@ -32,7 +32,13 @@ Every transfer rides the tailnet (WireGuard-encrypted) and is never public: the 
 
 Default to plain push: one-shot, no sudo, lands in the operator's inbox. Reach for `--serve` only when push will not fit, or the operator explicitly wants a link, since it needs sudo and leaves an endpoint standing.
 
-To receive files the operator pushed to this box, screenshots included, use the `grabit-screenshots` skill instead. This skill is the send direction only.
+The receive direction is the next section. Most "look at this image" requests are not receives at all.
+
+## Receiving: an image in a T3 message is already a path
+
+An image attached in a T3 message arrives in the prompt as a saved path (`[User attached one or more files ...]`): read it directly with the Read tool and say what you see. Do not run grabit for it. A receive skill whose description matches ordinary talk about pasted or attached images fires on requests that need no pull at all.
+
+Pull with `~/OPS/.claude-config/bin/grabit --inbox` only when the operator says they pushed (Taildropped) something to this box. It pulls everything waiting into `~/grabit-inbox` and lists what landed; the `grabit-screenshots` skill carries the full receive procedure (read each pending image newest first, say what you actually see before interpreting it, never ask for a path or suggest base64-pasting an image). An empty inbox means nothing arrived: say so rather than guessing.
 
 ## Workflow
 

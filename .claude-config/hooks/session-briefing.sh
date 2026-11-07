@@ -13,8 +13,10 @@
 # (settings.json is symlinked into every config dir).
 #
 # MUST stay quiet-when-empty: only the posture header is unconditional;
-# reminders / snapshot / memory lines print only when they have something to
-# say, so the banner never becomes noise the operator learns to ignore.
+# reminders / snapshot / repo / memory lines print only when they have something to
+# say, so the banner never becomes noise the operator learns to ignore. A line also
+# stays off what nothing can act on (a throwaway or empty memory pool is not named as
+# unadopted), and a lane gets one line instead of the briefing (see the lane gate).
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +42,27 @@ if [[ ! -t 0 ]]; then
     _src="$(printf '%s' "$_payload" | hook_field source 2>/dev/null)" || _src=""
   fi
 fi
+
+# A lane is not a foreman. A T3-delegated lane is its own top-level session, so it
+# boots through this hook like the main thread and used to get the whole briefing
+# (memory flush queue, hygiene, update and backup lines), none of which it can act
+# on: those lines are the foreman's. bin/lane-class says foreman, t3-lane or
+# agent-lane; a lane gets one line and nothing else from here, and no state is
+# written for it. A missing lane-class, a hung one (cut at 3 s) or any error in it
+# is a foreman: the behavior before the gate existed. lane-rules.sh hands a lane its
+# own shell rules at the same boot.
+LANE_CLASS="foreman"
+_lc="$HOOK_DIR/../bin/lane-class"
+if [ -x "$_lc" ]; then
+  _to="$(hook_timeout 2>/dev/null)" || _to=""
+  if [ -n "$_to" ]; then LANE_CLASS="$("$_to" -k 1 3 "$_lc" <<<"${_payload:-}" 2>/dev/null)" || LANE_CLASS="foreman"
+  else LANE_CLASS="$("$_lc" <<<"${_payload:-}" 2>/dev/null)" || LANE_CLASS="foreman"; fi
+fi
+case "$LANE_CLASS" in
+  t3-lane|agent-lane)
+    printf ' Briefing: %s session; the foreman briefing (memory flush queue, hygiene, backup and update lines) is not printed for lanes.\n' "$LANE_CLASS"
+    exit 0 ;;
+esac
 
 # --- worker posture ---
 gate="Sonnet 5.5 default lane · Opus 5.5 foreman and high-criticality lanes"
@@ -98,6 +121,91 @@ if ls "$SNAP_DIR"/pre-compact-*.md >/dev/null 2>&1; then
   printf ' Snapshot: last pre-compact for this project @ %s\n' "$ts"
 fi
 
+# --- parked project root (quiet-when-clean) ---
+# A thread that starts in a repo's MAIN checkout works on whatever that checkout has
+# checked out. A checkout can sit on an old feature branch for weeks, many commits
+# behind its default branch, and every new thread there then begins on that branch
+# with nothing in the banner saying so. The line speaks when the checkout is on a
+# branch other than the repo's default (origin/HEAD, else main, else master) or its
+# commit is behind the remote-tracking default, and says nothing on the default
+# branch when not behind. LOCAL refs only, no fetch and no network: "behind" means
+# behind the last fetch, so a quiet line does not prove the repo is current. A linked
+# worktree (its .git is a file) is parked on purpose, one branch per task, and a cwd
+# under no repo has nothing to say, so neither runs git: the walk up to .git is pure
+# bash. A main checkout pays three git calls (four when origin/HEAD names a branch
+# other than main or master), each capped at 2 s by hook_timeout (gnutimeout, not
+# uutils' 100 ms polling) when the host has a timeout binary; without one the calls
+# run uncapped. GIT_OPTIONAL_LOCKS=0 keeps the probe from ever taking an index lock.
+# A probe that fails or times out says so rather than printing nothing, because a
+# silent probe would read as a clean checkout. No origin/HEAD and no main or master
+# leaves nothing to compare against, which is the one silent case.
+_RG_TO=""
+_repo_git() {  # _repo_git <top> <git args...>: one read-only local probe, capped
+  local top="$1"; shift
+  if [ -n "$_RG_TO" ]; then GIT_OPTIONAL_LOCKS=0 "$_RG_TO" 2 git -C "$top" "$@" 2>/dev/null
+  else GIT_OPTIONAL_LOCKS=0 git -C "$top" "$@" 2>/dev/null; fi
+}
+_repo_failed() {  # _repo_failed <repo name> <git exit code, or x for unreadable output>
+  local why
+  case "$2" in 124) why="timed out after 2s" ;; x) why="unreadable git output" ;; *) why="git exit $2" ;; esac
+  printf ' Repo:    %s: branch check failed (%s); branch state unchecked\n' "$1" "$why"
+}
+parked_root_line() {
+  local d="$PWD" top="" repo br="" dflt="" refs ref sym rc behind="" rhead="" rref="" have_remote="" msg=""
+  local m_main="" m_master="" r_main="" r_master=""
+  while [ -n "$d" ]; do
+    if [ -e "$d/.git" ]; then [ -d "$d/.git" ] && top="$d"; break; fi
+    d="${d%/*}"
+  done
+  [ -n "$top" ] || return 0
+  repo="${top##*/}"
+  # hook_timeout forks, so it runs only once a main checkout is in hand.
+  _RG_TO="$(hook_timeout)" || _RG_TO=""
+  # symbolic-ref -q exits 1 for a detached HEAD (a state, not an error) and 128 on failure.
+  br="$(_repo_git "$top" symbolic-ref -q --short HEAD)"; rc=$?
+  if [ "$rc" -gt 1 ]; then _repo_failed "$repo" "$rc"; return 0; fi
+  refs="$(_repo_git "$top" for-each-ref --format='%(refname) %(symref)' \
+    refs/remotes/origin/HEAD refs/remotes/origin/main refs/remotes/origin/master refs/heads/main refs/heads/master)"; rc=$?
+  if [ "$rc" -ne 0 ]; then _repo_failed "$repo" "$rc"; return 0; fi
+  while read -r ref sym; do
+    case "$ref" in
+      refs/remotes/origin/HEAD) rhead="${sym#refs/remotes/origin/}" ;;
+      refs/remotes/origin/main) r_main=1 ;;
+      refs/remotes/origin/master) r_master=1 ;;
+      refs/heads/main) m_main=1 ;;
+      refs/heads/master) m_master=1 ;;
+    esac
+  done <<< "$refs"
+  dflt="$rhead"
+  if [ -z "$dflt" ]; then
+    if [ -n "$m_main" ] || [ -n "$r_main" ]; then dflt=main
+    elif [ -n "$m_master" ] || [ -n "$r_master" ]; then dflt=master; fi
+  fi
+  [ -n "$dflt" ] || return 0
+  case "$dflt" in
+    main) have_remote="$r_main" ;;
+    master) have_remote="$r_master" ;;
+    *) # origin/HEAD names some other branch: is its remote-tracking ref there?
+      rref="$(_repo_git "$top" for-each-ref --format='%(refname)' "refs/remotes/origin/$dflt")"; rc=$?
+      if [ "$rc" -ne 0 ]; then _repo_failed "$repo" "$rc"; return 0; fi
+      [ -z "$rref" ] || have_remote=1 ;;
+  esac
+  # No remote-tracking default (never fetched, or no remote) means nothing to be behind.
+  if [ -n "$have_remote" ]; then
+    behind="$(_repo_git "$top" rev-list --count "HEAD..refs/remotes/origin/$dflt")"; rc=$?
+    if [ "$rc" -ne 0 ]; then _repo_failed "$repo" "$rc"; return 0; fi
+    case "$behind" in ''|*[!0-9]*) _repo_failed "$repo" x; return 0 ;; esac
+    [ "$behind" -eq 0 ] || msg="$behind commit(s) behind origin/$dflt"
+  fi
+  if [ "$br" != "$dflt" ]; then
+    printf ' Repo:    %s is on %s, not %s%s (local refs, no fetch)\n' "$repo" "${br:-a detached HEAD}" "$dflt" "${msg:+; $msg}"
+  elif [ -n "$msg" ]; then
+    printf ' Repo:    %s %s is %s (local refs, no fetch)\n' "$repo" "$dflt" "$msg"
+  fi
+  return 0
+}
+parked_root_line
+
 # --- reminders (operator drops notes into this file; lines starting with # are headers) ---
 REM="$OPS_DIR/.claude-reminders.md"
 if [ -s "$REM" ]; then
@@ -133,7 +241,7 @@ if [ -s "$FQ" ]; then
 fi
 
 # --- hygiene (quiet-when-clean): dirty repos, drift-gate state, closeout age ---
-STATE_DIR="$HOME/.local/state/ops"
+STATE_DIR="${OPS_STATE_DIR:-$HOME/.local/state/ops}"
 hyg=""
 for repo in "$OPS_DIR" "$HOME/linuxploitacious"; do
   [ -d "$repo/.git" ] || continue
@@ -155,32 +263,51 @@ if [ -f "$CLOSE" ]; then
 fi
 # work-tracking backstop: a session that did work but never ran session-close (so
 # its reconciliation gate never fired) leaves a session-start stamp behind:
-# session-close deletes it on reconcile. A stamp whose tmux session is GONE =
-# abandoned, its work likely unreconciled. Skip this session's own key and any
+# session-close deletes it on reconcile. A leftover stamp is judged by evidence, not
+# counted: it is flagged only when a repository it touched shows real commits in its
+# own window (hooklib.sh, orphan_stamp_verdict). Skip this session's own key and any
 # still-live tmux (paused / parallel sessions are not abandoned).
+#
+# THE SWEEP IS NOT ON THE BOOT PATH. A leftover stamp stays until session-close, and
+# under T3 every thread that never closes leaves one, so judging them inline made boot
+# grow with the set (126 stamps cost 49 s on one box, and every new session waits on
+# this hook before its first model call). orphan_scan_spawn (hooklib.sh) starts the
+# sweep detached, under a lock and a 30 min throttle (OPS_ORPHAN_SCAN_INTERVAL, in
+# seconds); boot pays for a throttle check and a fork, then reports what the last scan
+# left in the state dir. Flags can be up to one interval old, but a flagged stamp that
+# session-close has since deleted stops counting at the next boot. A failed or vanished
+# scan is named here every boot until a later scan passes. OPS_ORPHAN_SCAN=sync runs
+# the sweep inline instead, with no throttle (tests, or a closeout that wants fresh
+# flags). The sweep never removes or moves a stamp.
 RUN="$HOME/.claude-compact-cycle"
 CUR_KEY="$(work_session_key 2>/dev/null || echo)"
 if [ -d "$RUN" ]; then
-  _now="$(date +%s)"; _orphans=0
-  for st in "$RUN"/session-start-*; do
-    [ -e "$st" ] || continue
-    k="$(basename "$st")"; k="${k#session-start-}"
-    [ -n "$CUR_KEY" ] && [ "$k" = "$CUR_KEY" ] && continue
-    raw="$(grep -m1 '^tmux=' "$st" 2>/dev/null | cut -d= -f2-)"
-    if [ -n "$raw" ] && [ "$raw" != "-" ] && command -v tmux >/dev/null 2>&1; then
-      tmux has-session -t "$raw" 2>/dev/null && continue   # still alive, not abandoned
-    else
-      # no tmux to check against: only flag if the stamp is clearly stale (>18h)
-      mt="$(stat -c %Y "$st" 2>/dev/null || echo "$_now")"
-      [ "$(( (_now - mt) / 3600 ))" -lt 18 ] && continue
-    fi
-    _orphans=$((_orphans + 1))
-  done
-  [ "${_orphans:-0}" -gt 0 ] && hyg="$hyg ${_orphans} session(s) abandoned without a work-tracking reconciliation; work may be unlogged (run session-close to reconcile) ·"
+  orphan_scan_spawn "$RUN" "$STATE_DIR" "$CUR_KEY" "${OPS_ORPHAN_SCAN:-bg}"
+  orphan_scan_report "$RUN" "$STATE_DIR" "$CUR_KEY"
+  hyg="$hyg$ORPHAN_SCAN_HYG"
 fi
-# unadopted memory pools: real dirs (not symlinks) mean git-sync misses them
+# unadopted memory pools: real dirs (not symlinks) mean git-sync misses them. Not a
+# pool worth adopting: a "-tmp*" project (a throwaway cwd), a T3 "No project" thread
+# (cwd ~/.t3/scratch/<date>-<title>-<id>: each makes an empty memory/ dir and the line
+# named it on every boot), or an EMPTY pool (git-sync has nothing in it to miss).
+# Claude encodes every non-alphanumeric of a cwd as "-" (the dot of .t3 too), but a
+# hook or older build that replaces only "/" leaves -home-<user>-.t3-scratch-, so both
+# spellings are skipped; derived from $HOME, never a fixed user.
+t3s_s="${HOME}/.t3/scratch/"; t3s_s="${t3s_s//\//-}"; t3s_d="${t3s_s//./-}"
 for md in "$CFG"/projects/*/memory; do
-  [ -d "$md" ] && [ ! -L "$md" ] && hyg="$hyg unadopted memory pool ($(basename "$(dirname "$md")")): run .claude-config/bin/memory-init ·" && break
+  pk="${md%/memory}"; pk="${pk##*/}"
+  case "$pk" in -tmp*|*-AppData-Local-Temp*|*claude-tmp*|*t3code-claude-title*|"$t3s_d"*|"$t3s_s"*) continue ;; esac
+  [ -d "$md" ] && [ ! -L "$md" ] || continue
+  pk_full=""
+  # Match memory-init's empty-source rule: a generated index alone is no
+  # content to adopt, so suggesting that command would never clear the nudge.
+  for pk_f in "$md"/* "$md"/.[!.]*; do
+    [ "$pk_f" = "$md/MEMORY.md" ] && continue
+    [ -e "$pk_f" ] && { pk_full=1; break; }
+  done
+  [ -n "$pk_full" ] || continue
+  hyg="$hyg unadopted memory pool ($pk): run .claude-config/bin/memory-init ·"
+  break
 done
 if [ -n "$hyg" ]; then
   printf ' Hygiene:%s\n' "${hyg% ·}"

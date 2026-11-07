@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# await: wait for a condition by re-running a check, then continue. The sanctioned
+# replacement for `sleep N; check`, which Claude Code refuses ("Blocked: sleep N
+# followed by: ..."). The refusal inspects the command string the Bash tool is
+# given; the pause here is inside this script, so a plain `await -- <check>` is
+# one ordinary command. Lanes hit the refusal most, and rarely retried with a
+# sanctioned wait, so the lane rule block (hooks/lane-rules.sh) names this tool.
+#
+# Usage:
+#   await [--timeout SEC] [--every SEC] [-q] [-v] -- <check command...>
+#   await [--timeout SEC] [--every SEC] --pid PID            wait until PID has exited
+#   await [--timeout SEC] [--every SEC] --file PATH [--grep ERE]
+#                                                            wait until PATH exists
+#                                                            (and a line matches ERE)
+#
+#   --timeout SEC   give up after SEC seconds (decimals ok; default 110, just under
+#                   the Bash tool's 120 s default, so a foreground wait returns its
+#                   own answer instead of being killed). For a longer wait, run it
+#                   with run_in_background (its exit wakes the thread) or in Monitor.
+#   --every SEC     pause between checks (decimals ok; default 2; never under 0.1).
+#   -q              no final status line.   -v  one line per attempt.
+#
+# The check runs again until it exits 0, then await exits 0. A check that is still
+# failing when the time is up ends the wait with exit 124 (the same code timeout(1)
+# uses) and the last failing output on stderr. A check that outlives the remaining
+# time is stopped. The check's stdin is /dev/null; failed attempts are silent; the
+# successful attempt's stdout is passed through. A single argument that holds shell
+# syntax (a space, a pipe, `;`, `&&`, `$`) runs under `bash -c`, so
+# `await -- 'test -s out.log && grep -q done out.log'` works as written; several
+# arguments run as they are. Exit codes: 0 condition met, 124 timed out, 127 the
+# check command or required timeout tool does not exist, 2 usage error,
+# 130 or 143 interrupted. GNU timeout (or gtimeout) is required for command
+# checks and --file --grep; an absent timer must never permit an unbounded check.
+#
+# Waiting on a process by name: do NOT write `await -- bash -c '! pgrep -f NAME'`
+# unless pgrep ignores its own callers. This script's own argv holds NAME, so the
+# match never goes away; the safe-pkill helper (its pgrep mode skips every ancestor)
+# or --pid PID avoid it. Prefer --pid with the PID recorded at launch.
+#
+# Exit status of each shape is pinned in bin/tests/await-test.sh.
+
+set -uo pipefail
+
+usage() { sed -n '2,/^# Exit status of each/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; }
+die() { printf 'await: %s\n' "$*" >&2; exit 2; }
+
+timeout_s=110; every_s=2; quiet=0; verbose=0
+mode=cmd; pid=""; file=""; pat=""
+check=()
+
+num() {  # num <name> <value>: a non-negative decimal
+  [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$1 needs a number of seconds, got '$2'"
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout) [ $# -ge 2 ] || die "--timeout needs a value"; num --timeout "$2"; timeout_s="$2"; shift 2 ;;
+    --timeout=*) num --timeout "${1#*=}"; timeout_s="${1#*=}"; shift ;;
+    --every) [ $# -ge 2 ] || die "--every needs a value"; num --every "$2"; every_s="$2"; shift 2 ;;
+    --every=*) num --every "${1#*=}"; every_s="${1#*=}"; shift ;;
+    --pid) [ $# -ge 2 ] || die "--pid needs a value"; [[ "$2" =~ ^[0-9]+$ ]] || die "--pid needs a process id"; mode=pid; pid="$2"; shift 2 ;;
+    --file) [ $# -ge 2 ] || die "--file needs a value"; mode="file"; file="$2"; shift 2 ;;
+    --grep) [ $# -ge 2 ] || die "--grep needs a value"; pat="$2"; shift 2 ;;
+    -q|--quiet) quiet=1; shift ;;
+    -v|--verbose) verbose=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; check=("$@"); break ;;
+    *) die "unknown argument '$1' (the check command goes after --)" ;;
+  esac
+done
+if [ "$mode" = cmd ]; then
+  [ "${#check[@]}" -gt 0 ] || die "no check command (usage: await [--timeout SEC] [--every SEC] -- <check command...>)"
+  [ -z "$pat" ] || die "--grep belongs to --file"
+else
+  [ "${#check[@]}" -eq 0 ] || die "--pid and --file take no check command"
+  [ "$mode" = file ] || [ -z "$pat" ] || die "--grep belongs to --file"
+fi
+
+now_ms() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then local t="${EPOCHREALTIME/[.,]/}"; printf '%s' "$(( 10#${t} / 1000 ))"
+  else
+    local t; t="$(date +%s%N 2>/dev/null)"
+    case "$t" in *[!0-9]*|'') printf '%s' "$(( $(date +%s) * 1000 ))" ;; *) printf '%s' "$(( t / 1000000 ))" ;; esac
+  fi
+}
+to_ms() {  # decimal seconds to whole milliseconds
+  local s="$1" i f; i="${s%%.*}"; f=""; [[ "$s" == *.* ]] && f="${s#*.}"
+  f="${f}000"; printf '%s' "$(( 10#${i:-0} * 1000 + 10#${f:0:3} ))"
+}
+
+# A lone argument that holds shell syntax runs under bash -c; anything else runs as given.
+shell_form=0
+if [ "$mode" = cmd ] && [ "${#check[@]}" -eq 1 ] && [[ "${check[0]}" =~ [[:space:]\;\|\&\<\>\$\(\)\`\*\?] ]]; then shell_form=1; fi
+
+timer=""
+if [ "$mode" = cmd ] || { [ "$mode" = file ] && [ -n "$pat" ]; }; then
+  timer="$(command -v timeout || command -v gtimeout)" || {
+    printf 'await: GNU timeout or gtimeout is required to bound the check\n' >&2
+    exit 127
+  }
+fi
+
+# One attempt of the check; sets $rc and leaves the output in $out_file.
+run_check() {  # run_check <remaining ms>
+  local rem_ms="$1" secs
+  local -a cmd=()
+  secs="$(printf '%d.%03d' "$(( rem_ms / 1000 ))" "$(( rem_ms % 1000 ))")"
+  case "$mode" in
+    pid)  if kill -0 "$pid" 2>/dev/null; then rc=1; else rc=0; fi; : >"$out_file"; return ;;
+    file) : >"$out_file"
+          if [ ! -e "$file" ]; then rc=1
+          elif [ -z "$pat" ]; then rc=0
+          else cmd=(grep -Eq -- "$pat" "$file"); fi
+          [ "${#cmd[@]}" -gt 0 ] || return ;;
+  esac
+  if [ "$mode" = cmd ]; then
+    if [ "$shell_form" -eq 1 ]; then cmd=(bash -c "${check[0]}"); else cmd=("${check[@]}"); fi
+  fi
+  "$timer" -k 2 "$secs" "${cmd[@]}" </dev/null >"$out_file" 2>&1 &
+  child=$!
+  wait "$child"; rc=$?
+  child=""
+  # timeout(1) reports a stopped check as 124; for await that is just "not yet".
+  [ "$rc" -eq 124 ] && rc=1
+  return 0
+}
+
+out_file="$(mktemp "${TMPDIR:-/tmp}/await.XXXXXX")" || die "cannot make a temp file"
+child=""
+cleanup() { [ -n "$child" ] && kill "$child" 2>/dev/null; rm -f -- "$out_file"; }
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+timed_out() {
+  [ "$quiet" -eq 1 ] || printf 'await: timed out after %d s (%d attempt%s); last check exit %d\n' \
+    "$(( elapsed / 1000 ))" "$attempt" "$([ "$attempt" -eq 1 ] || printf s)" "$rc" >&2
+  if [ -s "$out_file" ]; then printf 'await: last output:\n' >&2; tail -n 20 -- "$out_file" | sed 's/^/  /' >&2; fi
+  exit 124
+}
+
+start="$(now_ms)"; limit_ms="$(to_ms "$timeout_s")"; every_ms="$(to_ms "$every_s")"
+[ "$every_ms" -ge 100 ] || every_ms=100   # a floor: --every 0 must not spin the CPU
+attempt=0; rc=1
+while :; do
+  elapsed=$(( $(now_ms) - start ))
+  if [ "$attempt" -gt 0 ] && [ "$elapsed" -ge "$limit_ms" ]; then timed_out; fi
+  attempt=$((attempt + 1))
+  # A final one-second allowance let a slow check report success long after a
+  # subsecond deadline. Never start another attempt after the budget is spent;
+  # the first attempt alone gets at least 1 ms (timeout 0 disables GNU's timer).
+  remaining=$(( limit_ms - elapsed )); [ "$remaining" -gt 0 ] || remaining=1
+  run_check "$remaining"
+  [ "$verbose" -eq 1 ] && printf 'await: attempt %d exit %d after %d ms\n' "$attempt" "$rc" "$(( $(now_ms) - start ))" >&2
+  if [ "$rc" -eq 0 ]; then
+    cat -- "$out_file"
+    [ "$quiet" -eq 1 ] || printf 'await: condition met after %d s (%d attempt%s)\n' \
+      "$(( ($(now_ms) - start) / 1000 ))" "$attempt" "$([ "$attempt" -eq 1 ] || printf s)" >&2
+    exit 0
+  fi
+  # 127 from a directly executed check is "no such command": waiting will not fix it.
+  if [ "$mode" = cmd ] && [ "$shell_form" -eq 0 ] && [ "$rc" -eq 127 ]; then
+    printf 'await: check command not found: %s\n' "${check[0]}" >&2
+    exit 127
+  fi
+  elapsed=$(( $(now_ms) - start ))
+  if [ "$elapsed" -ge "$limit_ms" ]; then timed_out; fi
+  # Pause, but never past the deadline.
+  pause_ms="$every_ms"; left=$(( limit_ms - elapsed )); [ "$pause_ms" -gt "$left" ] && pause_ms="$left"
+  if [ "$pause_ms" -gt 0 ]; then
+    sleep "$(printf '%d.%03d' "$(( pause_ms / 1000 ))" "$(( pause_ms % 1000 ))")" &
+    child=$!; wait "$child"; child=""
+  fi
+done

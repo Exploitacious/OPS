@@ -100,12 +100,13 @@ fi
 
 # GUI dual-track scaffolding is SKILLS-local by convention: the claude.ai Project
 # mirror (00_System_Prompt.md, its SETUP.md install guide, and the
-# meta-skill-creator 05_gui_dual_track.md note) is kept out of shared skill
-# repos, so the source repos deliberately lack it. SKILLS is the GUI-authoring
-# home, so exclude these from the --delete sync (the mirror keeps them; --delete
-# would destroy the only copy) and from the drift check (so they never read as
-# false DRIFT). If a source repo ever legitimately ships one of these names,
-# revisit this list.
+# 05_gui_dual_track.md doctrine note) is kept out of shared skill repos, so the
+# source repos deliberately lack it. SKILLS is the GUI-authoring home, so exclude
+# these from the --delete sync (the mirror keeps them; --delete would destroy the
+# only copy) and from the drift check (so they never read as false DRIFT). If a
+# source repo ever legitimately ships one of these names, revisit this list. The
+# exclusion stays for any mounted skill that gains a GUI mirror, whichever skills
+# the manifest mounts at the time.
 GUI_LOCAL=('00_System_Prompt.md' '05_gui_dual_track.md' 'SETUP.md')
 
 LEDGER="$SKILLS/.vendored-state.tsv"

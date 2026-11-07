@@ -4,6 +4,16 @@ Read at the exit when the host provides a compactor, and for the manual `/compac
 
 OPS ships no compactor that verifies completion. A script that types `/compact` into a terminal pane (the older tmux approach) cannot tell a finished compaction from a failed one, and a baton sent after a failed compact resumes work on a thread whose history was never summarized. Verified completion needs the host's own record of that compact request, which only some hosts expose. A terminal, a multiplexer pane, or a plain CLI session has no such record to verify against, so those sessions always take the manual exit from the skill body: print the readiness summary and the operator fires `/compact`. Never arm a compactor you have not confirmed works on this host.
 
+## When to run it: natural breaks, with the nudge as a prompt
+
+The thresholds are the same whichever exit you take:
+
+- Compact at natural breaks: a closed task, a landed push or merge, a returned workflow, a long gap, a branch switch. At one, run the synthesis; the anchor carries the work.
+- The context-watch NOTICE (about 65% of the window) is a nudge toward a natural break, not a trigger. At a break, take the exit. Mid-step, finish the step; the reminder returns after more growth. WARNING, URGENT and CRITICAL tighten the same ladder.
+- Auto-compaction near the end of the window is the backstop, not the plan.
+- There is no fixed token threshold. Do not compact early because a number looks large, and do not skip a natural break because it is early.
+- A lane never compacts. A delegated task or subagent cannot be the target of a compactor (it needs a top-level thread), so a lane that arms one stalls; a lane at its limit returns a handoff note instead.
+
 ## The arming order is absolute
 
 The automation removes the operator's keystrokes; it must NEVER remove the synthesis. A compact that loses knowledge is a failed compact no matter how cleanly the cycle ran. Before arming a compactor, ALL of the following must be true, in order:
@@ -24,8 +34,9 @@ OPS's context-watch hook has no interlock for a compactor (OPS ships none), so a
 ## What any compactor must do
 
 - Send exactly `/compact`, with no attachments. Hosts that recognize the command call their native compaction; `/compact <text>` is ordinary chat there.
-- Treat a compact as done only on the host's completion record for that request, then an idle provider. An API acknowledgement, a normal completed reply, or an old auto-compaction proves nothing: a provider that is not authenticated "completes" a `/compact` with an error message.
-- Send the baton only after that proof. On failure or timeout, retain the baton and read the status and the log. A timeout can mean compaction is still running, so do not blindly retry or restart the provider.
+- Treat a compact as done only on the host's completion record for that request, and on nothing else. An API acknowledgement, a normal completed reply, or an old auto-compaction proves nothing: a provider that is not authenticated "completes" a `/compact` with an error message.
+- Do not also require the thread to go idle afterwards. A thread with background work is woken seconds after its compaction and can stay busy for many minutes, so an idle requirement times out on a compaction that finished, and the baton is never sent. After the proof, read the thread once, only to refuse the resume when the session recorded an error and to log whether it is busy again. Busy is not an error: where the host can queue a message behind the active run, the baton goes out that way, which starts at once on an idle thread and waits on a busy one, so it still wakes you.
+- Send the baton only after that proof. On failure or timeout, retain the baton and read the status and the log. A timeout means the completion record stayed pending for the whole wait, so compaction may still be running: do not blindly retry or restart the provider.
 - A thread with nothing to compact is a finished no-op, and the baton still goes out, because you ended your turn to wait for it.
 
 After arming, END YOUR TURN immediately. Do not poll from the target thread, because the worker is waiting for that turn to finish. One closing line says the cycle is armed and how to abort, because the operator may be watching.
@@ -40,7 +51,7 @@ Never append this text to a request on a host that sends it as chat.
 
 ## Failure behavior
 
-On compaction error or timeout a compactor NEVER sends the resume; the session stays paused with all synthesis safely on disk, and its status file plus the matching log capture why. The baton is consumed (renamed `*.sent-<ts>`) only on success.
+On compaction error or timeout a compactor NEVER sends the resume; the session stays paused with all synthesis safely on disk, and its status file plus the matching log capture why, including the raw status it last saw (the last completion-record answer, and the last thread read with its age), so a failure can be diagnosed without re-running it. The baton is consumed (renamed `*.sent-<ts>`) only on success.
 
 ## Run-dir layout
 

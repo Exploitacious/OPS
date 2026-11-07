@@ -23,18 +23,20 @@ The same doctrine covers the skills you load. When a skill's instruction is wron
 
 ## Stay on task
 
-Surfacing a defect does not mean dropping your work to chase it. Note the defect where you track your work, apply the minimal workaround, and finish the job. Fix at the source mid-task only when the task is blocked without the fix.
+Surfacing a defect does not mean dropping your work to chase it. Note the defect where you track your work, apply the minimal workaround, and finish the job. In a thread whose job is the tool or skill, fix at the source mid-task only when the task is blocked without the fix. In a ticket or incident thread, never build or change a tool or skill: file the issue and keep working.
 
 ## Follow through by capability
 
-What surfacing looks like depends on your access.
+What surfacing looks like depends on the thread you are in and your access.
 
-If you have repo access, fix the defect at the source once the task is done.
+In a ticket or incident thread (customer work, an alert, an investigation, time or billing), file the defect as an issue and continue the ticket. Do not build or change a tool or skill there, even with repo access and even when the defect slowed you: fixing it is separate work for a thread whose job is the tool or skill. File it in the repo that owns it (see below) with `gh issue create`, or in whatever tracker its owner uses, naming the tool or skill, what you sent, what came back, and what you expected. Keep customer data and credentials out of the issue. Mention the issue in the ticket's internal note when it affected the work, never in a customer-facing note, and tell the operator in your report.
+
+In a thread whose job is the tool or skill, and you have repo access, fix the defect at the source once the task is done.
 
 - A skill that lives in `SKILLS/<name>/` is edited there. A mounted skill (a row in `SKILLS/VENDORED.tsv`) is edited at its source repo under `PROJECTS/` and re-mirrored with `skills-vendor.sh sync`, never in the `SKILLS/` mirror, because the sync overwrites a hand-edited mirror. Open a PR in the source repo and bump its version when it carries one, so the fix reaches every install.
 - A tool lives in its own repo. Before you change one, find out whether its interface is a frozen contract that other automations parse. Never rename a frozen tool or change its response shape, keep every fix backward-compatible, and get the owner's sign-off before any interface change.
 
-You may have no repo access at all, for example on a consumer surface or a staff seat. Send a short report through whatever channel you have to whoever maintains the tool or skill (the operator, or the maintainers named in `CONTEXT/team.md` when that slot is filled). Name the tool or skill, say what you sent, what came back, and what you expected instead. Surfacing it is the whole job, and someone with access takes it from there.
+You may have no repo access at all, or no way to file an issue, for example on a consumer surface or a staff seat. Send a short report through whatever channel you have to whoever maintains the tool or skill (the operator, or the maintainers named in `CONTEXT/team.md` when that slot is filled). Name the tool or skill, say what you sent, what came back, and what you expected instead. Surfacing it is the whole job, and someone with access takes it from there.
 
 ## Why it is worth the interruption
 

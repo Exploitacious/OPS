@@ -20,7 +20,7 @@
 #      (bin/memory-init)
 #   8. Schedule the daily backup cron entry (on every copy: one with no
 #      `origin` remote commits locally and still runs the other stages)
-#   9. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
+#   9. Check for the caveman + ponytail Claude Code plugins (report and offer, never remove)
 #  10. Seed the trust anchor
 #
 # Flags:
@@ -683,9 +683,9 @@ else
   fi
 fi
 
-# --- Claude Code plugins: retire caveman + ponytail ---
+# --- Claude Code plugins: caveman + ponytail check ---
 echo ""
-c_yel "Retiring caveman + ponytail Claude Code plugins..."
+c_yel "Checking for the caveman + ponytail Claude Code plugins..."
 
 # A bare `bash deploy.sh` doesn't source the user's login profile, so PATH
 # may lack ~/.local/bin or pnpm's bin dir even when claude is installed.
@@ -727,70 +727,63 @@ find_claude() {
 
 CLAUDE_BIN="$(find_claude 2>/dev/null || true)"
 
-# Retire the caveman + ponytail plugins. This block used to INSTALL caveman,
-# unpinned, from its third-party marketplace head, right after Stage 1 had
-# uninstalled it; Stage 1 retires both plugins because their terse-prose and
-# lazy-engineering modes are now part of the harness's own operating rules.
-# The CLI also edits settings.json when removing a declared plugin or
-# marketplace. Leave those declarations to Stage 1: CLI writes also follow
-# its symlink into another tracked checkout. Never delete plugin dirs by hand.
-retire_plugins() {
+# The caveman + ponytail plugins. An earlier OPS deploy INSTALLED caveman,
+# unpinned, from its third-party marketplace head; their terse-prose and
+# lazy-engineering modes are now part of the harness's own operating rules, so
+# OPS no longer installs either one. Whether a copy keeps one is its owner's
+# call: the template adds and offers and never takes away what the owner chose
+# (CONTEXT/how-i-work.md, "The template and a copy's owner"). So this step only
+# reads the CLI inventories and settings.json, says what it found, and prints
+# the command that would remove it. It never uninstalls a plugin or removes a
+# marketplace (an earlier release did; that is gone). A plugin declared in
+# settings.json is pointed at Stage 1, because the CLI's removal would rewrite
+# that file through its symlink into another tracked checkout. The offered
+# commands carry --scope user, so running one cannot touch a project's settings.
+notice_retired_plugins() {
   local settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-  local plugins markets plg rc
+  local plugins markets plg
   if ! command -v jq >/dev/null 2>&1; then
-    msg_warn "jq unavailable: cannot safely inspect plugin retirement; skipping."
+    msg_warn "jq unavailable: cannot inspect plugins; the caveman/ponytail check was skipped."
     return 0
   fi
   if [[ -f "$settings" ]] && ! jq -e 'type == "object" and
       ((.enabledPlugins // {}) | type == "object") and
       ((.extraKnownMarketplaces // {}) | type == "object")' "$settings" >/dev/null 2>&1; then
-    msg_warn "Cannot read plugin declarations in $settings; retirement skipped."
+    msg_warn "Cannot read plugin declarations in $settings; the caveman/ponytail check was skipped."
     return 0
   fi
   if ! plugins="$("$CLAUDE_BIN" plugin list --json 2>/dev/null)" ||
      ! jq -e 'type == "array"' <<< "$plugins" >/dev/null 2>&1; then
-    msg_warn "Cannot list installed plugins; retirement skipped. Run: claude plugin list --json"
+    msg_warn "Cannot list installed plugins; the caveman/ponytail check was skipped. Run: claude plugin list --json"
     return 0
   fi
   if ! markets="$("$CLAUDE_BIN" plugin marketplace list --json 2>/dev/null)" ||
      ! jq -e 'type == "array"' <<< "$markets" >/dev/null 2>&1; then
-    msg_warn "Cannot list plugin marketplaces; retirement skipped. Run: claude plugin marketplace list --json"
+    msg_warn "Cannot list plugin marketplaces; the caveman/ponytail check was skipped. Run: claude plugin marketplace list --json"
     return 0
   fi
   for plg in caveman ponytail; do
     if [[ -f "$settings" ]] && jq -e --arg id "$plg@$plg" --arg name "$plg" \
         '((.enabledPlugins // {}) | has($id)) or ((.extraKnownMarketplaces // {}) | has($name))' \
         "$settings" >/dev/null 2>&1; then
-      msg_warn "Retired plugin $plg is declared in $settings; removal would edit Stage-1 settings. Update Stage 1, then re-run deploy."
+      msg_warn "Plugin $plg is declared in $settings, which Stage 1 owns. OPS no longer ships it; to drop it, change Stage 1. Nothing was changed."
       continue
     fi
     if jq -e --arg id "$plg@$plg" '.[] | select(.id == $id and .scope != "user")' <<< "$plugins" >/dev/null; then
-      msg_warn "Retired plugin $plg remains in a project or local scope; left unchanged to protect project settings."
+      msg_warn "Plugin $plg is installed in a project or local scope, which is that project's choice. Nothing was changed."
     fi
     if jq -e --arg id "$plg@$plg" '.[] | select(.id == $id and .scope == "user")' <<< "$plugins" >/dev/null; then
-      if "$CLAUDE_BIN" plugin uninstall "$plg@$plg" --scope user >/dev/null 2>&1; then
-        msg_ok "Removed retired plugin: $plg"
-      else
-        rc=$?
-        msg_warn "Retired plugin $plg could not be removed (rc=$rc); inspect: claude plugin list --json"
-        continue
-      fi
+      msg_warn "Plugin $plg is installed. OPS no longer installs it (its mode is part of the harness rules); keep it if you use it, or remove it: claude plugin uninstall $plg@$plg --scope user. Nothing was changed."
     fi
-    # Unscoped marketplace removal can edit the caller's project settings.
     if jq -e --arg name "$plg" '.[] | select(.name == $name)' <<< "$markets" >/dev/null; then
-      if "$CLAUDE_BIN" plugin marketplace remove "$plg" --scope user >/dev/null 2>&1; then
-        msg_ok "Removed retired plugin marketplace: $plg"
-      else
-        rc=$?
-        msg_warn "Retired marketplace $plg remains (rc=$rc); inspect its declaration before removing it: claude plugin marketplace list --json"
-      fi
+      msg_warn "Plugin marketplace $plg is configured; if nothing uses it, remove it: claude plugin marketplace remove $plg --scope user. Nothing was changed."
     fi
   done
 }
 
 if [[ -n "$CLAUDE_BIN" ]]; then
   msg_ok "Claude CLI: $CLAUDE_BIN"
-  retire_plugins
+  notice_retired_plugins
 else
   msg_warn "Claude CLI not found in PATH or standard install locations."
   msg_warn "Checked: \$PATH, ~/.local/bin, ~/.local/share/pnpm, ~/.npm-global/bin, /usr/local/bin, /opt/homebrew/bin"

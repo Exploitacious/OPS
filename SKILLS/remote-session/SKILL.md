@@ -28,7 +28,7 @@ The launcher records the live `CLAUDE_CONFIG_DIR` in the row's fourth column, so
 
 ## Seed a handoff
 
-To hand work to a new session, write the work order to a file (a committed plan or a `session-handoff` baton is the durable copy), start the session, then inject one line pointing at the file (see Mechanics). A second profile shares neither the task list nor auto-memory, so put the durable state in git.
+To hand work to a new session, write the work order to a file (a committed plan or a `session-handoff` baton is the durable copy), start the session, then inject one line pointing at the file (see Mechanics). A second profile does not share this profile's task list (the memory pools are shared through `~/OPS/.claude-memory/`), so put the durable state in git.
 
 ## Read the result
 

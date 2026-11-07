@@ -17,18 +17,38 @@
 # Linux/WSL/macOS only. Windows uses memory-init.ps1.
 #
 # Usage:
-#   memory-init                    # walk all encoded subdirs (default)
-#   memory-init --only-home        # legacy: only $HOME-encoded path
-#   memory-init --hostname <name>  # override the host key
-#   memory-init --migrate-host-key # rename a generic-host dir (e.g.
-#                                  workspace-*) to the stable machine-id
-#                                  key; default runs ADOPT existing dirs
-#   memory-init --dry-run          # show what would happen
-#   memory-init --auto-commit      # after each successful init, stage +
-#                                  commit the new memory subdir, and push it
-#                                  when origin-private-check verifies origin
-#                                  private (see "Push gate" below)
+#   memory-init                       # walk all encoded subdirs (default)
+#   memory-init --only-home           # legacy: only $HOME-encoded path
+#   memory-init --hostname <name>     # override the host key for this run only
+#   memory-init --set-host-key <name> # persist the host key for this machine:
+#                                       writes ~/.config/ops/memory-host, which
+#                                       memory-init and memory-index read, then
+#                                       runs as usual with that key. Use it so
+#                                       a successor box shares its predecessor's
+#                                       pools instead of getting its own. Undo:
+#                                       delete the file
+#   memory-init --migrate-host-key    # rename a generic-host dir (e.g.
+#                                       workspace-*) to the stable machine-id
+#                                       key; default runs ADOPT existing dirs
+#   memory-init --dry-run             # show what would happen
+#   memory-init --auto-commit         # after each successful init, stage +
+#                                       commit the new memory subdir, and push it
+#                                       when origin-private-check verifies origin
+#                                       private (see "Push gate" below)
 #   memory-init --help
+#
+# Which cwds get a pool. A scratch or temp cwd never does, and a project whose
+# memory dir holds nothing never does: see is_scratch_encoded and
+# source_is_empty below. One run on a box with many throwaway sessions made 35
+# empty pools in 7 seconds because it had neither rule, and the scratch ones left
+# a dangling link.
+#
+# Host key order: --hostname, else the memory-host file, else the hostname (a
+# generic one falls to the machine-id key). A key is 1 to 63 of A-Z a-z 0-9 . _ -
+# starting with a letter or digit (uppercase is lowercased); the file holds one
+# key and an optional newline, ASCII only, at most 65 bytes. Anything else
+# (empty, a path, a space, a BOM) is refused, never ignored. The file is per
+# HOME: root sessions on a box need their own (run this as root).
 #
 # Exit codes:
 #   0: success (already initialized OR initialized just now)
@@ -47,6 +67,9 @@ MEMORY_ROOT="$OPS_ROOT/.claude-memory"
 CLAUDE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 HOSTNAME_OVERRIDE=""
+HOSTNAME_GIVEN=0
+SET_HOST_KEY=""
+SET_HOST_KEY_GIVEN=0
 DRY=0
 AUTO_COMMIT=0
 ONLY_HOME=0
@@ -54,13 +77,16 @@ MIGRATE_HOST_KEY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --hostname)         HOSTNAME_OVERRIDE="$2"; shift 2 ;;
+    --hostname)         [[ $# -ge 2 ]] || { echo "memory-init: --hostname needs a value" >&2; exit 1; }
+                        HOSTNAME_OVERRIDE="$2"; HOSTNAME_GIVEN=1; shift 2 ;;
+    --set-host-key)     [[ $# -ge 2 ]] || { echo "memory-init: --set-host-key needs a value" >&2; exit 1; }
+                        SET_HOST_KEY="$2"; SET_HOST_KEY_GIVEN=1; shift 2 ;;
     --dry-run)          DRY=1; shift ;;
     --auto-commit)      AUTO_COMMIT=1; shift ;;
     --only-home)        ONLY_HOME=1; shift ;;
     --migrate-host-key) MIGRATE_HOST_KEY=1; shift ;;
     -h|--help)
-      sed -n '2,32p' "$0"
+      awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0"
       exit 0
       ;;
     *) echo "memory-init: unknown arg: $1" >&2; exit 1 ;;
@@ -110,16 +136,46 @@ push_gate() {
 
 # --- Host key (namespaces this machine's memory in the shared store) ---------
 # The key prefixes .claude-memory/<key>-<encoded>/, which is git-synced ACROSS
-# machines, so it must be STABLE and UNIQUE per machine. A generic hostname
-# like the cloud-default "workspace" collides if a second box shares it (both
-# map to workspace-<encoded>/ → cross-machine clobber). Resolution order:
-#   1. explicit --hostname override (always wins)
-#   2. a real, non-generic hostname (unchanged behavior: e.g. a named laptop)
-#   3. generic/empty hostname → a short, stable hash of the machine-id
+# machines, so it must be STABLE and UNIQUE per machine, unless the Operator
+# rules that two machines share one pool set. A generic hostname like the
+# cloud-default "workspace" collides if a second box shares it (both map to
+# workspace-<encoded>/ → cross-machine clobber). Resolution order:
+#   1. explicit --hostname override (always wins, this run only)
+#   2. the per-machine memory-host file, ~/.config/ops/memory-host (written by
+#      --set-host-key; outside the synced repo, so each machine keeps its own).
+#      It lets a successor box read and write its predecessor's pools. Every
+#      pool reader honors it in the same order: bin/memory-index (the digest
+#      and the prompt hint) and memory-init.ps1 ($HOME\.config\ops\memory-host).
+#   3. a real, non-generic hostname (unchanged behavior: e.g. a named laptop)
+#   4. generic/empty hostname → a short, stable hash of the machine-id
 # Existing dirs are ADOPTED, not renamed, on a routine run (see init_one_encoded
 # adopt-existing guard); pass --migrate-host-key to actually rename a
 # stale-keyed dir (e.g. workspace-* -> m-*) to the derived key.
 GENERIC_HOSTS_RE='^(workspace|localhost|localhost\.localdomain|ubuntu|debian|kali|raspberrypi)?$'
+# The host key file rule: ONE rule, held by three readers (this script,
+# bin/memory-index, memory-init.ps1) and pinned by
+# tests/memory-host-key-rule-test.sh, which feeds them the same cases and fails on
+# any disagreement. Change them together.
+#   - Absent means no override: nothing at the path, or ~/.config/ops is a
+#     file, or HOME is unset or empty. Any other failure to look at or read it
+#     (an ancestor or the file without permission, a directory, a dangling
+#     symlink, a non-regular file) is a refusal, never a fallback.
+#   - The file is ASCII bytes only, at most 65 bytes in all: one key, then
+#     optionally one LF or one CRLF, nothing else. No BOM, no UTF-16, no padding
+#     or other whitespace (a space or tab included), no NUL, no second line.
+#   - The key is [A-Za-z0-9][A-Za-z0-9._-]{0,62}; ASCII uppercase is folded to
+#     lowercase after the check (no Unicode case folding).
+# A flag value (--hostname, --set-host-key) follows the key rule, no newline.
+# host_key_ok spells the key with no [a-z] range and in the C locale, so no
+# locale can widen it.
+host_key_ok() {
+  local LC_ALL=C
+  case "$1" in
+    ''|[._-]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) return 1 ;;
+  esac
+  [[ ${#1} -le 63 ]]
+}
+MEMORY_HOST_FILE="$HOME/.config/ops/memory-host"
 
 derive_machine_id() {
   local mid=""
@@ -144,15 +200,98 @@ derive_machine_id() {
   printf 'm-%s' "${mid:0:12}"
 }
 
-RAW_HOST="${HOSTNAME_OVERRIDE:-$(hostname 2>/dev/null || true)}"
-RAW_HOST=$(echo "$RAW_HOST" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-if [[ -n "$HOSTNAME_OVERRIDE" ]]; then
-  HOST="$RAW_HOST"
-elif [[ "$RAW_HOST" =~ $GENERIC_HOSTS_RE ]]; then
-  HOST="$(derive_machine_id)"
-  log "hostname '${RAW_HOST:-<empty>}' is generic: using stable machine-id key '$HOST'"
+# check_host_key <value> <what>: prints the key, ASCII-lowercased, or dies naming
+# <what>. An empty, path-like or spaced value is a mistake to surface, never one
+# to fall back from: a silent fallback would key this machine to a different
+# pool set than the one asked for. No trimming: a space is a refusal.
+check_host_key() {
+  local v="$1" what="$2"
+  [[ -n "$v" ]] || die "$what is empty; a host key is letters, digits, '.', '_' or '-' (for example example-host)"
+  host_key_ok "$v" \
+    || die "$what $(printf '%q' "$v") is not a valid host key: 1 to 63 of A-Z a-z 0-9 . _ - starting with a letter or digit, ASCII only, no spaces or slashes"
+  printf '%s' "$v" | LC_ALL=C tr 'A-Z' 'a-z'
+}
+
+# read_host_key_file <path>: the file rule above; prints the key or dies. The
+# size comes from the whole file (not its first bytes), the NUL check counts
+# bytes because a command substitution drops NULs without a word, and the
+# sentinel keeps trailing newlines the substitution would strip.
+read_host_key_file() {
+  local f="$1" n raw key
+  n="$(LC_ALL=C wc -c < "$f")" || die "cannot read $f"
+  n="${n//[[:space:]]/}"
+  (( n > 0 )) || die "the host key file $f is empty; write one key such as example-host with --set-host-key, or delete the file"
+  (( n <= 65 )) || die "the host key file $f is $n bytes; at most 65 (a key of up to 63 characters and a newline). Write one key with --set-host-key, or delete the file"
+  [[ "$(LC_ALL=C tr -d '\0' < "$f" | wc -c)" -eq "$n" ]] \
+    || die "the host key file $f holds a NUL byte; write one key with --set-host-key, or delete the file"
+  raw="$(cat -- "$f" && printf x)" || die "cannot read $f"
+  raw="${raw%x}"
+  case "$raw" in
+    *$'\r\n') key="${raw%$'\r\n'}" ;;
+    *$'\n')   key="${raw%$'\n'}" ;;
+    *)         key="$raw" ;;
+  esac
+  host_key_ok "$key" \
+    || die "the host key file $f does not hold exactly one key (1 to 63 of A-Z a-z 0-9 . _ - starting with a letter or digit; ASCII only, no BOM or spaces, one optional newline); write one with --set-host-key, or delete the file"
+  printf '%s' "$key" | LC_ALL=C tr 'A-Z' 'a-z'
+}
+
+# mh_present: 0 when the memory-host file exists (a dangling symlink counts, and
+# is then refused by the reader), 1 when it does not (ENOENT, or ENOTDIR because
+# ~/.config/ops is a file). An ancestor that exists but cannot be searched dies:
+# [[ -e ]] reads that as absence, where bin/memory-index reads it as an error.
+mh_present() {
+  local d
+  for d in "$HOME/.config" "$HOME/.config/ops"; do
+    if [[ -d "$d" && ! -x "$d" ]]; then
+      die "$d cannot be searched, so $MEMORY_HOST_FILE can be neither read nor ruled out; fix its permissions"
+    fi
+  done
+  [[ -e "$MEMORY_HOST_FILE" || -L "$MEMORY_HOST_FILE" ]]
+}
+
+if (( SET_HOST_KEY_GIVEN )); then
+  (( HOSTNAME_GIVEN )) && die "--set-host-key and --hostname together are ambiguous: pick one"
+  SET_HOST_KEY="$(check_host_key "$SET_HOST_KEY" "--set-host-key value")"
+  CUR_FILE_KEY=""
+  # What the file says now, for the log and the no-op; an invalid file reads as
+  # empty here, so --set-host-key repairs it.
+  [[ -f "$MEMORY_HOST_FILE" && -r "$MEMORY_HOST_FILE" ]] && CUR_FILE_KEY="$(read_host_key_file "$MEMORY_HOST_FILE" 2>/dev/null || true)"
+  if [[ "$CUR_FILE_KEY" == "$SET_HOST_KEY" ]]; then
+    log "host key file $MEMORY_HOST_FILE already says '$SET_HOST_KEY'"
+  elif (( DRY )); then
+    dry "would write host key '$SET_HOST_KEY' to $MEMORY_HOST_FILE${CUR_FILE_KEY:+ (replacing '$CUR_FILE_KEY')}"
+  else
+    # mv into a directory would move the new file inside it and report success.
+    [[ -d "$MEMORY_HOST_FILE" ]] && die "$MEMORY_HOST_FILE is a directory; fix or delete it"
+    mkdir -p "$(dirname "$MEMORY_HOST_FILE")" || die "cannot create $(dirname "$MEMORY_HOST_FILE")"
+    # Write beside the target and rename: a reader never sees a half-written key.
+    MH_TMP="$(mktemp "$MEMORY_HOST_FILE.XXXXXX")" || die "cannot write beside $MEMORY_HOST_FILE"
+    printf '%s\n' "$SET_HOST_KEY" > "$MH_TMP" && mv -f -- "$MH_TMP" "$MEMORY_HOST_FILE" \
+      || { rm -f -- "$MH_TMP"; die "cannot write $MEMORY_HOST_FILE"; }
+    log "host key file $MEMORY_HOST_FILE set to '$SET_HOST_KEY'${CUR_FILE_KEY:+ (was '$CUR_FILE_KEY')}"
+  fi
+fi
+
+if (( HOSTNAME_GIVEN )); then
+  HOST="$(check_host_key "$HOSTNAME_OVERRIDE" "--hostname value")"
+elif (( SET_HOST_KEY_GIVEN )) && (( DRY )); then
+  # A dry run wrote nothing, so the file does not say it yet: use the value.
+  HOST="$SET_HOST_KEY"
+elif mh_present; then
+  [[ -f "$MEMORY_HOST_FILE" && -r "$MEMORY_HOST_FILE" ]] \
+    || die "$MEMORY_HOST_FILE exists but is not a readable regular file; fix or delete it"
+  HOST="$(read_host_key_file "$MEMORY_HOST_FILE")"
+  log "host key '$HOST' from $MEMORY_HOST_FILE"
 else
-  HOST="$RAW_HOST"
+  RAW_HOST="$(hostname 2>/dev/null || true)"
+  RAW_HOST=$(echo "$RAW_HOST" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  if [[ "$RAW_HOST" =~ $GENERIC_HOSTS_RE ]]; then
+    HOST="$(derive_machine_id)"
+    log "hostname '${RAW_HOST:-<empty>}' is generic: using stable machine-id key '$HOST'"
+  else
+    HOST="$RAW_HOST"
+  fi
 fi
 [[ -n "$HOST" ]] || die "could not determine a host key"
 
@@ -165,6 +304,34 @@ log "mode:         $([ "$ONLY_HOME" -eq 1 ] && echo "only-home" || echo "all-cwd
 
 # Sanity: OPS present.
 [[ -d "$OPS_ROOT" ]] || die "OPS not found at $OPS_ROOT: clone the repo first"
+
+# --- Which encoded cwds get a pool --------------------------------------------
+# is_scratch_encoded KEY: true for a key that names a scratch or temp cwd, the
+# same skip list hooks/session-briefing.sh uses for its unadopted-pool nudge:
+# -tmp* (a cwd under /tmp: some launchers make one per session title,
+# -tmp-t3code-claude-title-*), the T3 Code "No project" scratch dirs
+# ($HOME/.t3/scratch/<date>-<title>-<id>, encoded with the dot as a dash by
+# Claude and as a dot by an older build or hook, so both spellings), Claude's
+# own temp dir (any key holding claude-tmp) and any t3code-claude-title key. They
+# are scratch by definition: nothing in them is worth syncing, and a pool for each
+# is clutter in a store git syncs everywhere. The caller exempts HOME's own key:
+# HOME is a real cwd even when a test puts it under /tmp.
+is_scratch_encoded() {
+  local k="$1" t3s_s t3s_d
+  t3s_s="${HOME}/.t3/scratch/"; t3s_s="${t3s_s//\//-}"; t3s_d="${t3s_s//./-}"
+  case "$k" in
+    -tmp*|*claude-tmp*|*t3code-claude-title*|"$t3s_d"*|"$t3s_s"*) return 0 ;;
+  esac
+  return 1
+}
+
+# source_is_empty DIR: true when a memory dir holds nothing, or only the
+# generated MEMORY.md index. Migrating it would make an empty pool and a link to
+# it for a project that has no memory. A dir with any other file, a dotfile
+# included, is not empty.
+source_is_empty() {
+  [[ -z "$(find "$1" -mindepth 1 -maxdepth 1 ! -name MEMORY.md -print -quit 2>/dev/null)" ]]
+}
 
 # --- init_one_encoded: process a single encoded cwd subdir -------------------
 # Args: $1 = encoded cwd dirname (e.g., "-home-master" or "-root")
@@ -260,7 +427,12 @@ init_one_encoded() {
       fi
     fi
   elif [[ -d "$SOURCE" ]]; then
-    # Case 2: real directory: migrate.
+    # Case 2: real directory: migrate, unless it holds nothing (HOME keeps its
+    # pool either way: case 3 makes an empty one for it on purpose).
+    if [[ "$ENCODED" != "$HOME_ENCODED" ]] && source_is_empty "$SOURCE"; then
+      log "[$ENCODED] source is an empty memory dir: skipping (no pool is made for it)"
+      return 0
+    fi
     log "[$ENCODED] source is real directory: migrating"
     if (( DRY )); then
       dry "[$ENCODED] would migrate $SOURCE -> $TARGET and symlink"
@@ -308,6 +480,9 @@ init_one_encoded() {
   # tree, leaving the memory symlink dangling (seen 2026-10-19 on a fresh
   # Debian install). A placeholder file keeps the pool in the tree, and
   # recreating a missing target heals a pool an earlier backup already removed.
+  if (( DRY )) && [[ -L "$SOURCE" && ! -d "$TARGET" ]]; then
+    dry "[$ENCODED] would recreate the missing pool $TARGET_REL"
+  fi
   if (( ! DRY )) && [[ -L "$SOURCE" ]]; then
     if [[ ! -d "$TARGET" ]]; then
       mkdir -p "$TARGET" && log "[$ENCODED] pool directory was missing: recreated"
@@ -369,6 +544,7 @@ init_one_encoded() {
 # --- Build the list of encoded subdirs to process ----------------------------
 declare -a ENCODED_LIST
 ENCODED_LIST=("$HOME_ENCODED")
+SCRATCH_SKIPPED=0
 
 if (( ! ONLY_HOME )); then
   if [[ -d "$CLAUDE_CFG/projects" ]]; then
@@ -379,6 +555,10 @@ if (( ! ONLY_HOME )); then
       [[ "$local_enc" == "$HOME_ENCODED" ]] && continue
       # Only include if a memory entry (real dir or symlink) is present.
       if [[ -d "$d/memory" || -L "$d/memory" ]]; then
+        if is_scratch_encoded "$local_enc"; then
+          SCRATCH_SKIPPED=$((SCRATCH_SKIPPED+1))
+          continue
+        fi
         ENCODED_LIST+=("$local_enc")
       fi
     done
@@ -386,6 +566,7 @@ if (( ! ONLY_HOME )); then
   fi
 fi
 
+(( SCRATCH_SKIPPED == 0 )) || log "skipped $SCRATCH_SKIPPED scratch or temp cwd(s): no pool is made for them"
 log "processing ${#ENCODED_LIST[@]} encoded subdir(s): ${ENCODED_LIST[*]}"
 echo
 

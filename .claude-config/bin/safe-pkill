@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+# safe-pkill (also run as safe-pgrep, pkill and pgrep): pkill and pgrep that never
+# match their own callers.
+#
+# THE DEFECT: the Bash tool runs every command as `bash -c '<the whole command
+# line>'`, so `pkill -f "train.sh 1287"` matches the shell that is running it. The
+# kill takes the caller down (Claude Code reports exit 144), and everything after
+# it in the same command never runs. A memory note about it does not help: lanes
+# never load memory, and prose cannot make a model remember a pattern trick on
+# every call. The twin: a waiter written `until ! pgrep -f 'x.py'; do sleep 15;
+# done` never ends, because its own `bash -c` command line contains x.py.
+#
+# THE FIX: leave every ancestor of this process out of the match set. Nothing else
+# about matching changes. This is NOT command gating and must not become it: it
+# never refuses a command, never reads the command to decide whether to allow it,
+# and never narrows which OTHER processes a pattern reaches. It logs each call.
+# Under its own name it also prints what it killed (stderr); installed as the
+# shims pkill and pgrep it adds not one byte to the real tool's stdout or stderr.
+#
+# WHAT IT DOES NOT FIX: a pattern still reaches sibling lanes' processes. The lane
+# rule block (hooks/lane-rules.sh) still says: kill the exact PID you recorded at
+# launch, never a pattern. This helper is for the case where a pattern is
+# unavoidable, and it prints every process it killed so a wrong hit is visible at
+# once.
+#
+# HOW TO REACH IT: (1) by name, from the lane rule block; (2) transparently, as
+# `pkill` and `pgrep` earlier on PATH than procps, so the plain command is safe
+# too: `safe-pkill --install-shims` links ~/.local/bin/pkill and ~/.local/bin/pgrep
+# to this file; `--remove-shims` takes them out. A shim finds the real tool by
+# skipping itself. Installing the shims is the Operator's choice: nothing in
+# OPS's deploy or its hooks runs --install-shims, and it never replaces a file
+# that is not its own link.
+#
+# Usage: safe-pkill [pkill options] pattern      safe-pgrep [pgrep options] pattern
+#        safe-pkill --install-shims [DIR] | --remove-shims [DIR]   (default ~/.local/bin)
+# safe-pgrep is a symlink to this file in bin/; the tool picks pgrep or pkill from
+# the name it was run as. Exit status is the real tool's: 0 matched, 1 nothing
+# matched, 2 and 3 as procps.
+#
+# Method. procps-ng 4.0.1 and later has -A / --ignore-ancestors, which is exactly
+# this; the helper runs the real tool with -A. A procps without -A (3.3.x) or a
+# BSD pkill is handled by running the real pgrep, dropping this process and every
+# ancestor from its output, and signalling what is left with kill; that fallback
+# covers the usual options (signal, -f -x -i -v -u -U -g -G -P -s -t, -e, -c, -l,
+# -a) and, for an option it cannot honor safely (-n -o -O -F -L -H -q -r -d
+# --ns --cgroup), runs the real tool unchanged after saying so on stderr.
+#
+# SAFE_PKILL_DISABLE=1 runs the real tool unchanged. SAFE_PKILL_REAL_DIR names the
+# directory that holds the real pkill and pgrep (tests). SAFE_PKILL_NO_A=1 forces the
+# fallback (tests). SAFE_PKILL_LOG is the log (default
+# ${OPS_STATE_DIR:-~/.local/state/ops}/safe-pkill.log), capped at 200 KB.
+#
+# Tests: bin/tests/safe-pkill-test.sh (a caller that dies under plain pkill and
+# lives under this one, both paths, the shims).
+
+set -uo pipefail
+
+self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+base="${0##*/}"
+mode=pkill
+case "$base" in *pgrep) mode=pgrep ;; esac
+# Run by its own name (safe-pkill, safe-pgrep) it reports what it killed on stderr. Run as a
+# shim under the name pkill or pgrep it is a drop-in: no byte of stdout or stderr differs from
+# the real tool's, only the ancestor exclusion changes, so a script that treats stderr text as
+# an error cannot break when the shims are installed host-wide.
+explicit=1
+case "$base" in pkill|pgrep) explicit=0 ;; esac
+
+say() { printf 'safe-pkill: %s\n' "$*" >&2; }
+
+# --- shims -------------------------------------------------------------------
+shim_dir() { printf '%s' "${1:-$HOME/.local/bin}"; }
+if [ "${1:-}" = "--install-shims" ] || [ "${1:-}" = "--remove-shims" ]; then
+  action="$1"; dir="$(shim_dir "${2:-}")"
+  rc=0
+  for name in pkill pgrep; do
+    link="$dir/$name"
+    if [ "$action" = "--install-shims" ]; then
+      mkdir -p "$dir" || { say "cannot create $dir"; exit 1; }
+      if [ -L "$link" ] && [ "$(realpath "$link" 2>/dev/null)" = "$self" ]; then say "$link already points here"; continue; fi
+      if [ -e "$link" ] || [ -L "$link" ]; then say "$link exists and is not this helper's link; left alone"; rc=1; continue; fi
+      ln -s "$self" "$link" && say "linked $link -> $self" || rc=1
+    else
+      if [ -L "$link" ] && [ "$(realpath "$link" 2>/dev/null)" = "$self" ]; then rm -f -- "$link" && say "removed $link"
+      elif [ -e "$link" ] || [ -L "$link" ]; then say "$link is not this helper's link; left alone"; fi
+    fi
+  done
+  if [ "$action" = "--install-shims" ]; then
+    # A shim only takes effect where its directory comes before the real tool's.
+    real_now="$(PATH="${PATH}" command -v pkill 2>/dev/null)"
+    [ -z "$real_now" ] || [ "$(realpath "$real_now" 2>/dev/null)" = "$self" ] \
+      || say "NOTE: 'pkill' on this PATH still resolves to $real_now; put $dir earlier in PATH for the shim to apply"
+  fi
+  exit "$rc"
+fi
+
+# --- find the real tool, skipping this helper (a shim would find itself) -------
+find_real() {  # find_real <name>
+  local name="$1" dir cand
+  if [ -n "${SAFE_PKILL_REAL_DIR:-}" ]; then
+    [ -x "$SAFE_PKILL_REAL_DIR/$name" ] && { printf '%s' "$SAFE_PKILL_REAL_DIR/$name"; return 0; }
+    return 1
+  fi
+  local IFS=: search="$PATH:/usr/bin:/bin:/usr/local/bin"
+  for dir in $search; do
+    [ -n "$dir" ] || continue
+    cand="$dir/$name"
+    [ -x "$cand" ] && [ -f "$cand" ] || continue
+    [ "$(realpath "$cand" 2>/dev/null)" = "$self" ] && continue
+    printf '%s' "$cand"; return 0
+  done
+  return 1
+}
+real="$(find_real "$mode")" || { say "no real $mode found on PATH"; exit 127; }
+real_pgrep="$(find_real pgrep)" || real_pgrep=""
+
+if [ "${SAFE_PKILL_DISABLE:-0}" = 1 ]; then exec "$real" "$@"; fi
+# A standalone help/version request never matches anything. In other positions,
+# the same token can be an option value or a literal pattern after --, so it must
+# not bypass ancestor filtering. Let the normal path parse those calls.
+if [ $# -eq 1 ]; then
+  case "$1" in -h|--help|-V|--version) exec "$real" "$@" ;; esac
+fi
+
+# --- log -------------------------------------------------------------------------
+LOG="${SAFE_PKILL_LOG:-${OPS_STATE_DIR:-$HOME/.local/state/ops}/safe-pkill.log}"
+log_line() {  # log_line <the call's arguments...>; LOG_RC and LOG_NOTE are set by the caller
+  local dir args="$*"
+  dir="$(dirname "$LOG")"; mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s %s rc=%s %s args=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$LOG_RC" "$LOG_NOTE" "${args:0:200}" >>"$LOG" 2>/dev/null || return 0
+  if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 204800 ]; then
+    tail -c 102400 "$LOG" >"$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null || rm -f "$LOG.tmp" 2>/dev/null
+  fi
+  return 0
+}
+LOG_RC=0; LOG_NOTE=""
+
+is_signal() {
+  # procps accepts lower-case signal names too. Validate names rather than treating
+  # an arbitrary first option (such as -u, whose argument must stay adjacent) as one.
+  [[ "$1" =~ ^-[0-9]+$ ]] || { [[ "$1" == -?* && "$1" != --* ]] && kill -l "${1#-}" >/dev/null 2>&1; }
+}
+
+valid_signal() {
+  local number name
+  if [[ "$1" =~ ^[0-9]+$ ]]; then
+    number="${1#"${1%%[!0]*}"}"; number="${number:-0}"
+    # Bash's kill -l also decodes 128+N exit statuses, which procps does not
+    # accept as signal numbers. Round-trip the name to reject those numbers.
+    name="$(kill -l "$number" 2>/dev/null)" || return 1
+    [ "$(kill -l "$name" 2>/dev/null)" = "$number" ]
+  else
+    kill -l "$1" >/dev/null 2>&1
+  fi
+}
+
+# --- path 1: the real tool has -A ------------------------------------------------
+supports_A() {
+  [ "${SAFE_PKILL_NO_A:-0}" = 1 ] && return 1
+  [ -n "$real_pgrep" ] || return 1
+  "$real_pgrep" -A -x "__safe_pkill_probe_$$__" >/dev/null 2>&1
+  [ "$?" -eq 1 ]
+}
+
+if supports_A; then
+  if [ "$mode" = pgrep ]; then
+    "$real" -A "$@"; rc=$?
+    LOG_RC=$rc; LOG_NOTE="path=A"; log_line "$@"
+    exit "$rc"
+  fi
+  # pkill: the signal, when given, must stay the first argument (procps reads it
+  # from argv[1] only).
+  pre=()
+  if [ $# -gt 0 ] && is_signal "$1"; then pre=("$1"); shift; fi
+  if [ "$explicit" -eq 0 ]; then
+    # shim: the real tool's own streams, untouched
+    "$real" ${pre[@]+"${pre[@]}"} -A "$@"; rc=$?
+    LOG_RC=$rc; LOG_NOTE="path=A shim"; log_line ${pre[@]+"${pre[@]}"} "$@"
+    exit "$rc"
+  fi
+  # -e makes pkill name what it killed; those lines go to stderr here so a script that
+  # reads pkill's stdout still sees only its own text.
+  report_file="$(mktemp "${TMPDIR:-/tmp}/safe-pkill-report.XXXXXX")" || { say "cannot make a temp file"; exit 3; }
+  trap 'rm -f -- "$report_file"' EXIT
+  # Only successful kill reports move to stderr. The real tool's errors must
+  # stay on stderr instead of being captured and replayed as successful output.
+  "$real" ${pre[@]+"${pre[@]}"} -A -e "$@" >"$report_file"; rc=$?
+  killed=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [[ "$line" =~ \ killed\ \(pid\ [0-9]+\)$ ]]; then killed=$((killed + 1)); say "$line"
+    else printf '%s\n' "$line"; fi
+  done <"$report_file"
+  LOG_RC=$rc; LOG_NOTE="path=A killed=$killed"; log_line ${pre[@]+"${pre[@]}"} "$@"
+  exit "$rc"
+fi
+
+# --- path 2: no -A; drop this process and every ancestor from the match set -----
+ppid_of() {
+  local p="$1" v=""
+  if [ -r "/proc/$p/status" ]; then v="$(awk '/^PPid:/ {print $2; exit}' "/proc/$p/status" 2>/dev/null)"
+  else v="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; fi
+  printf '%s' "$v"
+}
+ancestors=" $$ "
+p="$$"; n=0
+while [ "$n" -lt 64 ]; do
+  p="$(ppid_of "$p")"
+  [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -gt 0 ] || break
+  ancestors="$ancestors$p "; n=$((n + 1))
+  [ "$p" -eq 1 ] && break
+done
+
+# Split the arguments: the signal (pkill), -e and -c are handled here, the rest go
+# to the real pgrep as they are. Anything this path cannot honor exactly runs the
+# real tool unchanged, with a note: never a silent wrong answer.
+sig=""; want_echo=0; want_count=0; wide=0; list_flag=-l; match=()
+passthrough_reason=""
+i=0; args=("$@")
+if [ "$mode" = pkill ] && [ ${#args[@]} -gt 0 ] && is_signal "${args[0]}"; then sig="${args[0]#-}"; sig="${sig#SIG}"; i=1; fi
+while [ "$i" -lt ${#args[@]} ]; do
+  a="${args[$i]}"
+  case "$a" in
+    --) match+=("${args[@]:$i}"); break ;;
+    --signal)
+      if [ "$mode" != pkill ] || [ $((i + 1)) -ge ${#args[@]} ]; then passthrough_reason="$a"; break; fi
+      i=$((i + 1)); sig="${args[$i]}"
+      [ -n "$sig" ] || { passthrough_reason="$a"; break; } ;;
+    --signal=*)
+      sig="${a#--signal=}"
+      [ "$mode" = pkill ] && [ -n "$sig" ] || { passthrough_reason="$a"; break; } ;;
+    --echo) [ "$mode" = pkill ] && want_echo=1 || { passthrough_reason="$a"; break; } ;;
+    --count) want_count=1 ;;
+    --full|--ignore-case|--exact|--ignore-ancestors) match+=("$a") ;;
+    --list-name|--list-full|--inverse|--lightweight)
+      [ "$mode" = pgrep ] || { passthrough_reason="$a"; break; }
+      case "$a" in --list-name) wide=1 ;; --list-full) wide=1; list_flag=-a ;; esac
+      match+=("$a") ;;
+    --pgroup|--group|--parent|--session|--terminal|--euid|--uid)
+      [ $((i + 1)) -lt ${#args[@]} ] || { passthrough_reason="$a"; break; }
+      match+=("$a" "${args[$((i + 1))]}"); i=$((i + 1)) ;;
+    --pgroup=*|--group=*|--parent=*|--session=*|--terminal=*|--euid=*|--uid=*) match+=("$a") ;;
+    --*) passthrough_reason="$a"; break ;;
+    -?*)
+      letters="${a#-}"
+      # Parse option letters only, never their values. For example -u1000 and
+      # -tconsole carry a value in the same argument. Unknown options must reach
+      # the original tool: accepting pgrep-only -v for pkill would invert the kill
+      # set, while passing an abbreviated --count to pgrep would read its count
+      # as a PID. Neither is a harmless approximation of pkill.
+      rest=""; j=0
+      while [ "$j" -lt ${#letters} ]; do
+        ch="${letters:$j:1}"; j=$((j + 1))
+        case "$ch" in
+          e) [ "$mode" = pkill ] && want_echo=1 || { passthrough_reason="$a"; break; } ;;
+          c) want_count=1 ;;
+          f|i|x|A) rest="$rest$ch" ;;
+          l|a|v|w)
+            [ "$mode" = pgrep ] || { passthrough_reason="$a"; break; }
+            case "$ch" in l) wide=1 ;; a) wide=1; list_flag=-a ;; esac
+            rest="$rest$ch" ;;
+          g|G|P|s|t|u|U)
+            rest="$rest$ch"
+            if [ "$j" -lt ${#letters} ]; then
+              rest="$rest${letters:$j}"; j=${#letters}
+            elif [ $((i + 1)) -lt ${#args[@]} ]; then
+              match+=("-$rest" "${args[$((i + 1))]}"); rest=""; i=$((i + 1))
+            else passthrough_reason="$a"; fi
+            break ;;
+          *) passthrough_reason="$a"; break ;;
+        esac
+      done
+      [ -z "$rest" ] || match+=("-$rest")
+      [ -z "$passthrough_reason" ] || break ;;
+    *) match+=("$a") ;;
+  esac
+  i=$((i + 1))
+done
+# An empty or invalid --signal must retain procps' usage error, never fall back to
+# TERM after the option has been removed from pgrep's arguments.
+if [ -n "$sig" ] && ! valid_signal "$sig"; then passthrough_reason="invalid signal"; fi
+if [ -n "$passthrough_reason" ] || [ -z "$real_pgrep" ]; then
+  [ "$explicit" -eq 0 ] || say "this procps has no -A and the option '${passthrough_reason:-?}' cannot be filtered safely: running the real $mode unchanged (it may match its own caller)"
+  LOG_RC=0; LOG_NOTE="path=passthrough reason=${passthrough_reason:-no-pgrep}"; log_line "$@"
+  exec "$real" "$@"
+fi
+
+# Matching. pgrep -l prints "PID name" (-a "PID command line"); without either it prints
+# the PID alone. One of them is always used so a kill can name its targets. The real pgrep writes to a file, not
+# through $( ): a command substitution forks a copy of this script (same argv, so the
+# same pattern text) that would be the pgrep's parent, and pgrep skips only itself,
+# so a process that is gone by the time anyone looks would be listed as a match.
+listing_file="$(mktemp "${TMPDIR:-/tmp}/safe-pkill.XXXXXX")" || { say "cannot make a temp file"; exit 3; }
+trap 'rm -f -- "$listing_file" "$listing_file.err"' EXIT
+"$real_pgrep" "$list_flag" ${match[@]+"${match[@]}"} >"$listing_file" 2>"$listing_file.err"; mrc=$?
+if [ "$mrc" -gt 1 ]; then
+  LOG_RC=$mrc; LOG_NOTE="path=fallback match-error"; log_line "$@"
+  # pgrep's usage differs from pkill's. The original arguments cannot match on
+  # this path, so let the original tool print its own diagnostic and exit status.
+  # exec does not run the EXIT trap, so remove the listing before replacing us.
+  rm -f -- "$listing_file" "$listing_file.err"
+  exec "$real" "$@"
+fi
+cat -- "$listing_file.err" >&2
+keep=()
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  pid="${line%% *}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || continue
+  case "$ancestors" in *" $pid "*) continue ;; esac
+  keep+=("$line")
+done <"$listing_file"
+
+if [ "$mode" = pgrep ]; then
+  if [ "$want_count" -eq 1 ]; then printf '%d\n' "${#keep[@]}"
+  else
+    # honor -l and -a as given; otherwise print the PID alone, as pgrep does
+    for line in ${keep[@]+"${keep[@]}"}; do if [ "$wide" -eq 1 ]; then printf '%s\n' "$line"; else printf '%s\n' "${line%% *}"; fi; done
+  fi
+  rc=1; [ "${#keep[@]}" -gt 0 ] && rc=0
+  LOG_RC=$rc; LOG_NOTE="path=fallback matched=${#keep[@]}"; log_line "$@"
+  exit "$rc"
+fi
+
+# pkill mode
+signame="${sig:-TERM}"
+rc=1; killed=0
+for line in ${keep[@]+"${keep[@]}"}; do
+  pid="${line%% *}"; name="${line#* }"
+  if kerr="$(kill "-$signame" "$pid" 2>&1)"; then
+    killed=$((killed + 1)); rc=0
+    # -e is pkill's own report, on stdout; the stderr report is the explicit name's addition
+    [ "$want_echo" -eq 0 ] || printf '%s killed (pid %s)\n' "$name" "$pid"
+    [ "$explicit" -eq 0 ] || say "$name killed (pid $pid)"
+  else
+    kerr="${kerr%%$'\n'*}"; say "killing pid $pid failed: ${kerr##*kill: }"
+  fi
+done
+# procps counts selected processes, including a process that exited between the
+# selection and the signal. Its exit code still reports whether any signal worked.
+[ "$want_count" -eq 0 ] || printf '%d\n' "${#keep[@]}"
+LOG_RC=$rc; LOG_NOTE="path=fallback killed=$killed"; log_line "$@"
+exit "$rc"

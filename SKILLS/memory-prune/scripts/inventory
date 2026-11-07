@@ -15,6 +15,12 @@
 # MEMORY.md is regenerated every session, so its mtime would make every pool
 # look active. A pool with only a MEMORY.md (no content files) is EMPTY.
 #
+# A pool this tool cannot read is UNMEASURED, never ok and never EMPTY: a
+# directory with no read or search permission makes the file glob below expand to
+# nothing, so without the check an unreadable pool would read as empty and be
+# staged as "safe to rmdir". A failed read must not look like an empty one. The
+# same rule makes an unreadable store a failure, not a report of zero pools.
+#
 # Usage (from the skill folder, SKILLS/memory-prune/):
 #   scripts/inventory                  # table + summary + staged candidates
 #   scripts/inventory --days N         # staleness threshold in days (default 90)
@@ -23,8 +29,9 @@
 #   scripts/inventory --candidates     # print only the staged candidate lists
 #   scripts/inventory --help
 #
-# Read-only. Exit 0 for any report, including one that stages candidates (a report,
-# never a gate); exit 1 only for a bad argument or a missing store.
+# Read-only. Exit 0 for any report, including one that stages candidates or lists
+# an UNMEASURED pool (a report, never a gate); exit 1 only for a bad argument or a
+# missing or unreadable store.
 
 set -uo pipefail
 
@@ -39,7 +46,7 @@ while [[ $# -gt 0 ]]; do
     --limit)      LIMIT="$2"; shift 2 ;;
     --store)      STORE="$2"; shift 2 ;;
     --candidates) CANDIDATES_ONLY=1; shift ;;
-    -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,/^set -uo/{/^set -uo/!p}' "$0"; exit 0 ;;
     *) echo "inventory: unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -48,6 +55,8 @@ done
 # clean pool, so a wrong --store or OPS_DIR must fail loudly (the same reason
 # audit_workflow.js throws when it cannot resolve its pool).
 [[ -d "$STORE" ]] || { echo "inventory: store not found: $STORE" >&2; exit 1; }
+# An unreadable store lists as zero pools, which is also what a clean store reports.
+[[ -r "$STORE" && -x "$STORE" ]] || { echo "inventory: store not readable: $STORE" >&2; exit 1; }
 
 # Colors only when writing to a terminal.
 if [ -t 1 ]; then
@@ -80,8 +89,8 @@ STALE_SECS=$(( STALE_DAYS * 86400 ))
 
 # Assign empty arrays (not just `declare -a`): under `set -u`, ${#arr[@]} on a
 # declared-but-never-assigned array throws "unbound variable" in some bash.
-OVER_LIST=(); EMPTY_LIST=(); STALE_LIST=()
-n_pools=0 n_over=0 n_empty=0 n_stale=0 n_ok=0
+OVER_LIST=(); EMPTY_LIST=(); STALE_LIST=(); UNMEASURED_LIST=()
+n_pools=0 n_over=0 n_empty=0 n_stale=0 n_ok=0 n_unmeasured=0
 
 if [ "$CANDIDATES_ONLY" -eq 0 ]; then
   printf '%s\n' "${B}memory-prune inventory${RST} ${D}: auto-memory pool inventory (read-only)${RST}"
@@ -97,6 +106,18 @@ for d in "$STORE"/*/; do
   [[ -d "$d" ]] || continue
   pool=$(basename "$d")
   n_pools=$(( n_pools + 1 ))
+
+  # A pool with no read or search permission, or an index file that exists but
+  # cannot be read, cannot be measured. Report that, never an empty pool: the
+  # glob below would expand to nothing and stage the pool as safe to remove.
+  if [[ ! -r "$d" || ! -x "$d" ]] || { [[ -f "${d}MEMORY.md" ]] && [[ ! -r "${d}MEMORY.md" ]]; }; then
+    UNMEASURED_LIST+=("$pool"); n_unmeasured=$(( n_unmeasured + 1 ))
+    if [ "$CANDIDATES_ONLY" -eq 0 ]; then
+      disp="$pool"; [ "${#disp}" -gt 49 ] && disp="${disp:0:46}..."
+      printf '%-50s %7s %9s %8s  %b%s%b\n' "$disp" "?" "?" "-" "$RED" "UNMEASURED" "$RST"
+    fi
+    continue
+  fi
 
   # Content files = *.md except MEMORY.md. Track count + newest mtime.
   entries=0; newest=0
@@ -136,7 +157,7 @@ done
 shopt -u nullglob
 
 echo
-printf '%s\n' "${B}Summary:${RST} ${n_pools} pools | ${RED}${n_over} over-limit${RST} | ${D}${n_empty} empty${RST} | ${YEL}${n_stale} stale${RST} | ${GRN}${n_ok} ok${RST}"
+printf '%s\n' "${B}Summary:${RST} ${n_pools} pools | ${RED}${n_over} over-limit${RST} | ${D}${n_empty} empty${RST} | ${YEL}${n_stale} stale${RST} | ${RED}${n_unmeasured} unmeasured${RST} | ${GRN}${n_ok} ok${RST}"
 
 emit_list() {  # $1=label $2=action ; rest=items
   local label="$1" action="$2"; shift 2
@@ -145,9 +166,10 @@ emit_list() {  # $1=label $2=action ; rest=items
   local p; for p in "$@"; do printf '    - %s\n' "$p"; done
 }
 
-if [ $(( n_over + n_empty + n_stale )) -gt 0 ]; then
+if [ $(( n_over + n_empty + n_stale + n_unmeasured )) -gt 0 ]; then
   echo
   printf '%s\n' "${B}Candidates${RST} ${D}(STAGED ONLY; this tool never deletes. Act with operator approval.)${RST}"
+  [ "${#UNMEASURED_LIST[@]}" -gt 0 ] && emit_list "unmeasured" "could not read this pool; restore read access before pruning or removing it" "${UNMEASURED_LIST[@]}"
   [ "${#OVER_LIST[@]}"  -gt 0 ] && emit_list "over-limit" "run the memory-prune skill on this pool (fold to repo docs, delete stale, trim index)" "${OVER_LIST[@]}"
   [ "${#EMPTY_LIST[@]}" -gt 0 ] && emit_list "empty"      "created-never-used; safe to rmdir once confirmed unused" "${EMPTY_LIST[@]}"
   [ "${#STALE_LIST[@]}" -gt 0 ] && emit_list "stale"      "no content writes in >${STALE_DAYS}d; review, and archive to .claude-memory/_archive/ if the project is retired" "${STALE_LIST[@]}"

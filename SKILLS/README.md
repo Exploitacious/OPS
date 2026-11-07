@@ -44,6 +44,8 @@ git clone https://github.com/Exploitacious/agent-skills.git ~/OPS/PROJECTS/Explo
 
 Never hand-edit a mirrored `SKILLS/<name>/` dir; the sync replaces it. The sync never deletes a folder it did not write: a destination that is not a mirror it recorded in `SKILLS/.vendored-state.tsv` (your own skill under a name a manifest row now mounts, or a hand-edited mirror) is moved to `.claude-config/backup/skills-replaced/<name>-<UTC>/` first, and the sync prints a `BACKUP` line naming that path. On a fresh fork the source repos are not cloned, so the mounted skills (`grill-me` among them) appear only after the clone and the sync. Until you clone, `skills-vendor.sh --check` reports them MISSING (a WARN). Once the source is cloned, an un-synced mount reads as DRIFT (a FAIL) until you run `sync`.
 
+The clone's checked-out commit is what a mount follows, and deploy never pulls an existing clone, so a newer source release reaches your copy only when you move it on purpose: read what changed (`git -C ~/OPS/PROJECTS/Exploitacious/agent-skills fetch`, then `log -p HEAD..origin/main`), `git -C ~/OPS/PROJECTS/Exploitacious/agent-skills pull --ff-only`, then `skills-vendor.sh sync` and `skills-vendor.sh --check`. `VENDORED.tsv` has no version column; the commit you pulled is the pin.
+
 ## How to add a new entry
 
 Use the `meta-skill-creator` skill (mounted from the skill source). It's the single source of doctrine for:
@@ -82,17 +84,17 @@ Local entries live in this folder. Mounted skills are listed in the second table
 
 | Entry | Deployed as Skill? | GUI Project? | Notes |
 |-------|--------------------|--------------|-------|
-| `operating-model` | yes | no | Terse prose, answer-and-action structure, lazy-correct engineering, and the AI-tell editing catalog (`references/patterns.md`). Carries the upstream MIT notices for the sources it adapts. |
-| `stewardship` | yes | no | Surface a tool or skill defect instead of silently working around it: retry rules for reads versus writes, a minimal workaround, a fix at the source, and where a mounted skill is edited. |
-| `grabit` | yes | no | Claude Code only: SEND direction of the Tailscale file courier off a headless box; a GUI Project can't execute the local binary. See [[grabit/README.md]]. |
+| `operating-model` | yes | no | Terse prose, answer-and-action structure, lazy-correct engineering (including a destructive step that must tell an empty read from a failed one), a verification-scope rule for lists that change money or records, and the AI-tell editing catalog (`references/patterns.md`). Carries the upstream MIT notices for the sources it adapts. |
+| `stewardship` | yes | no | Surface a tool or skill defect instead of silently working around it: retry rules for reads versus writes, a minimal workaround, a fix at the source, and where a mounted skill is edited. In a ticket or incident thread the defect is filed as an issue and the work continues; the tool or skill is not changed there. |
+| `grabit` | yes | no | Claude Code only: SEND direction of the Tailscale file courier off a headless box; a GUI Project can't execute the local binary. It also says an image attached in a T3 message is already a path to read, not a receive. See [[grabit/README.md]]. |
 | `grabit-screenshots` | yes | no | Claude Code only: RECEIVE direction. Pull files (screenshots included) the operator pushed to the box and read them. Shares the `grabit` binary. See [[grabit/README.md]]. |
-| `memory-prune` | yes | no | Claude Code only: fans out a read-only memory audit via the Workflow tool (`audit_workflow.js`), plus a pool inventory (`scripts/inventory`); executes after operator sign-off. No GUI Project half exists. |
-| `pre-compact-synthesis` | yes | no | Claude Code only: durable-state synthesis plus closeout hygiene, taken at natural rest stops and before a manual `/compact`. Context-watch and automatic compaction are safety nets, not the ritual. No GUI Project half exists. |
+| `memory-prune` | yes | no | Claude Code only: fans out a read-only memory audit via the Workflow tool (`audit_workflow.js`), plus a pool inventory (`scripts/inventory`, which reports a pool it cannot read as UNMEASURED, never as empty); executes after operator sign-off. No GUI Project half exists. |
+| `pre-compact-synthesis` | yes | no | Claude Code only: durable-state synthesis plus closeout hygiene, taken at natural rest stops and before a manual `/compact`. Context-watch and automatic compaction are safety nets, not the ritual. Also holds the ask card (at most three asks, each with a recommendation and a default, every claim marked) for "what do you need from me" questions and close receipts. No GUI Project half exists. |
 | `session-handoff` | yes | no | Claude Code only: write/read baton pair for handing off sessions across profiles and machines; pairs with `pre-compact-synthesis`. No GUI Project half exists. |
 | `remote-session` | yes | no | Claude Code only: hand-run remote sessions. The operator asks for each start, park, revive, or end of a tmux `claude --remote-control` session, and the skill runs it through `.claude-config/remote-sessions/`. |
-| `session-close` | yes | no | Claude Code only: permanent end-to-end close (closeout synthesis, the work-tracking reconciliation gate, then archive or deregister and tear down the backend). Runs only on the operator's explicit word. The terminal counterpart to `pre-compact-synthesis` (pause) and `session-handoff` (move). |
+| `session-close` | yes | no | Claude Code only: permanent end-to-end close (the session's own cleanup, scoped to what it touched and never another live session's work; the work-tracking reconciliation gate; the receipt as an ask card; then archive or deregister and tear down the backend). Runs only on the operator's explicit word. The terminal counterpart to `pre-compact-synthesis` (pause) and `session-handoff` (move). |
 | `harness-update` | yes | no | Claude Code only: safe template-sync of a private OPS copy from the public upstream (no shared git history); the scan classifies files NEW/UPDATE/CONFLICT/IDENTICAL, hard-excludes identity, memory, and handoff surfaces, and never auto-applies a CONFLICT. See [[harness-update/SKILL.md]]. |
-| `operator-voice` | yes | no | Thin context skill: routes to the `CONTEXT/voice.md` slot when writing in the operator's voice; degrades to plain professional prose when unset. |
+| `operator-voice` | yes | no | Thin context skill: routes to the `CONTEXT/voice.md` slot when writing in the operator's voice; degrades to plain professional prose when unset. Also carries the story order for client documents that ask for decisions (decisions last). |
 | `project-kata` | yes | no | Thin context skill: routes to `CONTEXT/project-kata.md` when scaffolding or restructuring a repo. |
 | `projects-map` | yes | no | Thin context skill: routes to `PROJECTS/projects-map.md` for repo routing and portfolio layout. |
 | `machines` | yes | no | Thin context skill: routes to the `CONTEXT/machines.md` slot for host topology; degrades (OPS ships no machines.md) to asking or inferring. |
@@ -106,18 +108,26 @@ Mounted from [`Exploitacious/agent-skills`](https://github.com/Exploitacious/age
 |-------|--------------------|--------------|-------|
 | `grill-me` | yes | no | Intake interview: rounds over a request's decision tree, a recommended answer per question, facts gathered by the agent. Fires on its own when a request still has open decisions. Adapted from mattpocock/skills `grilling` (MIT). |
 | `tdd` | yes | no | Test-driven development discipline (red, green, refactor, integration tests). From mattpocock/skills (MIT). |
-| `diagnosing-bugs` | yes | no | Diagnosis loop for hard bugs and performance regressions. From mattpocock/skills (MIT). |
+| `diagnosing-bugs` | yes | no | Diagnosis loop for hard bugs and performance regressions when the cause is still unknown. From mattpocock/skills (MIT). |
 | `meta-skill-creator` | yes | no | Authoring doctrine for portable skills; the single source for how to build one (see "How to add a new entry"). |
-| `delegation-sizing` | yes | no | Delegate-or-not gate, the five delegation patterns and their decision tree, and a conversion-factor estimate. |
+| `delegation-sizing` | yes | no | Delegate-or-not gate, the five delegation patterns and their decision tree, agent-type choice, and a conversion-factor estimate. |
 | `briefing-subagents` | yes | no | Stakes-mode brief framing and the eight-section brief shape. |
-| `worktree-isolation` | yes | no | Isolation for parallel writers, and the five failure modes at its edges. |
-| `verifying-delegated-output` | yes | no | The two claim classes to verify before trust, git-state checks before a merge, and a stub and fabrication audit. |
-| `dynamic-workflows` | yes | no | Workflow-authoring escalation gate, script primitives, and the pipeline-versus-parallel rule. |
+| `worktree-isolation` | yes | no | Isolation for parallel writers, and the six failure modes at its edges. |
+| `verifying-delegated-output` | yes | no | The two claim classes to verify before trust, git-state checks before a merge, a stub and fabrication audit, and recovery when a lane returns a waiting line or no report. |
+| `dynamic-workflows` | yes | no | Workflow-authoring escalation gate, script primitives, the args prelude every script starts with, recovery after a usage-limit hold, and the pipeline-versus-parallel rule. |
 
 Domain-partner skills (a vendor-docs assistant, a trading co-strategist, anything
 tied to your own stack or business) aren't shipped here; they're yours to
 build. `meta-skill-creator` is the authoring doctrine; `BOOTSTRAP.md` offers to
 scaffold your first one when it learns what you do.
+
+## The skill listing budget (an option, never required)
+
+Every model-invocable skill puts its name and description into the listing each session loads, and Claude Code drops descriptions from the tail of that listing above about 30,000 characters (built-in and account skills share the budget). A skill nobody loads can therefore cost a live one its description. The template sets nothing here and never removes a skill from your copy; the levers are yours, and a team can use them without touching OPS:
+
+- `disable-model-invocation: true` in a skill's frontmatter (a standalone `#` comment line or a trailing comment beside it parses) drops the skill from the model's listing and leaves only the human `/name` command; the model cannot load it through the Skill tool. It suits a skill the operator starts by name, such as `harness-update` or `remote-session`. Probed on Claude Code 2.1.319. An edit to a template skill's frontmatter is a local change: `harness-update` reports that file as a CONFLICT if upstream later changes it too.
+- The `skillOverrides` setting in your own Claude Code settings (`{"<name>": "on" | "name-only" | "user-invocable-only" | "off"}`) changes how a skill is listed without editing its file, and also covers built-in and account skills. A `Skill(...)` permission deny does not hide a skill from the listing. `deploy.sh` never writes your settings, so this one is entirely yours.
+- A skill you never load can be deleted, local or mounted. For a mounted one, delete its row in `VENDORED.tsv` and its `SKILLS/<name>/` mirror folder: the sync writes mirrors and never removes one, so a dropped row leaves its folder in place. The thin context skills (`projects-map`, `harness-deploy`, `harness-readme`) and `grabit-screenshots` are the narrowest entries here; keeping or dropping them is your call.
 
 ## Migrating a cloud-only Project
 

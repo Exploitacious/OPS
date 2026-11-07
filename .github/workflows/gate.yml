@@ -2,7 +2,8 @@
 #
 #   syntax   bash -n, a JavaScript parse, python3 -m py_compile and a PowerShell parse
 #            over every tracked script
-#   suites   every suite under .claude-config/bin/tests/, the *-selftest scripts
+#   suites   every suite under .claude-config/bin/tests/, the *-selftest scripts,
+#            the hook suites named hooks/*-test.py
 #            and the PowerShell suites (the ones that delete or move files run
 #            inside .claude-config/bin/sandbox-run, as CONTRIBUTING.md says)
 #   smoke    a fresh install in a throwaway HOME (the current Stage-1 settings,
@@ -264,7 +265,7 @@ jobs:
       - name: Self-tests beside their subjects
         run: |
           fails=0
-          for t in .claude-config/bin/*-selftest.* .claude-config/hooks/*-selftest.sh; do
+          for t in .claude-config/bin/*-selftest.* .claude-config/hooks/*-selftest.sh .claude-config/hooks/*-test.py; do
             case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
             echo "::group::$t"
             OPS_SELFTEST_STAGE1="$RUNNER_TEMP/stage1-settings.json" \

@@ -78,6 +78,63 @@ SNAPSHOT_DIR="$CLAUDE_CFG/projects/$WORKSPACE_KEY"
 # Find the newest pre-compact-*.md snapshot (mtime-sorted).
 LATEST="$(ls -1t "$SNAPSHOT_DIR"/pre-compact-*.md 2>/dev/null | head -1 || true)"
 
+# Deferred tool schemas do not survive a compaction: every mcp__ tool and a few
+# built-ins (Monitor, WebFetch, WebSearch) must be selected again with ToolSearch,
+# and a call made from memory is rejected by the server or by Claude Code ("This
+# tool's schema was not sent to the API"). In one measured set of sessions 5.9% of
+# such calls failed, against 0.05% once the tool was selected. This names the tools
+# the session was using, most recently used first, and says to re-select LAZILY, one
+# name just before its first call: selecting 17 to 54 tools at once reloads tens of
+# KB of schemas on every compaction, which can cost more than the failures it
+# prevents.
+# mcp-reselect.py picks the list: Claude Code's own record of the discovered tools
+# (compactMetadata.preCompactDiscoveredTools on the fresh compact_boundary record)
+# when readable, else the snapshot's section from pre-compact.sh, else the tool
+# calls in the transcript. It prints nothing when there is nothing to name, and a
+# failure of any step prints nothing: this is a hint, never a gate. The block prints
+# LAST, after the snapshot, closest to the model's next turn.
+HOOK_DIR_RESUME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+reselect_block() {
+  local py tp to out src total shown=0 line
+  py="$(hook_python 2>/dev/null)" || return 0
+  [[ -r "$HOOK_DIR_RESUME/mcp-reselect.py" ]] || return 0
+  tp="$(printf '%s' "$PAYLOAD" | hook_field transcript_path 2>/dev/null)" || tp=""
+  local -a args=(resume "$tp")
+  [[ -n "$LATEST" && -r "$LATEST" ]] && args+=(--snapshot "$LATEST")
+  to="$(hook_timeout 2>/dev/null)" || to=""
+  if [[ -n "$to" ]]; then out="$("$to" 5 "$py" "$HOOK_DIR_RESUME/mcp-reselect.py" "${args[@]}" 2>/dev/null)" || out=""
+  else out="$("$py" "$HOOK_DIR_RESUME/mcp-reselect.py" "${args[@]}" 2>/dev/null)" || out=""; fi
+  [[ -n "$out" ]] || return 0
+  src="$(printf '%s\n' "$out" | sed -n 's/^# source: //p' | head -1)"
+  total="$(printf '%s\n' "$out" | sed -n 's/^# total: //p' | head -1)"
+  case "$src" in
+    boundary) src="Claude Code's own record of the tools it had discovered" ;;
+    snapshot) src="the pre-compact snapshot" ;;
+    *) src="the tool calls since the previous compaction" ;;
+  esac
+  printf '\n============================================================\n'
+  printf ' DEFERRED TOOL SCHEMAS DID NOT SURVIVE THIS COMPACTION\n'
+  printf '============================================================\n'
+  printf 'A compaction drops the schemas of deferred tools (every mcp__ tool, plus Monitor,\n'
+  printf 'WebFetch and a few other built-ins). Calling one from memory fails ("This tool'"'"'s\n'
+  printf 'schema was not sent to the API", or a rejected parameter) far more often than\n'
+  printf 'calling it after it was selected.\n'
+  printf 'Before the FIRST call to any tool below, run ToolSearch with query\n'
+  printf '"select:<exact name>" for that one tool. Copy the name from this list or from\n'
+  printf 'ToolSearch, never type it from memory. Select lazily, one tool just before its\n'
+  printf 'first use: loading them all reloads tens of KB of schemas you may never call.\n'
+  printf 'Tools you had loaded or used (%s, most recently used first; from %s):\n' "${total:-?}" "$src"
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != "#"* ]] || continue
+    printf '  %s\n' "$line"; shown=$((shown + 1))
+  done <<<"$out"
+  if [[ "${total:-0}" =~ ^[0-9]+$ ]] && (( total > shown )); then
+    printf '  (+%d more were loaded; ToolSearch finds a tool by name)\n' "$(( total - shown ))"
+  fi
+  printf '============================================================\n'
+}
+RESELECT_BLOCK="$(reselect_block)"
+
 if [[ -z "$LATEST" ]] || [[ ! -r "$LATEST" ]]; then
   # No snapshot found. Print a one-line note so resumed-Claude
   # knows the system was supposed to fire but didn't find an
@@ -104,6 +161,7 @@ Per how-i-work.md P2: continuity is self-recovery
 via durable storage. Files survive; conversation context does not.
 ============================================================
 EOF
+  [[ -z "$RESELECT_BLOCK" ]] || printf '%s\n' "$RESELECT_BLOCK"
   exit 0
 fi
 
@@ -139,6 +197,20 @@ Source: \`$LATEST\`
 
 EOF
 
-cat "$LATEST"
+# The snapshot's own "Deferred tools" section is the fallback source of the block
+# printed below it; printing both would list the names twice.
+if [[ -n "$RESELECT_BLOCK" ]]; then
+  awk '
+  /^## Deferred tools used before this compaction[[:space:]]*$/ { skip = 1; next }
+  skip && /^## / { skip = 0 }
+  !skip { print }
+' "$LATEST"
+else
+  # Preserve the persisted names and instruction if the replacement hint could
+  # not be built (missing Python or helper, a timeout, an unreadable transcript).
+  cat "$LATEST"
+fi
+
+[[ -z "$RESELECT_BLOCK" ]] || printf '%s\n' "$RESELECT_BLOCK"
 
 exit 0

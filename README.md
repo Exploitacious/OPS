@@ -13,10 +13,12 @@ What it gives you, out of the box:
 - **One always-loaded core.** `CONTEXT/core.md` is the rule set every session
   and every lane carries, on every launch path: terminal, T3 Code, IDE, and
   `claude -p`. Everything else loads on demand.
-- **Foreman-by-default orchestration.** Every session boots as a foreman, not a
+- **Foreman-by-default orchestration.** The main thread is a foreman, not a
   solo engineer. Plan hard up front, then delegate parallelizable work to
   worktree-isolated sub-agents and review their diffs. The posture, the brief
-  template, the quality gates, and the estimation math all ship with it.
+  template, the quality gates, and the estimation math all ship with it. The
+  rules that bind only the main thread live in `CONTEXT/foreman.md`, which a
+  hook prints into foreman sessions at start; lanes never pay for them.
 - **Persistent, file-based memory.** Knowledge lives in tracked files on disk,
   not in a context window that dies on compaction. Auto-memory is git-synced
   across every machine you run OPS on.
@@ -40,8 +42,9 @@ have to assemble yourself. That means:
 
 - **Fixed model tiers** instead of per-task model shopping: Opus 5.5 is the
   foreman, Sonnet 5.5 every sub-agent's default, Opus 5.5 again for
-  high-criticality lanes, Haiku 5.5 for cheap bounded reads, Fable 5.1 rarely.
-  Effort is `xhigh` everywhere. `CONTEXT/model-roles.md` is the policy.
+  high-criticality lanes, Haiku 5.5 for cheap bounded reads, Fable 5.1 rarely
+  (optional: a copy whose plan lacks it loses nothing). Effort is `xhigh`
+  everywhere. `CONTEXT/model-roles.md` is the policy.
 - **A full-autonomy posture**: you plan with it up front, then it runs the list
   end to end without re-prompting.
 
@@ -65,8 +68,10 @@ because these defaults decide what Claude Code may do without asking you:
   rewrites, remote branch deletes, recursive deletes of a few protected roots,
   a bare `tmux kill-server`, and a push from your OPS copy to an origin it
   cannot prove private) and a secrets guard (literal credentials written into
-  memory and lessons files). They are narrow guards, not a sandbox: anything
-  else runs.
+  memory and lessons files; a write it cannot scan is blocked too, never waved
+  through). The git guard also warns, without blocking, when a commit would
+  record merge conflict markers. They are narrow guards, not a sandbox:
+  anything else runs.
 - **`skipDangerousModePermissionPrompt: true`.** Claude Code normally shows a
   one-time confirmation before a session enters bypass mode; this skips it, so
   nothing warns you at launch.
@@ -77,7 +82,7 @@ because these defaults decide what Claude Code may do without asking you:
 - **Auto-compaction on** (`autoCompactEnabled: true`, `DISABLE_AUTO_COMPACT`
   `"0"`; idle compaction off). It is a backstop near the end of the context
   window; the harness still compacts by hand at natural breaks
-  (`CONTEXT/core.md` § "Rhythm and context"). Haiku 5.5 gets a 100K
+  (`CONTEXT/foreman.md` § "Rhythm and compaction"). Haiku 5.5 gets a 100K
   compaction window so its lanes stay cheap.
 
 The same file also pins the model tiers above, sets effort to `xhigh`, empties
@@ -116,7 +121,7 @@ Git Bash), and these on the machine:
   stay local and branch cleanup removes nothing.
 - **`python3` and `jq`.** Deploy seeds the trust anchor with Python, and the
   hooks and the drift gate read JSON with `jq`.
-- **Claude Code.** Deploy only looks for the CLI to retire two old plugins; if
+- **Claude Code.** Deploy only looks for the CLI to report two old plugins; if
   it is missing, deploy warns and goes on.
 - **Optional: `bubblewrap` (`bwrap`).** Only the destructive-tool test suites
   need it (`CONTRIBUTING.md`).
@@ -217,7 +222,8 @@ idempotent and safe to re-run after any pull. On Linux, in order:
    `.claude-memory/` (`memory-init --auto-commit`).
 8. Install the daily backup cron entry (on every copy, with or without an
    `origin` remote; see "The daily backup").
-9. Retire the caveman and ponytail plugins through the `claude plugin` CLI.
+9. Report the caveman and ponytail plugins if they are installed, with the
+   command that removes each; deploy never removes them itself.
 10. Mark `$HOME` trusted in `~/.claude.json`, so the repos under it raise no
     folder-trust prompt.
 
@@ -247,7 +253,8 @@ public repo.
 - **Agent pushes** meet the same gate. The `git-guard.sh` hook runs it before
   an agent's `git push` from an OPS copy and blocks a push it cannot verify,
   one to a remote other than `origin`, and one carrying a `-c` setting that
-  could move it.
+  could move it. The same command parse feeds the conflict-marker check on
+  `git commit`, which warns and lets the commit run.
 
 The limits: the hook is a seatbelt for the pushes an agent makes while
 following normal instructions, not a sandbox. Exotic wrappers (`setsid`,
@@ -330,6 +337,16 @@ only on the template repository, so delete it from your copy if you like.
 Copies older than the 2026-10-19 release also migrate by hand once
 (`DEPLOYMENT.md`, "Migrating to the core boot").
 
+The sync adds and offers; it never takes away what you chose. A file you
+changed stays yours (a CONFLICT is listed for you to resolve), a file the
+template deleted is reported rather than removed, and your git remotes (the
+scan adds only its own `ops-template` fetch remote), backups, memory layout and
+sync, plugins, hooks, and model pins are not touched by it or by deploy. A
+template change that would remove or cap something of yours arrives as a
+warning or an offer you can decline. Only an unsafe thing is overruled: a
+literal credential in a tracked file, or a push of private content to a public
+origin (`CONTEXT/how-i-work.md`, "The template and a copy's owner").
+
 ## Checking your copy
 
 - **The drift gate:** `bash ~/OPS/.claude-config/bin/verify-ops.sh`
@@ -363,6 +380,7 @@ OPS/
 ├── .github/workflows/     # gate.yml: the CI gate (runs on the template repository only)
 ├── CONTEXT/               # core.md always loaded; everything else on demand
 │   ├── core.md                 #   the always-loaded rules (linked into ~/.claude/rules/ops-core.md)
+│   ├── foreman.md              #   the main thread's rules, printed into foreman sessions by a hook, never into a lane
 │   ├── how-i-work.md           #   principles P1-P15 + situational rules (the why behind core.md)
 │   ├── model-roles.md          #   the model-tier policy, one source
 │   ├── project-kata.md         #   repo shape + documentation discipline
@@ -373,12 +391,13 @@ OPS/
 ├── SKILLS/                # Claude Code Skills + GUI Project twins (symlinked -> ~/.claude/skills/); THIRD_PARTY_NOTICES.md
 ├── .claude-config/        # Stage 2 deploy + the machinery it does not itself install
 │   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (links, core rule, skill mounts, memory sync, ...)
-│   ├── hooks/                  #   SessionStart briefing, pre-compact snapshot + branch-gc, context-watch, secrets/git guards
+│   ├── hooks/                  #   SessionStart briefing + foreman doctrine + lane rules + memory digest, pre-compact snapshot + branch-gc +
+│   │                           #   tool re-select, context-watch, memory hint, report-lint, askuser-cancel, secrets/git guards
 │   ├── systemd/                #   ops-verify timer (nightly drift gate) + optional tmux-main
 │   ├── remote-sessions/        #   hand-run tmux sessions you remote-control (see its README)
 │   ├── agents/ + workflows/    #   sub-agent definitions + multi-lane workflow scripts
-│   └── bin/                    #   memory-index/-init, branch-gc, sandbox-run, verify-ops, skills-vendor, tests/ (and more)
-├── .claude-memory/        # per-machine Claude auto-memory dirs (git-synced via bin/memory-init)
+│   └── bin/                    #   memory-index/-init, branch-gc, sandbox-run, verify-ops, skills-vendor, lane-class, await, tests/ (and more)
+├── .claude-memory/        # per-machine memory pools (git-synced via bin/memory-init; loaded natively or by the digest hook)
 ├── .claude-handoffs/      # cross-session / cross-machine handoff batons
 ├── PROJECTS/              # your working repos (2nd-level subdirs are their own repos, gitignored)
 ├── DELIVERABLES/          # cross-cutting one-off outputs not tied to a single project
@@ -400,6 +419,14 @@ every user rule file at launch on every launch path, with no prompt: the
 terminal, T3 Code threads, IDE extensions, `claude -p`, and the lanes they
 spawn. The session briefing's `Boot:` line says whether the link is in place.
 
+The foreman's half of the doctrine rides separately. `CONTEXT/foreman.md`
+(intake and reporting, orchestration, review and merge, model choice, rhythm)
+binds only the main thread, so the foreman-context hook prints it into a
+foreman session at start, resume, clear, and compact, and prints nothing into
+a lane. It stays under 8,192 bytes, because the hook prints nothing for a
+larger file. Without the hook (a host with no Stage-1 hook registration), the
+core tells the main thread to read the file itself.
+
 This replaces an earlier boot that appended a foreman charter and an identity
 digest to the system prompt through a `claude()` shell function. Only launches
 typed into an interactive shell ever ran that function, so T3 Code and IDE
@@ -415,9 +442,9 @@ For a forker, this means:
   `harness-update` never syncs them, so a template refresh never clobbers them.
 - **Keep the core small and generic.** It is paid on every turn of every
   session and lane, and the template sync updates it. Put your rulings in
-  `standing-orders.md`, never in `core.md`.
+  `standing-orders.md`, never in `core.md` or `foreman.md`.
 - **Rest-stop cadence.** Compaction is a rest stop, not a scarcity response:
-  compact by hand at natural breaks (core.md § "Rhythm and context");
+  compact by hand at natural breaks (foreman.md § "Rhythm and compaction");
   auto-compaction is the backstop.
 - **Mount portable skills.** `deploy.sh` clones the public skill source and
   runs `.claude-config/bin/skills-vendor.sh sync`; see `SKILLS/README.md`.

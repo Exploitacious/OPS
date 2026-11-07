@@ -1,0 +1,679 @@
+#!/usr/bin/env python3
+"""await-approval: wait in the background for an out-of-band approval, then exit.
+
+    await-approval <id> [--kind NAME] [--timeout SEC]
+
+Some actions are approved by a person clicking a link, away from the agent's
+thread: a remote session, a write grant, a deploy gate. The click does not wake
+the thread, so a typed "Approved" used to be the only wake signal. This script
+long-polls a STATUS tool on an MCP server (through bin/mcp-http-call.py) until the
+request leaves PENDING, prints ONE line with the final state, and exits. Run it
+with the Bash tool's run_in_background: its exit is a background-task
+notification, which wakes an idle thread with no typed reply. It is the FALLBACK
+for a host that has no callback URL to hand the approval server; where the
+server can call a webhook on approve, deny or expire, no waiter is needed.
+
+Nothing here names a server. The server, tool and arguments of each kind of
+request are configuration (below), with a neutral built-in kind, so a copy that
+has no approval server configured simply reports that and exits 2.
+
+Every exit code the waiter can return:
+
+    0      approved: the request is OPEN (and, where the kind says so, usable by this caller)
+    3      not approved, and it will not become so (the line names the state and the reason):
+             state=denied      the approver pressed Deny (status CLOSED with reason denied,
+                               or a bare DENIED, DECLINED or REJECTED status)
+             state=expired     the pending window ran out (status EXPIRED, or reason pending_expired)
+             state=closed      closed for another reason (idle, disconnect, error, revoked, max, closed)
+             state=not_usable  the request is OPEN but this caller did not request it (the
+                               kind's usable_field is false), so acting on it would be
+                               refused; never exit 0
+    124    timeout: --timeout passed with the request still PENDING (state=timeout)
+    2      error: bad usage or configuration, no caller, no API key, the server refused the
+           key, the id is unknown to the server, an answer this script cannot read, or the
+           server kept failing
+    128+N  stopped by signal N before the server answered (state=interrupted): 143 SIGTERM
+           (the host stopping a background task), 130 SIGINT, 129 SIGHUP; nothing was decided
+
+    await-approval: session 3f2a91bc state=open exit=0 waited=312s idle_left=900s
+    await-approval: session 3f2a91bc state=expired exit=3 waited=1800s reason=pending_expired
+    await-approval: session 3f2a91bc state=denied exit=3 waited=95s reason=denied
+    await-approval: grant 8c1d44e0 state=open exit=0 waited=41s usable=yes
+    await-approval: grant 8c1d44e0 state=not_usable exit=3 waited=41s usable=no reason=requested_by_another_caller
+    await-approval: session 3f2a91bc state=error exit=2 waited=1s detail="not_found: No such session..."
+
+HOW to run it from an agent:
+  - request every approval the task needs first, post the approve links as the last
+    lines of the turn, start this with run_in_background, end the turn. One waiter per id.
+  - pass an explicit Bash timeout of at least 1900000 ms: the default --timeout is 1860 s
+    (a 1800 s pending window plus margin), longer than the 30-minute unattended background
+    limit some hosts apply.
+  - on exit 3, read the state. denied: the approver said no, so say so and stop. expired or
+    closed: post nothing and wait for the operator, because re-requesting for an approver who
+    is away loops. not_usable: the request belongs to another caller, so request one from this
+    session (or check that the waiter's key is this session's key). On exit 124 re-run the
+    waiter only if the server says the request is still PENDING. On exit 128+N the waiter was
+    stopped and nothing was decided: re-run it if the request is still PENDING. On exit 2
+    report the line. After exit 0, make the real call the approval was for.
+  - the id may itself be the credential for the follow-up call, so the line prints only its
+    first 8 characters, never an approve URL, and never a key.
+
+THE STATUS CONTRACT the tool must answer (a flat JSON object, or the same object under the
+kind's "record" key), whatever the server:
+  status                     PENDING, OPEN, CLOSED or EXPIRED (any case)
+  close_reason / closed_reason  why it closed: "denied", "pending_expired", or anything else
+  pending_seconds_remaining, idle_seconds_remaining   optional, shown in the line
+  <usable_field>             optional boolean on the answer (not the record), for a kind that
+                             sets usable_field: whether THIS caller may use an OPEN request
+An answer with an "error" key is an error (exit 2). The tool should hold the call until the
+request changes state or about wait_s seconds pass, so the call returns the moment the
+approver clicks; a tool that answers PENDING at once is paced, never hammered.
+
+CONFIGURATION. A JSON file, $AWAIT_APPROVAL_CONFIG or ~/.config/ops/await-approval.json
+(an explicit AWAIT_APPROVAL_CONFIG that does not exist is an error; the default file may be
+absent). Without one the built-in kind "default" applies: tool approval_status, arguments
+{"id": <id>, "wait_s": <seconds>}, a flat record, on the endpoint OPS_MCP_URL names.
+
+    {
+      "default_kind": "session",
+      "key_connectors": ["approvals"],
+      "kinds": {
+        "session": {"server": "approvals", "tool": "session_status",
+                    "args": {"session_id": "{id}", "wait_s": "{wait}"}},
+        "grant":   {"server": "approvals", "tool": "grant",
+                    "args": {"mode": "status", "grant_id": "{id}", "wait_s": "{wait}"},
+                    "record": "grant", "usable_field": "usable_by_this_caller"}
+      }
+    }
+
+  server        endpoint name for mcp-http-call.py --server (needs OPS_MCP_URL_TEMPLATE), or
+                null to use OPS_MCP_URL
+  tool          the status tool's name (a suffix, as mcp-http-call.py resolves it)
+  args          the tool's arguments; the string "{id}" becomes the id and "{wait}" the wait in
+                whole seconds (an integer); every other value is passed as written
+  record        the key of the status record inside the answer, or null for the answer itself
+  usable_field  the answer key that says whether this caller may use an OPEN request, or null
+  key_connectors  names of mcpServers entries in ~/.claude.json whose literal "Bearer <key>"
+                header is the last-resort key (see below); default none
+
+HOW it polls: one run of mcp-http-call.py per poll (`[--server S] call TOOL args out`), wait_s
+at most 40 (the usual cap on one held call), shorter on the last poll before the deadline. A
+poll that returns early with PENDING is paced to at least 3 s. Each poll opens one MCP session
+and closes it with an HTTP DELETE, so at most one session per waiter is ever live. SIGTERM,
+SIGINT and SIGHUP are passed to the poll in flight so its session still closes.
+
+A transient failure (a 5xx or 429, a dropped connection, a tool answer with isError) is retried
+up to 5 times in a row with a growing pause; a refused key (HTTP 401 or 403), an unknown
+endpoint (404), an unknown tool, a missing configuration or any in-band "error" answer stops at
+once. The HTTP status and the other fatal markers are read where mcp-http-call.py puts them, in
+the first "ERROR: " line it prints, never in the response body quoted after it: a 502 whose
+body says "HTTP 403" is still a 502.
+
+WHAT a box needs:
+  1. bin/mcp-http-call.py beside this script, and python3 (standard library only).
+  2. The MCP endpoint: OPS_MCP_URL, or OPS_MCP_URL_TEMPLATE plus a kind's "server" name.
+  3. The API key, read the way mcp-http-call.py reads it: OPS_MCP_API_KEY in the environment
+     (or the variable OPS_MCP_KEY_VAR names), else that line of $OPS_DIR/.env (default
+     ~/OPS/.env). When the poll reports no key, this script tries the literal "Bearer <key>"
+     header of the key_connectors entries in ~/.claude.json and gives the key to the poll
+     through the poll's environment only (never argv, never a file, never printed). A
+     ${VAR} reference in the entry is not a key and is skipped.
+  4. Outbound HTTPS to the endpoint. Nothing listens; no inbound URL is needed.
+  The key must be the same person's key the agent session uses where the server binds a
+  request to its requester: usable=no means the waiter's key is not the requester's.
+
+Test-only environment (tests/await-approval-test.py): AWAIT_APPROVAL_MCP_CALL names a stub
+for mcp-http-call.py; AWAIT_APPROVAL_PACE_S replaces the 3 s pacing and the retry pause
+base; none changes behavior when unset.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+PROG = "await-approval"
+EXIT_OK = 0
+EXIT_ERROR = 2
+EXIT_NOT_APPROVED = 3
+EXIT_TIMEOUT = 124
+
+DEFAULT_TIMEOUT_S = 1860  # a 1800 s pending window plus margin
+MAX_TIMEOUT_S = 7200  # the longest a background command may run
+MAX_WAIT_S = 40  # the usual cap on one held status call
+MAX_FAILS = 5  # consecutive transient failures before the waiter gives up
+CHILD_GRACE_S = 20  # a poll may run this long past its wait before it is cut off
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{3,127}")
+KIND_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
+SERVER_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+
+# The kind a copy gets when it configures nothing: a neutral shape, no server name.
+DEFAULT_CONFIG = {
+    "default_kind": "default",
+    "key_connectors": [],
+    "kinds": {
+        "default": {"server": None, "tool": "approval_status", "args": {"id": "{id}", "wait_s": "{wait}"},
+                    "record": None, "usable_field": None},
+    },
+}
+
+# The caller prints "ERROR: <message>" and the message may carry up to 800 characters of server
+# text (a response body, a tool answer) that quotes anything at all. So every marker below is
+# anchored to the start of the first "ERROR: " line (see error_line); a marker found later in the
+# text is the server talking, not the client.
+NO_KEY_RE = re.compile(r"ERROR: no API key")
+# Failures a retry cannot fix.
+FATAL = (
+    (re.compile(r"ERROR: HTTP (401|403) on "),
+     "the server refused the key (HTTP %s): check the API key (a stale value in the session "
+     "environment shadows a rotated .env)"),
+    (re.compile(r"ERROR: HTTP (404) on "), "endpoint not found (HTTP %s)"),
+    (re.compile(r"ERROR: (?:no tool matching|ambiguous tool suffix)"), "the endpoint has no such tool"),
+    (re.compile(r"ERROR: (?:no endpoint configured|--server needs|bad --server|the endpoint URL)"),
+     "mcp-http-call.py refused the endpoint configuration"),
+)
+REASON_DENIED = "denied"  # close_reason or closed_reason of a Deny click
+# A bare status that also means a denial, read as one if a server emits it.
+DENIED_STATUSES = frozenset({"DENIED", "DECLINED", "REJECTED"})
+# The states that exit 3: the request will never open for this caller.
+NOT_APPROVED_STATES = ("expired", "closed", "denied", "not_usable")
+# Where the caller finds the key besides the environment: $OPS_DIR/.env and ~/OPS/.env. Read
+# here only to seed the scrub list; the poll reads its own key.
+MIN_SCRUB_LEN = 8  # a shorter value is a placeholder; replacing it would garble the output
+
+STOP = threading.Event()
+_stop_signal = [0]
+_child = [None]
+_secrets = []
+
+
+def key_var():
+    """The name of the variable that holds the API key (mcp-http-call.py reads the same)."""
+    return os.environ.get("OPS_MCP_KEY_VAR") or "OPS_MCP_API_KEY"
+
+
+def env_files():
+    files = []
+    for base in (os.environ.get("OPS_DIR"), "~/OPS"):
+        if base:
+            path = os.path.expanduser(os.path.join(base, ".env"))
+            if path not in files:
+                files.append(path)
+    return files
+
+
+def _on_signal(signum, frame):
+    """Remember the signal and pass it to the poll in flight, so that poll's session closes."""
+    _stop_signal[0] = signum
+    STOP.set()
+    child = _child[0]
+    if child is not None and child.poll() is None:
+        try:
+            child.terminate()
+        except OSError:
+            pass
+
+
+def scrub(text, limit=240, ident=""):
+    """One line, with every key value and any bearer token removed, cut to `limit`."""
+    text = str(text)
+    for secret in _secrets + [ident]:
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer <redacted>", text)
+    # An approval URL can carry a different credential from the request id.
+    # No server-supplied URL belongs in the waiter's result notification.
+    text = re.sub(r"https?://[^\s<>\"']+", "<redacted-url>", text, flags=re.I)
+    text = " ".join(text.split()).replace('"', "'")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def short(ident):
+    return ident[:8]
+
+
+def finish(code, state, kind, ident, started, **extra):
+    """Print the one result line and return the exit code."""
+    parts = [PROG + ":", kind, short(ident), "state=%s" % state, "exit=%d" % code,
+             "waited=%ds" % round(time.monotonic() - started)]
+    detail = extra.pop("detail", None)
+    for key, value in extra.items():
+        if value not in (None, ""):
+            value = scrub(value, ident=ident)
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+                value = '"%s"' % value
+            parts.append("%s=%s" % (key, value))
+    if detail:
+        parts.append('detail="%s"' % scrub(detail, ident=ident))
+    print(" ".join(parts))
+    sys.stdout.flush()
+    return code
+
+
+def usage_error(message):
+    print("%s: %s" % (PROG, message), file=sys.stderr)
+    print("usage: %s <id> [--kind NAME] [--timeout SEC]" % PROG, file=sys.stderr)
+    return EXIT_ERROR
+
+
+def pace_s():
+    """Minimum seconds between polls, and the base of the retry pause."""
+    try:
+        return max(0.0, float(os.environ.get("AWAIT_APPROVAL_PACE_S", "3")))
+    except ValueError:
+        return 3.0
+
+
+class ConfigError(ValueError):
+    """The configuration file cannot be used; the message says where and why."""
+
+
+def config_path():
+    explicit = os.environ.get("AWAIT_APPROVAL_CONFIG")
+    if explicit:
+        return explicit, True
+    return os.path.expanduser("~/.config/ops/await-approval.json"), False
+
+
+def check_kind(name, kind, where):
+    if not KIND_RE.fullmatch(name):
+        raise ConfigError("%s: kind name %r is not letters, digits, '_' or '-'" % (where, name))
+    if not isinstance(kind, dict):
+        raise ConfigError("%s: kind %s is not an object" % (where, name))
+    tool = kind.get("tool")
+    if not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", tool):
+        raise ConfigError("%s: kind %s needs a \"tool\" name" % (where, name))
+    server = kind.get("server")
+    if server is not None and (not isinstance(server, str) or not SERVER_RE.fullmatch(server)):
+        raise ConfigError("%s: kind %s has a \"server\" that is not an endpoint name or null" % (where, name))
+    args = kind.get("args", {})
+    if not isinstance(args, dict) or not all(isinstance(k, str) for k in args):
+        raise ConfigError("%s: kind %s \"args\" is not an object" % (where, name))
+    for field in ("record", "usable_field"):
+        value = kind.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ConfigError("%s: kind %s \"%s\" is not a key name or null" % (where, name, field))
+    return {"server": server, "tool": tool, "args": args, "record": kind.get("record"),
+            "usable_field": kind.get("usable_field")}
+
+
+def load_config():
+    """The configuration: the file named by AWAIT_APPROVAL_CONFIG or the default path, else the
+    built-in default. An explicit path that is missing, and any file that cannot be read or is
+    not a valid configuration, raise ConfigError: a guess about what the operator meant could
+    poll the wrong server."""
+    path, explicit = config_path()
+    if not os.path.exists(path):
+        if explicit:
+            raise ConfigError("AWAIT_APPROVAL_CONFIG names %s, which does not exist" % path)
+        return DEFAULT_CONFIG
+    try:
+        with open(path) as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ConfigError("cannot read %s: %s" % (path, exc))
+    if not isinstance(raw, dict) or not isinstance(raw.get("kinds"), dict) or not raw["kinds"]:
+        raise ConfigError("%s needs a \"kinds\" object with at least one kind" % path)
+    kinds = {name: check_kind(name, kind, path) for name, kind in raw["kinds"].items()}
+    default = raw.get("default_kind") or sorted(kinds)[0]
+    if default not in kinds:
+        raise ConfigError("%s: default_kind %r is not one of its kinds" % (path, default))
+    connectors = raw.get("key_connectors", [])
+    if not isinstance(connectors, list) or not all(isinstance(c, str) for c in connectors):
+        raise ConfigError("%s: key_connectors is not a list of names" % path)
+    return {"default_kind": default, "key_connectors": connectors, "kinds": kinds}
+
+
+def find_caller():
+    override = os.environ.get("AWAIT_APPROVAL_MCP_CALL")
+    if override:
+        return override if os.path.isfile(override) else None
+    here = os.path.dirname(os.path.realpath(__file__))
+    cand = os.path.join(here, "mcp-http-call.py")
+    return cand if os.path.isfile(cand) else None
+
+
+def claude_json_key(connectors):
+    """A literal API key from a user-scope mcpServers entry of ~/.claude.json, or None.
+
+    The last resort for a box whose key is in no environment and no .env. Only the entries
+    the configuration names count, and only a literal "Bearer <key>"; a ${VAR} reference is
+    not a key.
+    """
+    if not connectors:
+        return None
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as fh:
+            servers = json.load(fh).get("mcpServers") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(servers, dict):
+        return None
+    for name in connectors:
+        entry = servers.get(name)
+        headers = entry.get("headers") if isinstance(entry, dict) else None
+        auth = headers.get("Authorization") if isinstance(headers, dict) else None
+        if not isinstance(auth, str):
+            continue
+        match = re.fullmatch(r"Bearer\s+([A-Za-z0-9._~+/=-]{16,})", auth.strip())
+        if match:
+            return match.group(1)
+    return None
+
+
+def dotenv_keys():
+    """Every value of the key variable in $OPS_DIR/.env and ~/OPS/.env, for scrub() only.
+
+    mcp-http-call.py reads the first such line itself; this reads the files again so the
+    waiter can redact the value, and prints and passes it nowhere. A missing or unreadable
+    file is not an error here (the poll reports its own).
+    """
+    pattern = re.compile(r"(?:export\s+)?%s=(.*)" % re.escape(key_var()))
+    keys = []
+    for path in env_files():
+        try:
+            with open(path) as fh:
+                lines = fh.read().splitlines()
+        except (OSError, ValueError):
+            continue
+        for line in lines:
+            match = pattern.fullmatch(line.strip())
+            if match:
+                value = match.group(1).strip().strip('"').strip("'")
+                if len(value) >= MIN_SCRUB_LEN:
+                    keys.append(value)
+    return keys
+
+
+class Poll:
+    """The outcome of one run of the caller: a payload, or why it failed."""
+
+    def __init__(self, payload=None, err="", fatal=False, transient=True, no_key=False):
+        self.payload = payload
+        self.err = err
+        self.fatal = fatal
+        self.transient = transient
+        self.no_key = no_key
+
+    @property
+    def failed(self):
+        return self.payload is None
+
+
+def error_line(text):
+    """The first "ERROR: " line of the poll's stderr, or "" when it printed none.
+
+    That line is the caller's own verdict; what follows it may be server text.
+    """
+    for line in (text or "").splitlines():
+        if line.startswith("ERROR: "):
+            return line
+    return ""
+
+
+def classify_failure(stderr):
+    text = " ".join((stderr or "").split())
+    head = error_line(stderr)
+    if NO_KEY_RE.match(head):
+        return Poll(err=text, fatal=True, no_key=True)
+    for pattern, message in FATAL:
+        match = pattern.match(head)
+        if match:
+            groups = match.groups()
+            return Poll(err=message % groups if "%s" in message else message, fatal=True)
+    # Anything else is a gateway blip, a dropped connection or a tool answer with isError: retry,
+    # and the poll limit ends it.
+    return Poll(err=text or "no output from the caller")
+
+
+def fill_args(template, ident, wait):
+    """The kind's args with "{id}" and "{wait}" replaced (the wait stays an integer)."""
+    out = {}
+    for key, value in template.items():
+        if value == "{id}":
+            value = ident
+        elif value == "{wait}":
+            value = wait
+        out[key] = value
+    return out
+
+
+def run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline):
+    """One long poll through the caller; the answer's JSON lands in tmp/out.json."""
+    args_path = os.path.join(tmp, "args.json")
+    out_path = os.path.join(tmp, "out.json")
+    try:
+        os.unlink(out_path)
+    except OSError:
+        pass
+    fd = os.open(args_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(fill_args(spec["args"], ident, wait_s), fh)
+    cmd = list(runner)
+    if spec["server"]:
+        cmd += ["--server", spec["server"]]
+    cmd += ["call", spec["tool"], args_path, out_path]
+    budget = max(5.0, min(wait_s + CHILD_GRACE_S, deadline - time.monotonic() + 5))
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env, universal_newlines=True,
+                                errors="replace")
+    except OSError as exc:
+        return Poll(err="cannot run the caller: %s" % exc.strerror, fatal=True)
+    _child[0] = proc
+    if STOP.is_set():  # a signal landed between the spawn and the hand-off above
+        proc.terminate()
+    try:
+        try:
+            _out, err = proc.communicate(timeout=budget)
+        except subprocess.TimeoutExpired:
+            # Terminate, not kill: SIGTERM lets the poll send its session DELETE.
+            proc.terminate()
+            try:
+                _out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                _out, err = proc.communicate()
+            return Poll(err="poll timed out after %ds" % budget)
+    finally:
+        _child[0] = None
+    if proc.returncode != 0:
+        return classify_failure(err)
+    try:
+        with open(out_path) as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return Poll(err="the caller wrote no readable answer")
+    if not isinstance(payload, dict):
+        return Poll(err="the answer was not a JSON object")
+    return Poll(payload=payload)
+
+
+def interpret(spec, payload):
+    """Map a status answer to (state, info): state is pending, open, expired, closed,
+    denied, not_usable or error, and info carries the fields the result line prints."""
+    record_key = spec["record"]
+    outer = payload
+    if record_key is None and "status" not in payload and isinstance(payload.get("result"), dict):
+        payload = payload["result"]  # some servers wrap the answer in {"result": ...}
+    elif record_key is not None and record_key not in payload and isinstance(payload.get("result"), dict):
+        payload = payload["result"]
+    # Unwrapping must not discard a refusal on the envelope. A status record
+    # can still say OPEN when the status lookup itself failed for this caller.
+    for answer in (outer, payload):
+        if answer.get("error"):
+            code = answer["error"] if isinstance(answer["error"], str) else answer.get("code", "error")
+            message = answer.get("message") or ""
+            return "error", {"detail": "%s: %s" % (code, message) if message else str(code)}
+        if answer.get("success") is False:
+            return "error", {"detail": "the status answer reports success=false"}
+    usable = None
+    if record_key is not None:
+        record = payload.get(record_key)
+        if not isinstance(record, dict):
+            return "error", {"detail": "the answer carries no %s record" % record_key}
+    else:
+        record = payload
+    if spec["usable_field"]:
+        usable = payload.get(spec["usable_field"])
+    status = str(record.get("status") or "").upper()
+    reason = record.get("close_reason") or record.get("closed_reason")
+    if status == "PENDING":
+        left = record.get("pending_seconds_remaining")
+        return "pending", {"pending_left": "%ds" % left if isinstance(left, (int, float)) else None}
+    if status == "OPEN":
+        if not spec["usable_field"]:
+            left = record.get("idle_seconds_remaining")
+            return "open", {"idle_left": "%ds" % left if isinstance(left, (int, float)) else None}
+        # A request can be bound to the caller that made it: OPEN for someone else opens
+        # nothing here (acting on it is refused), so exit 0 would be a lie.
+        if usable is False:
+            return "not_usable", {"usable": "no", "reason": "requested_by_another_caller"}
+        if usable is not True:
+            return "error", {"detail": "the answer does not say whether this caller can use the "
+                                       "request (%s is missing)" % spec["usable_field"]}
+        return "open", {"usable": "yes"}
+    # The Deny button closes a PENDING request: status CLOSED, reason "denied".
+    if reason == REASON_DENIED or status in DENIED_STATUSES:
+        return "denied", {"reason": reason}
+    if status == "EXPIRED" or reason == "pending_expired":
+        return "expired", {"reason": reason}
+    if status == "CLOSED":
+        return "closed", {"reason": reason}
+    return "error", {"detail": "unrecognised status %r" % status[:40]}
+
+
+def wait_for_approval(args, config):
+    kind, ident = args.kind, args.id
+    spec = config["kinds"][kind]
+    started = time.monotonic()
+    deadline = started + args.timeout
+    runner_path = find_caller()
+    if runner_path is None:
+        return finish(EXIT_ERROR, "error", kind, ident, started,
+                      detail="mcp-http-call.py not found beside %s (a box needs bin/mcp-http-call.py "
+                             "and python3)" % PROG)
+    runner = [runner_path] if os.access(runner_path, os.X_OK) else [sys.executable, runner_path]
+    env = dict(os.environ)
+    var = key_var()
+    if env.get(var):
+        _secrets.append(env[var])
+    # The poll may read its key from a file instead; know that value too so scrub() can
+    # redact it from any text that reaches us unscrubbed (a traceback, a proxy page).
+    _secrets.extend(dotenv_keys())
+    tmp = tempfile.mkdtemp(prefix="await-approval-")  # mode 0700
+    fails = retries = 0
+    key_fallback_tried = False
+    last = "pending"
+    pending_left = None
+    try:
+        while True:
+            if STOP.is_set():
+                return finish(128 + _stop_signal[0], "interrupted", kind, ident, started)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return finish(EXIT_TIMEOUT, "timeout", kind, ident, started, last=last,
+                              pending_left=pending_left, retries=retries or None)
+            # The last poll before the deadline asks for whatever whole seconds are left (0
+            # is an immediate read), so the timeout reports a fresh state, not a stale one.
+            wait_s = int(min(MAX_WAIT_S, remaining))
+            began = time.monotonic()
+            poll = run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline)
+            if STOP.is_set():
+                return finish(128 + _stop_signal[0], "interrupted", kind, ident, started)
+            if poll.failed:
+                if poll.no_key and not key_fallback_tried:
+                    key_fallback_tried = True
+                    key = claude_json_key(config["key_connectors"])
+                    if key:
+                        env[var] = key
+                        _secrets.append(key)
+                        continue
+                if poll.no_key:
+                    return finish(EXIT_ERROR, "error", kind, ident, started, retries=retries or None,
+                                  detail="no API key: export %s, or put it in $OPS_DIR/.env (a box can "
+                                         "also name a connector in key_connectors whose literal Bearer "
+                                         "entry in ~/.claude.json holds it)" % var)
+                fails += 1
+                if poll.fatal or fails >= MAX_FAILS:
+                    return finish(EXIT_ERROR, "error", kind, ident, started, retries=retries or None,
+                                  detail=poll.err)
+                retries += 1
+                pause = min(30.0, max(pace_s(), 0.01) * (2 ** (fails - 1)))
+                STOP.wait(min(pause, max(0.0, deadline - time.monotonic())))
+                continue
+            fails = 0
+            state, info = interpret(spec, poll.payload)
+            if state == "open":
+                return finish(EXIT_OK, "open", kind, ident, started, retries=retries or None, **info)
+            if state in NOT_APPROVED_STATES:
+                return finish(EXIT_NOT_APPROVED, state, kind, ident, started,
+                              retries=retries or None, **info)
+            if state == "error":
+                return finish(EXIT_ERROR, "error", kind, ident, started, retries=retries or None, **info)
+            last = "pending"
+            pending_left = info.get("pending_left")
+            # A server that answers PENDING at once (a wait it ignored) must not be hammered.
+            early = pace_s() - (time.monotonic() - began)
+            if early > 0:
+                STOP.wait(min(early, max(0.0, deadline - time.monotonic())))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def parse(argv, config=DEFAULT_CONFIG):
+    parser = Parser(prog=PROG, add_help=False)
+    parser.add_argument("id", nargs="?")
+    parser.add_argument("--kind", default=None)
+    parser.add_argument("--timeout", default=str(DEFAULT_TIMEOUT_S))
+    parser.add_argument("-h", "--help", action="store_true")
+    args = parser.parse_args(argv)
+    if args.help:
+        return args
+    if not args.id:
+        raise ValueError("an id is required (the id the approval server returned for the request)")
+    if args.kind is None:
+        args.kind = config["default_kind"]
+    if args.kind not in config["kinds"]:
+        raise ValueError("--kind is one of: %s" % ", ".join(sorted(config["kinds"])))
+    if not ID_RE.fullmatch(args.id):
+        raise ValueError("the id must be the one the approval server returned")
+    try:
+        args.timeout = float(args.timeout)
+    except ValueError:
+        raise ValueError("--timeout is a number of seconds")
+    if not 0 < args.timeout <= MAX_TIMEOUT_S:
+        raise ValueError("--timeout is more than 0 and at most %d seconds" % MAX_TIMEOUT_S)
+    return args
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:  # the help works even when the configuration does not
+        print(__doc__)
+        return EXIT_OK
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        return usage_error(exc)
+    try:
+        args = parse(argv, config)
+    except ValueError as exc:
+        return usage_error(exc)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _on_signal)
+    return wait_for_approval(args, config)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -40,6 +40,14 @@ path:line) / REFUTED (state what is actually true with path:line). Then the
 reasoning, tight: what you checked, what you found, what would change your
 verdict. Never CONFIRM anything you did not personally reproduce.
 
+Lane shell rules (each prevents a refusal or a self-kill seen in real lane sessions):
+- Never "sleep N; check". Wait with ~/OPS/.claude-config/bin/await --timeout SEC -- <check>, a Monitor until-loop, or run_in_background.
+- In an isolated worktree (a path under /.claude/worktrees/) run one simple command per call and use git -C <worktree>; no cd chains, compound commands, time, subshells or heredoc-fed bash. For several steps, Write a script and run bash <literal path>.
+- Never pkill -f, pgrep -f or killall by pattern (self-kills; it also hits sibling lanes). Kill an exact PID you recorded, or use ~/OPS/.claude-config/bin/safe-pkill.
+- The tool is Bash, capital B.
+- After a compaction, load a deferred MCP tool with ToolSearch select:<exact name> before its first call; copy names, never type them.
+- rm -rf of a variable path: print and check the path first, then use "${VAR:?}" or a literal path.
+
 Context (P12): run as far as the work needs. The context-watch hook reminds
 you at about 60% of your real window (keep going; skip large reads you do not
 need) and asks you to wrap up at about 80%: at the next natural break, never

@@ -31,3 +31,16 @@
 *.woff2 binary
 *.ttf binary
 *.eot binary
+
+# Memory pool indexes merge with the union driver. MEMORY.md is generated from
+# the pool's entries (memory-index), so when two machines commit the same pool
+# (an Operator who gives both the same host key) each regenerates it. Without
+# union, two machines that each add an entry between the same two index lines
+# conflict in the daily sync's pull --rebase, which aborts and pushes nothing,
+# and every later sync fails the same way until someone resolves it (the whole
+# backup, not only memory). Union keeps
+# both sides' lines, and the next regeneration rewrites the file from the
+# entries, so a stale line one side edited is a one-session leftover. The
+# entries themselves are NOT unioned: two edits of one entry stay a visible
+# conflict. Pinned by verify-ops-selftest.sh.
+/.claude-memory/*/MEMORY.md merge=union

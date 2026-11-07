@@ -4,6 +4,161 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-07: foreman doctrine split out, lane-aware boots, a memory loader, stricter guards, and a deploy that offers instead of removing
+
+Every lane paid on every turn for core rules that bound only the main thread, lanes kept
+tripping the same few shell refusals, and a copy on the current Stage-1 settings (which
+turn Claude Code's native auto-memory off) started each session with no memory loaded at
+all. This release splits the foreman's rules into their own file, teaches the boot hooks
+which session is a lane, ships the memory loader those settings expect, adds a conflict
+marker warning and closes several parser fail-opens in the git guard, and writes down the
+rule that the template adds and offers but never takes away what a copy's owner chose. Upgrading a
+copy older than this release: `DEPLOYMENT.md`, "Upgrading from a copy older than
+2026-11-07".
+
+### Doctrine
+
+- **`CONTEXT/foreman.md` is new, and `core.md` is smaller.** `core.md` keeps what binds
+  every session and lane (role, landing, models, writing, memory routing, where to look)
+  and drops to about 11 KB. Intake, reporting, orchestration, review and merge, model
+  choice, rhythm and context-file ownership moved to `foreman.md` (at most 8,192 bytes),
+  which the new `foreman-context.sh` hook prints into foreman sessions only, at start,
+  resume, clear and compact. A lane never receives it. If the block is missing, `core.md`
+  tells a main thread to read the file itself.
+- **The template and a copy's owner** (`CONTEXT/how-i-work.md`). A template change that
+  would delete, cap or block an owner's content (a plugin, a memory pool's size, a retired
+  skill, a hook, a model pin, a remote, a backup) ships as a warning or an offer, never a
+  FAIL, a block or an automatic removal. Only an unsafe thing is overruled, and the rule
+  names each one: a literal credential in a tracked file, a push of private content to a
+  public origin, and the git guard's brakes on destructive git commands. One stated
+  exception: the drift gate still FAILs on a banned or retired model id (checks 15 and
+  15b), and that FAIL edits nothing.
+- **Principles.** A written time comes from the clock (P3). Two credential shortcuts are
+  out (P6): sourcing or evaluating a decrypted file into the shell, and shredding a fresh
+  credential in an unconditional cleanup tail.
+- **Models** (`CONTEXT/model-roles.md`). A refutation pass defaults to the Sonnet auditor,
+  with Opus 5.5 kept for a high-criticality claim set and the reason in the brief. Nobody
+  is required to have Fable. Pins are the owner's: deploy and `harness-update` never edit
+  them, and the gate's FAIL on a banned or retired id edits nothing.
+- `PROJECTS/projects-map.md` gains an optional, generic ticket-workspace row.
+
+### Lanes
+
+- **`bin/lane-class`** answers `foreman`, `t3-lane` or `agent-lane` for a hook payload in
+  well under 300 ms, and anything it cannot resolve is `foreman`. `OPS_LANE_CLASS` forces
+  an answer.
+- **`hooks/lane-rules.sh`** gives every lane six shell rules at start (SubagentStart, and
+  SessionStart for a T3 lane): wait with `await` instead of sleep-then-check, one simple
+  command per call in an isolated worktree, no kill by pattern, the tool is `Bash`,
+  re-select a deferred tool after a compaction, and check a variable path before `rm -rf`.
+  The `ops-worker`, `ops-investigator` and `ops-auditor` agents carry the same block, and
+  `tests/lane-rules-test.sh` fails when the copies differ.
+- **`bin/await`** waits for a command, a PID or a file inside one ordinary call (exit 0,
+  or 124 at the deadline). **`bin/safe-pkill`** and **`safe-pgrep`** leave the caller's own
+  process chain out of the match; `safe-pkill --install-shims` places them over `pkill`
+  and `pgrep` only when you run it by hand, and deploy never does.
+- **Quieter hooks for lanes.** `context-watch.sh` says nothing on Stop or in its readout to
+  a lane and gives a T3 lane its own 60% and 80% lines; `session-briefing.sh` prints one
+  line for a lane and starts nothing. The briefing also names a parked or behind main
+  checkout of the current project. Large tool responses cannot silence the context
+  warning by overflowing an environment variable.
+- **Per-thread work keys under T3 Code.** The work key is `t3-<session id>`, stable across
+  compaction and resume, so two threads in one directory keep separate stamps and work
+  logs.
+- **Behavior change: leftover session stamps are judged by evidence.** The scan runs
+  detached from the boot path, at most every 30 minutes, and flags a leftover stamp only
+  when real commits landed in its window; an idle leftover no longer reads as abandoned
+  work. A failed history read reports an error and keeps the previous flags. It never
+  removes or moves a stamp. Empty (including index-only), throwaway and T3 scratch memory
+  pools are no longer called unadopted.
+
+### Memory
+
+- **`hooks/memory-digest.sh` loads the pools when native auto-memory is off.** With
+  `autoMemoryEnabled: false` (the current Stage-1 settings) Claude Code loads no memory, so
+  until now such a copy started every session without one. The hook prints a digest of
+  this directory's pool and the root pool's cross-project entries at start, resume, clear
+  and compact: at most 9,000 characters, pinned entries first, then user and feedback
+  entries, then the rest, names only past the budget. With native auto-memory on it prints
+  nothing; `MEMORY_DIGEST=1` or `0` forces it.
+- **`hooks/memory-hint.sh`** adds up to three relevant memory lines to a prompt that
+  strongly matches them, and stays silent for harness messages and lanes. A failure is one
+  line in `${OPS_STATE_DIR:-~/.local/state/ops}/memory-hint.log`.
+- **`bin/memory-index`** gains `--digest`, `--hint`, `--find` and `--digest-fit`. A pool
+  over 60 entries draws a warning and nothing else. **`memory-init`** makes no pool for a
+  scratch directory or an empty memory dir, and `memory-init --set-host-key <key>` lets a
+  second machine or login share the first one's pools (`~/.config/ops/memory-host`, one
+  strict rule shared by three readers).
+- `verify-ops` check 6 measures whether each pool fits the digest and 6b counts entries;
+  both WARN, and FAIL only when the indexer cannot run. Pool `MEMORY.md` indexes merge with
+  the union driver, so two machines sharing a pool no longer stop a rebase.
+- The `memory-prune` skill gains a deletion rule (nothing whose content has not landed
+  elsewhere is evicted without sign-off) and its inventory reports an unreadable pool as
+  UNMEASURED instead of EMPTY.
+
+### Compaction and reports
+
+- **Deferred tools come back after a compaction.** `pre-compact.sh` records the deferred
+  tools used since the last compaction, and `post-compact-resume.sh` lists them, most
+  recent first, to re-select one at a time just before use.
+- **`hooks/report-lint.sh`** (Stop) blocks a foreman's final message once when it asks the
+  Operator more than three things, carries a decision table, or names things only by ID,
+  and asks for an ask card instead. `REPORT_LINT=0` turns it off; `REPORT_LINT_MAX_ASKS`
+  and `REPORT_LINT_TICKET_RE` tune it.
+- **`hooks/askuser-cancel.sh`** tells the agent that a question card cancelled by an
+  arriving message is not the Operator's answer. `ASKUSER_CANCEL=0` turns it off.
+- `pre-compact-synthesis` gains the ask card (its rules in `ask-card.md`), a wake for every
+  timed promise, clock-stamped anchors and a cleanup step; `self-compact-cycle.md` treats
+  the completion record alone as proof of a compact. `session-close` cleans up after
+  itself and cross-checks the repos it touched from the session transcript.
+
+### Guards
+
+- **git-guard warns when a commit would record merge conflict markers**, checking the
+  staged diff plus whatever the same call stages, with `--amend` and the `--continue`
+  forms. It never blocks the commit: a commit is the owner's content, and a marker is a
+  mistake to fix, not a danger. The warning, or a note that the check could not finish,
+  reaches Claude as PreToolUse context. It skips the check without Python 3, and
+  `GIT_GUARD=off` skips it for one command.
+- **The push gate's parser reads more shell.** A NUL or escape inside `$'...'`, `git` split
+  by quotes or backslashes, and a `case` inside `$(...)` each let a push from a copy pass
+  unchecked before; all are refused now.
+- **secrets-guard blocks a write it cannot scan** (no JSON parser, unreadable input, a
+  field it cannot extract) instead of allowing it. `secrets-scan.sh` exits 2 when grep
+  could not scan a line, read a file or finish a directory walk, and `verify-ops` check 8
+  reports that apart from a found secret.
+- `guard-selftest.sh --quick` runs the core probes; `deploy.ps1` uses it and says the
+  probes are running first, and Git Bash skips the link-based probes. The self-test builds
+  its fake private-key header at run time, so CI's history scan reads no key block in it;
+  `.gitleaksignore` lists the one earlier commit that wrote the header out.
+
+### Tools
+
+- **`bin/mcp-http-call.py`** is a standard-library MCP-over-HTTP client (list, call, batch;
+  one session per run), with the endpoint and key variable from configuration. It refuses
+  redirects and any URL that is not http or https. **`bin/await-approval`** is a
+  configuration-driven waiter built on it. The waiter preserves refusals when unwrapping
+  a status record and masks credentials and URLs in every result field. A batch marks a
+  gateway failure or unreadable reply as an unknown write outcome, requiring a readback
+  before retrying. Failed permission changes refuse output rather than silently leaving
+  a less restrictive file mode, and on Windows, where mode bits are not an owner-only
+  ACL, an out file is refused before any call is sent (printing the result still works).
+- **`bin/wf-resume`** lists a workflow's lanes that never returned, in local time
+  (`WF_RESUME_TZ`).
+
+### Deploy and gates
+
+- **Behavior change: deploy no longer uninstalls the caveman and ponytail plugins.** Step 9
+  reports each one it finds and prints the command that removes it; keeping one is the
+  owner's call. A plugin declared in `settings.json` is pointed at Stage 1.
+- `verify-ops` check 9b WARNs on a `SKILL.md` over 16 KB or with a line over 1,500
+  characters, and check 5 no longer reads a tracker project number as a principle
+  citation.
+- CI and the local test loop now also run hook suites named `hooks/*-test.py`.
+- Skills: notes on how a mount is pinned and how to trim the skill listing, a narrower
+  `grabit` trigger, a decisions-last order for client documents in `operator-voice`, and
+  ticket threads that file a tool defect instead of fixing it in `stewardship`.
+
 ## 2026-11-06: a copy with no git remote keeps its nightly job
 
 The 2026-11-05 change below stopped deploy from scheduling the nightly job on a copy with
