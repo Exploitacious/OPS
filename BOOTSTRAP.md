@@ -12,8 +12,9 @@ replace.
 ## Prime directive
 
 The doctrine already ships and stays generic: `core.md` (always loaded),
-`how-i-work.md` (P1-P15 and the situational rules), `model-roles.md`, and
-`project-kata.md`. The template sync (`harness-update`) keeps updating those
+`foreman.md` (the main thread's rules, printed into foreman sessions by a
+hook), `how-i-work.md` (P1-P15 and the situational rules), `model-roles.md`,
+and `project-kata.md`. The template sync (`harness-update`) keeps updating those
 files, so bootstrap never edits them, with one exception named in Stage 1
 (the kata's Operator overlays). What is missing is the *who* layer, and it
 lives only in files no template sync touches:
@@ -124,8 +125,8 @@ the emphasis of `USER.md`.
 choose:
 - `Full autonomy: the go is the switch` **(recommended default)**: plan hard
   up front, then run end to end with zero re-prompts, merging green reviewed
-  work without asking. This is what `core.md` § "Intake, then autonomy"
-  describes.
+  work without asking. This is what `core.md` § "Intake, then autonomy" and
+  `foreman.md` § "Review and merge" describe.
 - `Checkpoint mode`: pause at each major step for confirmation.
 - `Confirmation-heavy`: confirm before any write, commit, or external action.
 

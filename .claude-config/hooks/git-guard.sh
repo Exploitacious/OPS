@@ -18,6 +18,12 @@
 #       origin-private-check cannot prove private   memory and notes; see the
 #       or to a remote other than origin           push gate at the end)
 #
+#   WARNED (exit 0, the warning goes to Claude as additionalContext):
+#     a commit that would record merge conflict  (see "Conflict markers" for
+#       markers: a staged line, or a file this     what counts, the limits,
+#       call stages, starting with <<<<<<< ,       and why it never blocks)
+#       |||||||, >>>>>>> or a lone =======
+#
 # NOT blocked: normal push/merge/commit (autonomy default), rebase of local
 # unpushed work, rm inside scratch/tmp. Operator escape hatch for a
 # deliberately-approved action: GIT_GUARD=off <command>  (or approve in chat
@@ -195,14 +201,17 @@ push_gate_proved() {
   return 1
 }
 
-# push_records <cwd>: NUL-separated records "base gitdir unresolved override
-# count word..." for every git command in $CMD_RAW, or the single record ERROR.
+# git_records <cwd>: NUL-separated records for every git command in $CMD_RAW,
+# each led by its kind, then the word ERROR if the command could not be read:
+#   git base gitdir unresolved override count word...   (the push gate)
+#   mk base gitdir count word...                        (the conflict-marker check)
 # unresolved is 1 when the repo could not be resolved and the command may push
 # (the caller then runs the fail-safe check); override names a setting the
-# command carries that can move a push. The command reaches Python on stdin,
-# never as an argument: Linux caps one argument at 128 KiB, and a long heredoc
-# command must not turn into an uninspectable one.
-push_records() {
+# command carries that can move a push. The mk words are described in the
+# parser below. The command reaches Python on stdin, never as an argument:
+# Linux caps one argument at 128 KiB, and a long heredoc command must not turn
+# into an uninspectable one.
+git_records() {
   local py boot
   py="$(hook_python)" || { printf 'ERROR\0'; return; }
   boot="import sys; p, c, tail = sys.stdin.buffer.read().split(b'\\0'); tail and sys.exit('unexpected bytes after command terminator'); raw = c.decode('utf-8', 'surrogateescape'); exec(compile(p, 'git-guard-push', 'exec'))"
@@ -244,6 +253,22 @@ diff-index diff-files rev-list whatchanged""".split())
 # Aliases cannot shadow these publishing builtins either: alias.push=status
 # must never make a real `git push` disappear from the inspection.
 BUILTINS.update(("push", "send-pack", "http-push"))
+# Conflict-marker records ("mk" first) feed the conflict-marker check at the end
+# of the hook. One record per git command that stages content or records a
+# commit: add or stage; commit; merge, cherry-pick, revert, rebase or am with
+# --continue. Words: flags, kind (add, commit or continue), work tree, index
+# file, then the command's own words after the subcommand. Flags: "u" when the
+# repository is a guess (an unresolved -C, cd, git dir, work tree or index, or
+# a cd to a directory that does not exist yet), "x" under xargs (more arguments
+# arrive on stdin, unseen), "p" when an earlier command in this call may change
+# files before this one runs (anything but cd and the other no-ops, read-only
+# git commands, and the add and commit steps the check models), "-" for none.
+# "p" only shapes the refusal's advice; it never decides a verdict.
+MK_PRIOR = [False]
+MK_QUIET = {"cd", "pushd", "popd", "true", ":", "pwd", "test", "["}
+MK_READS = set("""status diff log show rev-parse ls-files ls-tree cat-file blame merge-base describe
+fetch for-each-ref show-ref grep shortlog check-attr check-ignore var version help branch tag config
+remote""".split())
 
 def native_path(p):
     if os.name == "nt":
@@ -284,17 +309,38 @@ def path(p, base, sh, physical=False):
     return posixpath.normpath(p)
 
 def emit(base, gd, unresolved, override, words):
-    for v in [base or "", gd or "", "1" if unresolved else "0", override, str(len(words)), *words]:
+    for v in ["git", base or "", gd or "", "1" if unresolved else "0", override, str(len(words)), *words]:
         sys.stdout.buffer.write(v.encode("utf-8", "surrogateescape") + b"\0")
 
+def emit_mk(base, gd, words):
+    for v in ["mk", base or "", gd or "", str(len(words)), *words]:
+        sys.stdout.buffer.write(v.encode("utf-8", "surrogateescape") + b"\0")
+
+def mk_step(prog, w):
+    # git reports through git() below; a shell's -c body and an eval body are
+    # walked as commands of their own, so the wrapper itself changes nothing.
+    if prog in ("git", "git.exe", "eval") or prog in MK_QUIET:
+        return
+    if prog in SHELLS and any(a.startswith("-") and not a.startswith("--") and "c" in a[1:] for a in w):
+        return
+    MK_PRIOR[0] = True
+
 def ansi_c(s):
-    table = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v"}
+    # Bash's $'...' escapes: \xHH, octal (a byte value, so \400 is NUL), \uHHHH,
+    # \UHHHHHHHH and \cX as bash reads them; an unknown escape keeps its
+    # backslash. $'\x67it' spells git, and so does its four-digit \u form.
+    table = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v",
+             "\\": "\\", "'": "'", '"': '"', "?": "?"}
     def one(m):
         e = m.group(1)
         if e[0] == "x": return chr(int(e[1:], 16))
+        if e[0] in "uU":
+            v = int(e[1:], 16)
+            return chr(v) if v <= 0x10FFFF else "?"
+        if e[0] == "c" and len(e) == 2: return chr(ord(e[1]) & 31)
         if e[0] in "01234567": return chr(int(e, 8) & 0xFF)
-        return table.get(e, e)
-    return re.sub(r"\\(x[0-9A-Fa-f]{1,2}|[0-7]{1,3}|.)", one, s)
+        return table.get(e, "\\" + e)
+    return re.sub(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|c.|[0-7]{1,3}|.)", one, s, flags=re.S)
 
 def heredocs(text):
     # Here-document bodies are stdin data, not command lines. An unquoted
@@ -334,10 +380,16 @@ HEREDOC = re.compile(r"""<<(-?)\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z_0-9]*
 def close_paren(text, i):
     # Index of the ")" that closes a "$(" whose body starts at i. Here-document
     # bodies inside it are skipped, so the apostrophe in a commit message
-    # written as "$(cat <<'EOF' ... EOF)" is text, not an open quote.
-    depth, quote, n, pending = 1, None, len(text), []
+    # written as "$(cat <<'EOF' ... EOF)" is text, not an open quote. A case
+    # statement inside raises: its pattern's ")" cannot be told from the end of
+    # the substitution here, and reading it as the end would leave the commands
+    # after the pattern as quoted text, unseen. The caller's fail-safe check
+    # then reads the raw command instead.
+    depth, quote, n, pending, start = 1, None, len(text), [], i
     while i < n:
         c = text[i]
+        if quote is None and c == "c" and re.match(r"case\b", text[i:i + 5]) and (i == start or text[i - 1] in " \t\n;&|("):
+            raise ValueError("a case statement inside a command substitution")
         if quote == "'":
             if c == "'": quote = None
             i += 1; continue
@@ -406,7 +458,9 @@ def prescan(text, subs):
                 while j < n and text[j] != "'":
                     body.append(text[j:j + 2] if text[j] == "\\" else text[j]); j += 2 if text[j] == "\\" else 1
                 if j >= n: raise ValueError("unterminated $'...' string")
-                out.append("'" + ansi_c("".join(body)).replace("'", "'\\''") + "'"); i = j + 1; start = False; continue
+                # Bash ends the string at its first NUL: $'git\0suffix' runs git.
+                word = ansi_c("".join(body)).split("\0", 1)[0]
+                out.append("'" + word.replace("'", "'\\''") + "'"); i = j + 1; start = False; continue
             if c.isdigit() and start:
                 j = i
                 while j < n and text[j].isdigit(): j += 1
@@ -445,9 +499,12 @@ def tokens(text):
     return out
 
 def shell(base, parent=None, env=None):
-    sh = {"base": base, "oldpwd": None, "dirs": [], "vars": {}, "exported": set(), "pos": [], "push_override": "", "git_config": []}
+    # guess: a cd went to a directory that does not exist yet (made earlier in
+    # the same call), so the base is stale; only the conflict-marker records
+    # read it, and an absolute cd clears it.
+    sh = {"base": base, "oldpwd": None, "dirs": [], "vars": {}, "exported": set(), "pos": [], "push_override": "", "git_config": [], "guess": False}
     if parent:
-        sh.update(oldpwd=parent["oldpwd"], vars=dict(parent["vars"]), exported=set(parent["exported"]), pos=list(parent["pos"]), push_override=parent["push_override"], git_config=list(parent["git_config"]))
+        sh.update(oldpwd=parent["oldpwd"], vars=dict(parent["vars"]), exported=set(parent["exported"]), pos=list(parent["pos"]), push_override=parent["push_override"], git_config=list(parent["git_config"]), guess=parent["guess"])
     for k, v in (env or {}).items():
         sh["vars"][k] = v; sh["exported"].add(k)
     return sh
@@ -468,9 +525,9 @@ def commands(text, sh, depth, outer=({}, set())):
             seg = []
             piped = out if t in ("|", "|&") else None
             if t in ("(", "<(", ">("):
-                stack.append((sh["base"], sh["oldpwd"], list(sh["dirs"]), dict(sh["vars"]), set(sh["exported"])))
+                stack.append((sh["base"], sh["oldpwd"], list(sh["dirs"]), dict(sh["vars"]), set(sh["exported"]), sh["guess"]))
             elif t == ")" and stack:
-                sh["base"], sh["oldpwd"], sh["dirs"], sh["vars"], sh["exported"] = stack.pop()
+                sh["base"], sh["oldpwd"], sh["dirs"], sh["vars"], sh["exported"], sh["guess"] = stack.pop()
         else:
             seg.append((kind, t))
 
@@ -481,7 +538,7 @@ def command(seg, sh, depth, bodies, quoted, subs, piped):
     for kind, t in seg:
         for key in SUBST.findall(t):
             commands(subs[key], shell(base, sh), depth + 1, (bodies, quoted))
-    env, w, stdin, i = {}, [], list(piped or []), 0
+    env, w, stdin, i, xargs_run = {}, [], list(piped or []), 0, False
     while i < len(seg):
         kind, t = seg[i]
         if kind == "op":
@@ -505,6 +562,7 @@ def command(seg, sh, depth, bodies, quoted, subs, piped):
             w.pop(0); continue
         if prog in WRAPPERS:
             w.pop(0)
+            if prog == "xargs": xargs_run = True
             while w and w[0].startswith("-"):
                 opt = w.pop(0)
                 if opt == "--": break
@@ -540,6 +598,7 @@ def command(seg, sh, depth, bodies, quoted, subs, piped):
         for k, v in env.items(): sh["vars"][k] = v
         return None
     prog = posixpath.basename(w.pop(0))
+    mk_step(prog, w)
     if prog == "export":
         for a in w:
             k, eq, v = a.partition("=")
@@ -581,13 +640,16 @@ def command(seg, sh, depth, bodies, quoted, subs, piped):
         elif args[0] == "-": dest = sh["oldpwd"]
         else: dest = path(args[0], base, sh, physical)
         if dest is not None and not os.path.isdir(native_path(dest)):
+            sh["guess"] = True
             return None
+        if not args or (args[0] != "-" and re.match(r"^(/|~|[A-Za-z]:[/\\])", expand(args[0], sh) or "")):
+            sh["guess"] = False
         if prog == "pushd": sh["dirs"].append(base)
         sh["oldpwd"], sh["base"] = base, dest
     elif prog == "popd" and sh["dirs"]:
         sh["oldpwd"], sh["base"] = base, sh["dirs"].pop()
     elif prog in ("git", "git.exe"):
-        git(w, base, sh, env, depth)
+        git(w, base, sh, env, depth, xargs_run)
     return None
 
 def push_override(key):
@@ -596,11 +658,12 @@ def push_override(key):
     # key itself does not mention a remote. The gate never saw that config.
     return k.startswith(("remote.", "url.", "push.", "include.", "includeif.")) or (k.startswith("branch.") and k.rsplit(".", 1)[-1] in ("remote", "pushremote"))
 
-def git(w, base, sh, env, depth):
+def git(w, base, sh, env, depth, xargs_run=False):
     genv = {k: v for k, v in sh["vars"].items() if k in sh["exported"]}
     genv.update(env)
     unresolved = base is None
     gd, kv, override = "", list(sh["git_config"]), sh["push_override"]
+    wt_word = genv.get("GIT_WORK_TREE", "")
     # Config reads are data-only. Forward exactly the config inputs, never
     # PATH, LD_PRELOAD, GIT_EXEC_PATH, or other command execution settings.
     config_env = dict(os.environ)
@@ -634,6 +697,8 @@ def git(w, base, sh, env, depth):
                 base = path(val, base, sh, True); unresolved |= base is None
             elif opt == "--git-dir":
                 gd = path(val, base, sh, True); unresolved |= gd is None
+            elif opt == "--work-tree":
+                wt_word = val
             elif opt == "-c":
                 k, eq, v = val.partition("="); kv.append((k, v if eq else "true"))
             elif opt == "--config-env":
@@ -680,6 +745,21 @@ def git(w, base, sh, env, depth):
     w = [x if x.startswith("-") else (expand(x, sh) or x) for x in w]
     maybe_push = w[0] in PUSHLIKE or w[0] not in BUILTINS
     emit(base, gd, unresolved and maybe_push, override, ["git", *w])
+    sub = w[0]
+    kind = "add" if sub in ("add", "stage") else "commit" if sub == "commit" else None
+    if sub in ("merge", "cherry-pick", "revert", "rebase", "am") and "--continue" in w[1:]:
+        kind = "continue"
+    if kind is None:
+        if sub not in MK_READS: MK_PRIOR[0] = True
+        return
+    wt = path(wt_word, base, sh, True) if wt_word else ""
+    idx = genv.get("GIT_INDEX_FILE", "")
+    guess = unresolved or wt is None or idx is None or (wt_word is None) or sh["guess"]
+    # A word that is still a placeholder or holds a variable is no literal
+    # path: a leading "$" makes the check treat it as unknown.
+    args = ["$" + a if not a.startswith("-") and (SUBST.search(a) or "`" in a) else a for a in w[1:]]
+    flags = ("u" if guess else "") + ("x" if xargs_run else "") + ("p" if MK_PRIOR[0] else "")
+    emit_mk(base, gd, [flags or "-", kind, wt or "", idx or "", *args])
 
 try:
     commands(raw, shell(cwd), 0)
@@ -878,18 +958,720 @@ coarse_check() {
   done
 }
 
+# --- Conflict markers -----------------------------------------------------------
+# Warns about a commit that would record an unresolved merge conflict. Why a
+# hook: a lesson in memory does not stop the slip it describes. The failing
+# shape is a resolver step that fails and writes nothing, with the git add and
+# git commit on the next lines of the same Bash call running anyway, so the
+# markers ship; in a harness repo a marker in a hook or script is a parse error
+# that can turn a guard off. Prose did not change the behavior, so the hook
+# speaks at the commit itself.
+#
+# Why a warning and never a block: a commit is the owner's content, and the
+# template does not block an owner's content unless it is unsafe
+# (CONTEXT/how-i-work.md, "The template and a copy's owner"). A marker in a
+# commit is a mistake to fix, not a danger: the files already hold the markers
+# before the commit, and a follow-up commit (or an amend before the push)
+# removes them. A false block, or a check too slow to finish on a loaded box,
+# would stop clean commits. So every outcome below exits 0: hits and an
+# inspection that could not finish both go to Claude as PreToolUse
+# additionalContext (and to the Operator as a one-line systemMessage), and the
+# commit runs.
+#
+# What counts as a marker: a line that starts with exactly seven <, | or >
+# characters followed by a space, a tab or the line's end, or exactly seven =
+# characters with nothing but whitespace after them. That is git's own leftover
+# conflict-marker rule (git diff --check), narrowed for = so a reStructuredText
+# table border (======= followed by more columns) is not a marker, and it honors
+# git's conflict-marker-size attribute for a path as git diff --check does
+# (lengths below seven are not checked). Precision over breadth: a false warning
+# on every commit in a repo teaches everyone to skip it, so the rule matches only
+# what git writes. Mid-line markers, a line merely containing =======, eight =
+# characters, binary files and the commit message are never markers. Markers
+# inside fenced code in Markdown still warn: a real conflict looks the same.
+#
+# What "would record" means, per repository a command commits in:
+#   - the staged diff (git diff --cached, against the amended commit's parent
+#     for --amend, so an amend cannot carry markers the commit it replaces had);
+#   - the files this Bash call stages first, read from the working tree,
+#     because this hook runs before git add does: a git add earlier in the call
+#     (its pathspecs, -A, -u, -f), commit -a (tracked files), and commit
+#     <pathspec> (those paths; without -i the rest of the index is left out, as
+#     git leaves it out). Each commit keeps its own snapshot of earlier staging,
+#     so a later add cannot hide markers that an earlier commit would record.
+#     Untracked files use git's binary attributes and clean-filter output too.
+#     --only --amend without paths checks HEAD rather than the index. Amend
+#     bases use the current HEAD even after an earlier commit in the call: that
+#     commit may fail. Split the call if advancing HEAD would clear a hit.
+# Commands: commit (including git -C <dir>, -a, --amend, and a merge commit via
+# --no-edit), and merge, cherry-pick, revert, rebase or am with --continue,
+# which record the index the same way. Aliases, shell -c bodies, command
+# substitutions and scripts piped to a shell are expanded by the parser above.
+#
+# The hook sees the files before the Bash call runs. A call that resolves a
+# conflict and commits in one go warns while the markers are still in the files;
+# the warning says the resolving step may have cleared them, how to check the
+# commit it made, and to run such a step in its own Bash call next time, so the
+# guard reads the result.
+#
+# Cost: nothing for a command with no commit. Inspection costs one Python start,
+# a git rev-parse per repository and a diff per commit snapshot; staging first
+# adds a rev-parse of HEAD, ls-files and a diff per add. New files with filters,
+# binary content or marker-like lines get a no-index diff; plain clean text needs
+# only a scan. No network (GIT_NO_LAZY_FETCH=1), no index refresh
+# (GIT_OPTIONAL_LOCKS=0), no external diff, textconv or fsmonitor program. A 6 s
+# budget inside Python and a hard 8 s limit (timeout -k 1 8) around it bound the
+# check. Working-tree diffs may run a path's clean filter (git-lfs, eol
+# conversion), as git add itself will.
+#
+# Never silent, never a block: a git error, an expired budget or a crash lets
+# the commit run with a warning that says the check could not inspect it, why,
+# and how to check by hand. Not inspected, by design
+# (the commit would fail on its own, or the guard cannot know what it records):
+# a directory that is not a work tree, a repository the parser could not
+# resolve (a computed path, a cd to a directory the call creates), --dry-run,
+# and an amend with nothing to amend. When the parser cannot read the command at
+# all and its text names commit or --continue, the check falls back to the
+# staged diff of the hook's working directory. Without Python 3 the check does
+# not run: the push gate keeps its raw-text fallback there because a missed push
+# can publish private notes, while a missed marker costs a commit to fix. Narrow
+# misses, documented: staging the guard cannot model (git add -p, -i, -e, -N,
+# --pathspec-from-file, pathspecs with an unexpanded $VARIABLE or arriving
+# through xargs) is not read from the working tree, though the staged diff still
+# is; a command earlier in the call that creates a conflict (a merge, pull or
+# stash pop chained with ; rather than &&) is not simulated; a commit inside a
+# script file, a computed command or a non-git tool is not seen.
+#
+# Intended marker lines (a test fixture, a document quoting a conflict) should
+# be generated at run time, or the path given a conflict-marker-size attribute
+# in .gitattributes, so the check stays quiet for them. Both GIT_GUARD=off
+# hatches skip the check, as they skip the rest of this hook. A test corpus with
+# markers is written with a file tool or a script, never in a Bash heredoc,
+# since this hook reads the whole command string (heredoc bodies included).
+#
+# Test seam (session environment only, never a command prefix: hooks do not
+# inherit a command's prefix): GIT_GUARD_MARKER_BUDGET, seconds, can only lower
+# the 6 s budget.
+MK_DIR=() MK_AUX=() MK_OFF=() MK_LEN=() MK_W=()
+MK_UNREAD=0
+
+# mk_store <dir> <git dir> <word>...: keep one marker record for the check.
+mk_store() {
+  local dir="$1" gd="$2"; shift 2
+  MK_DIR+=("$dir"); MK_AUX+=("$gd"); MK_OFF+=("${#MK_W[@]}"); MK_LEN+=("$#"); MK_W+=("$@")
+}
+
+# mk_records: the stored records, NUL framed (dir, git dir, word count, words),
+# then an END word, so a truncated stream cannot pass as a complete one.
+mk_records() {
+  local i
+  for ((i = 0; i < ${#MK_DIR[@]}; i++)); do
+    printf '%s\0%s\0%s\0' "${MK_DIR[$i]}" "${MK_AUX[$i]}" "${MK_LEN[$i]}"
+    printf '%s\0' "${MK_W[@]:${MK_OFF[$i]}:${MK_LEN[$i]}}"
+  done
+  printf 'END\0'
+}
+
+mk_program() {
+  cat <<'MKPY'
+import os, posixpath, re, signal, stat, subprocess, sys, tempfile, threading, time
+
+class Stop(Exception):
+    """The inspection cannot finish; the gate warns and shows the reason."""
+
+# A file name the terminal's encoding cannot spell must not crash the warning.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+try:
+    budget = float(os.environ.get("GIT_GUARD_MARKER_BUDGET") or 6)
+except ValueError:
+    budget = 6.0
+# The seam can only lower the budget (NaN fails every comparison, so it is reset).
+if budget != budget or budget > 6:
+    budget = 6.0
+budget = max(budget, 0.1)
+deadline = time.monotonic() + budget
+SHOWN = 12
+KEEP = 5000
+BIG = 512 << 20   # git's default core.bigFileThreshold: bigger files diff as binary
+ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1")
+for k in ("GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_PAGER"):
+    ENV.pop(k, None)
+# Explicit settings beat user config that would change the output parsed below.
+CFG = ["-c", "core.fsmonitor=false", "-c", "diff.relative=false", "-c", "diff.noprefix=false",
+       "-c", "diff.mnemonicPrefix=false"]
+# Separate hunks explicitly: diff.suppressBlankEmpty can otherwise remove a
+# context line's prefix and make a later addition invisible to the parser.
+DIFF = ["-U0", "--inter-hunk-context=0", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
+        "--src-prefix=a/", "--dst-prefix=b/"]
+HUNK = re.compile(rb"^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@")
+WS = b" \t\r\n\v\f"
+
+def left():
+    r = deadline - time.monotonic()
+    if r <= 0:
+        raise Stop("the check ran out of its %g s budget" % budget)
+    return r
+
+def native_path(p):
+    if os.name == "nt":
+        return subprocess.check_output(["cygpath", "-w", p], text=True).strip()
+    return p
+
+def text(b):
+    return b.decode("utf-8", "surrogateescape")
+
+def show(s, n=60):
+    s = "".join(c if c.isprintable() else "?" for c in s)
+    return s if len(s) <= n else s[:n] + "..."
+
+def cmdline(ctx, base, args):
+    c = ["git", "-C", native_path(base)]
+    if ctx["gd"]:
+        c.append("--git-dir=" + native_path(ctx["gd"]))
+    if ctx["wt"]:
+        c.append("--work-tree=" + native_path(ctx["wt"]))
+    return c + CFG + args
+
+def envof(ctx):
+    return dict(ENV, GIT_INDEX_FILE=native_path(ctx["idx"])) if ctx["idx"] else ENV
+
+# git runs in a session of its own and a deadline kills the whole group: a child
+# git starts (a clean filter, a helper) can hold the output pipe open after git
+# itself dies, and reading that pipe would then outlast the budget.
+GROUP = os.name != "nt"
+
+def spawn(ctx, base, args, stdin, stdout, stderr):
+    return subprocess.Popen(cmdline(ctx, base, args), stdin=stdin, stdout=stdout, stderr=stderr,
+                            env=envof(ctx), start_new_session=GROUP)
+
+def kill(p):
+    try:
+        if GROUP:
+            os.killpg(p.pid, signal.SIGKILL)
+        else:
+            p.kill()
+    except (ProcessLookupError, PermissionError):
+        pass   # the group is already gone
+
+def git(ctx, base, args, data=None, may_fail=False):
+    """stdout of one git call; None when it fails and may_fail is set."""
+    remaining = left()
+    p = spawn(ctx, base, args, subprocess.DEVNULL if data is None else subprocess.PIPE,
+              subprocess.PIPE, subprocess.PIPE)
+    try:
+        out, err = p.communicate(data, timeout=remaining)
+    except subprocess.TimeoutExpired:
+        kill(p)
+        p.communicate()
+        raise Stop("git %s did not finish inside the %g s budget" % (args[0], budget))
+    if p.returncode:
+        if may_fail:
+            return None
+        raise Stop("git %s failed (exit %d): %s" % (args[0], p.returncode, show(text(err.strip()[-300:]), 300)))
+    return out
+
+def git_lines(ctx, base, args, codes=(0,)):
+    """Stream git's output a line at a time; a timer kills it at the deadline."""
+    remaining = left()
+    err = tempfile.TemporaryFile()
+    p = spawn(ctx, base, args, subprocess.DEVNULL, subprocess.PIPE, err)
+    fired = []
+    def stop():
+        fired.append(1)
+        kill(p)
+    timer = threading.Timer(remaining, stop)
+    timer.daemon = True
+    timer.start()
+    try:
+        for line in p.stdout:
+            yield line
+        p.wait()
+    finally:
+        timer.cancel()
+        if p.poll() is None:
+            kill(p)
+            p.wait()
+        p.stdout.close()
+    if fired:
+        raise Stop("git %s did not finish inside the %g s budget" % (args[0], budget))
+    if p.returncode not in codes:
+        err.seek(0)
+        raise Stop("git %s failed (exit %d): %s" % (args[0], p.returncode, show(text(err.read().strip()[-300:]), 300)))
+
+def run_length(line):
+    """Length of a line-start marker run that could be a conflict marker, else 0."""
+    if not line or line[0] not in b"<=>|":
+        return 0
+    c, r = line[0], 1
+    while r < len(line) and line[r] == c:
+        r += 1
+    if r < 7:
+        return 0
+    rest = line[r:]
+    if c == 61:   # "=": git writes the separator alone on its line
+        return r if not rest.strip(WS) else 0
+    return r if not rest or rest[0] in WS else 0
+
+def note(ctx, hits, path, n, line, source):
+    r = run_length(line)
+    if not r:
+        return
+    sizes = ctx.setdefault("sizes", {})
+    if path not in sizes:
+        sizes.update(marker_sizes(ctx, ctx["top"], [path]))
+    # Filter before the storage limit: thousands of harmless eight-character
+    # runs must neither cause a warning nor hide a real marker after them.
+    if r == sizes.get(path, 7) and (path, n) not in hits:
+        if len(hits) >= KEEP:
+            hits[None] = hits.get(None, 0) + 1
+            return
+        hits[(path, n)] = (r, text(line.rstrip(b"\r\n")), source)
+
+ESC = {ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10, ord("v"): 11, ord("f"): 12,
+       ord("r"): 13, ord('"'): 34, ord("\\"): 92}
+
+def unquote(b):
+    """git's C-style quoting of an unusual path, as in a diff's +++ line."""
+    if len(b) < 2 or b[:1] != b'"' or b[-1:] != b'"':
+        return b
+    out, i, end = bytearray(), 1, len(b) - 1
+    while i < end:
+        c = b[i]
+        if c == 92 and i + 1 < end:
+            o = b[i + 1:i + 4]
+            if len(o) == 3 and i + 3 < end and all(48 <= x <= 55 for x in o):
+                out.append(int(o, 8) & 255)
+                i += 4
+                continue
+            if b[i + 1] in ESC:
+                out.append(ESC[b[i + 1]])
+                i += 2
+                continue
+        out.append(c)
+        i += 1
+    return bytes(out)
+
+def diff_hits(ctx, base, args, source, hits, skip=(), select=None, codes=(0,)):
+    path, n, hunk = None, 0, False
+    for raw in git_lines(ctx, base, args, codes):
+        if hunk:
+            ch = raw[:1]
+            if ch == b"+":
+                if path is not None and path not in skip and (select is None or path in select):
+                    note(ctx, hits, path, n, raw[1:], source)
+                n += 1
+                continue
+            if ch == b" ":
+                n += 1
+                continue
+            if ch in (b"-", b"\\"):
+                continue
+            hunk = False
+        if raw.startswith(b"diff "):
+            path = None
+        elif raw.startswith(b"+++ "):
+            name = raw[4:].rstrip(b"\n")
+            if name.endswith(b"\t"):   # git adds a tab after a name with a space
+                name = name[:-1]
+            name = unquote(name)
+            path = text(name[2:]) if name.startswith(b"b/") else None
+        else:
+            m = HUNK.match(raw)
+            if m:
+                n, hunk = int(m.group(1)), True
+
+def ls_files(ctx, base, specs, others=False, force=False):
+    args = ["ls-files", "-z", "--full-name"]
+    if others:
+        args += ["--others"] + ([] if force else ["--exclude-standard"])
+    out = git(ctx, base, args + ["--"] + specs)
+    return {text(p) for p in out.split(b"\0") if p}
+
+def scan_file(ctx, top, rel, hits, filtered=False):
+    full = posixpath.join(top, rel)   # top is git's own spelling, which Python opens
+    try:
+        st = os.lstat(full)
+        regular = stat.S_ISREG(st.st_mode)
+        if not regular and not stat.S_ISLNK(st.st_mode):
+            return
+        needs_diff = filtered or not regular or st.st_size > BIG
+        if not needs_diff:
+            with open(full, "rb") as f:
+                needs_diff = b"\0" in f.read(8000)
+                if not needs_diff:
+                    f.seek(0)
+                    for n, line in enumerate(f, 1):
+                        if n % 4096 == 0:
+                            left()
+                        if run_length(line):
+                            needs_diff = True
+                            break
+    except OSError:
+        return   # gone or unreadable: git add cannot stage it either
+    if needs_diff:
+        # Git decides binary/text attributes, driver settings and clean-filter
+        # output exactly as it does for tracked paths. Plain clean text needs no
+        # extra process; a filter can create markers even without any on disk.
+        diff_hits(ctx, top, ["diff", "--no-index"] + DIFF + ["--", "/dev/null", rel],
+                  "untracked, staged by this call", hits, codes=(0, 1))
+
+def attributes(ctx, top, paths, name):
+    out = git(ctx, top, ["check-attr", "-z", "--stdin", name],
+              data=b"".join(p.encode("utf-8", "surrogateescape") + b"\0" for p in paths))
+    f = out.split(b"\0")
+    return {text(f[i]): text(f[i + 2]) for i in range(0, len(f) - 2, 3)}
+
+def marker_sizes(ctx, top, paths):
+    """conflict-marker-size per path; git reads the value with atoi, and <= 0 means 7."""
+    sizes = {}
+    for path, value in attributes(ctx, top, paths, "conflict-marker-size").items():
+        m = re.match(r"\s*\+?([0-9]+)", value)
+        v = int(m.group(1)) if m else 0
+        sizes[path] = v if v > 0 else 7
+    return sizes
+
+REDIRECT = set("<>&|")
+
+def clean(args):
+    """Drop redirections left as words (2>&1 can arrive as 2, >&, 1)."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a and set(a) <= REDIRECT and ("<" in a or ">" in a):
+            if out and out[-1].isdigit():
+                out.pop()
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+def expand(paths):
+    out = []
+    for p in paths:
+        p = os.path.expandvars(posixpath.expanduser(p))
+        if "$" in p:
+            return None
+        out.append(p)
+    return out
+
+def parse(args, short_value, long_value, short_attached=""):
+    """git's option grammar: flags, values (attached or next word), pathspecs.
+    short_attached: short options whose optional value can only be attached."""
+    flags, paths, i, rest = set(), [], 0, False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if rest or a == "-" or not a.startswith("-"):
+            paths.append(a)
+        elif a == "--":
+            rest = True
+        elif a.startswith("--"):
+            name, eq, _ = a[2:].partition("=")
+            flags.add(name)
+            if name in long_value and not eq:
+                i += 1
+        else:
+            for j, c in enumerate(a[1:], 1):
+                if c in short_value:
+                    if j == len(a) - 1:
+                        i += 1
+                    break
+                if c in short_attached:
+                    break
+                flags.add(c)
+    return flags, paths
+
+def add_cover(args, base):
+    """(base, pathspecs or None for the whole tree, tracked only, force) for one git add."""
+    flags, paths = parse(args, "", {"chmod", "pathspec-from-file"})
+    if flags & {"n", "dry-run", "N", "intent-to-add", "refresh", "i", "interactive", "p", "patch", "e", "edit",
+                "pathspec-from-file"}:
+        return None   # stages nothing, or a subset this check cannot know
+    whole = flags & {"A", "all", "no-ignore-removal"}
+    tracked = bool(flags & {"u", "update", "renormalize"})
+    force = bool(flags & {"f", "force"})
+    if not paths:
+        return (base, None, tracked, force) if whole or tracked else None
+    paths = expand(paths)
+    return None if paths is None else (base, paths, tracked, force)
+
+def commit_spec(args, base, top):
+    # -u<mode> and -S<keyid> take only an attached value.
+    flags, paths = parse(args, "mFCct", {"message", "file", "reuse-message", "reedit-message", "fixup", "squash",
+                                         "author", "date", "template", "cleanup", "trailer", "pathspec-from-file"}, "uS")
+    if flags & {"dry-run", "short", "porcelain", "long"}:
+        return None   # records nothing (--short, --porcelain and --long imply --dry-run)
+    spec = {"amend": "amend" in flags, "staged": True, "covers": [], "select": None, "head_only": False}
+    if flags & {"p", "patch", "interactive", "pathspec-from-file"}:
+        return spec   # an interactive or listed subset: the staged diff only
+    if flags & {"a", "all"}:
+        if paths:
+            return None   # git refuses -a with paths
+        spec["covers"].append((top, None, True, False))
+    elif paths:
+        paths = expand(paths)
+        if paths is not None:
+            spec["covers"].append((base, paths, True, False))
+            spec["staged"] = bool(flags & {"i", "include"})
+            if not spec["staged"]:
+                spec["select"] = (base, paths)
+    elif flags & {"o", "only"}:
+        if not spec["amend"]:
+            return None   # no paths: fails, or records an empty commit with --allow-empty
+        spec["head_only"] = True   # --only --amend retains HEAD and ignores the index
+        spec["staged"] = False
+    return spec
+
+def records(data):
+    f = data.split(b"\0")
+    if len(f) < 2 or f[-1] != b"" or f[-2] != b"END":
+        raise Stop("the record stream is incomplete")
+    f, i, out = f[:-2], 0, []
+    while i < len(f):
+        n = int(f[i + 2])
+        words = [text(w) for w in f[i + 3:i + 3 + n]]
+        if n < 4 or len(words) != n:
+            raise Stop("a malformed record")
+        out.append((text(f[i]), text(f[i + 1]), words))
+        i += 3 + n
+    return out
+
+repos = {}
+def repo(base, gd, wt, idx):
+    key = (base, gd, wt, idx)
+    if key not in repos:
+        ctx = {"gd": gd, "wt": wt, "idx": idx}
+        out = git(ctx, base, ["rev-parse", "--absolute-git-dir", "--show-toplevel"], may_fail=True)
+        lines = text(out).splitlines() if out is not None else []
+        if out is not None and len(lines) != 2:
+            raise Stop("git rev-parse gave %d lines, not 2" % len(lines))
+        # Not a work tree: git commit fails on its own, so there is nothing to inspect.
+        repos[key] = dict(ctx, top=lines[1], key=(lines[0], lines[1], idx)) if lines else None
+    return repos[key]
+
+def rev(ctx, name):
+    out = git(ctx, ctx["top"], ["rev-parse", "-q", "--verify", name + "^{commit}"], may_fail=True)
+    return text(out).strip() if out else None
+
+def inspect(st):
+    ctx, top, hits = st["ctx"], st["ctx"]["top"], {}
+    tree = None   # None: git diff --cached picks HEAD, or the empty tree when unborn
+    if st["amend"] or st["covers"]:
+        head = rev(ctx, "HEAD")
+        if st["amend"] and head is None:
+            return []   # nothing to amend: git commit fails on its own
+        tree = rev(ctx, "HEAD^1") if st["amend"] else head
+        if tree is None:
+            tree = text(git(ctx, top, ["hash-object", "-t", "tree", "--stdin"], data=b"")).strip()
+    if st["head_only"]:
+        diff_hits(ctx, top, ["diff"] + DIFF + [tree, "HEAD", "--"], "amended commit", hits)
+    select = None
+    if st["select"]:
+        base, paths = st["select"]
+        select = ls_files(ctx, base, paths) | ls_files(ctx, base, paths, others=True, force=True)
+    whole = any(cv[1] is None for cv in st["covers"])
+    specs = [(top, [":/"])] if whole else [(cv[0], cv[1]) for cv in st["covers"]]
+    covered = set()
+    for base, paths in specs:
+        diff_hits(ctx, base, ["diff"] + DIFF + [tree, "--"] + paths,
+                  "working tree, staged by this call", hits, select=select)
+        if st["staged"] and not whole:
+            covered |= ls_files(ctx, base, paths)
+    for base, paths, tracked, force in st["covers"]:
+        if not tracked:
+            rels = sorted(p for p in ls_files(ctx, base, paths or [":/"], others=True, force=force)
+                          if not p.endswith("/") and (select is None or p in select))
+            filters = attributes(ctx, top, rels, "filter") if rels else {}
+            for rel in rels:
+                scan_file(ctx, top, rel, hits, filters.get(rel, "unspecified") not in {"unspecified", "set", "unset"})
+    # A tracked path this call stages again is recorded from the working tree, so
+    # its staged version (already read above) is left out; a whole-tree cover
+    # stages every tracked path.
+    if st["staged"] and not whole:
+        diff_hits(ctx, top, ["diff", "--cached"] + DIFF + ([tree] if tree else []) + ["--"], "staged", hits, covered)
+    extra = hits.pop(None, 0)
+    if not hits:
+        return [("", "", 0, "", "")] * extra
+    found = [(top, p, n, line, src) for (p, n), (_, line, src) in hits.items()]
+    return found + [("", "", 0, "", "")] * extra
+
+def main(data):
+    states, pending, previous = [], {}, set()
+    for base, gd, words in records(data):
+        flags, kind, wt, idx, args = words[0], words[1], words[2], words[3], clean(words[4:])
+        if "u" in flags:
+            continue   # a guessed directory could name another repository
+        if idx and not posixpath.isabs(idx):
+            idx = posixpath.join(base, idx)
+        if kind == "add":
+            cover = None if "x" in flags else add_cover(args, base)
+            ctx = cover and repo(base, gd, wt, idx)
+            if ctx:
+                pending.setdefault(ctx["key"], []).append(cover)
+            continue
+        ctx = repo(base, gd, wt, idx)
+        if ctx is None:
+            continue
+        spec = commit_spec(args, base, ctx["top"]) if kind == "commit" else {
+            "amend": False, "staged": True, "covers": [], "select": None, "head_only": False}
+        if spec is None:
+            continue
+        prior = ctx["key"] in previous
+        covers = pending.setdefault(ctx["key"], [])
+        covers += spec["covers"]
+        # Snapshot each commit separately. Later staging cannot repair what an
+        # earlier commit would record; earlier staging still updates later ones.
+        st = dict(spec, ctx=ctx, covers=[] if spec["head_only"] else list(covers), prior="p" in flags or prior)
+        states.append(st)
+        previous.add(ctx["key"])
+    found, seen, prior = [], set(), False
+    for st in states:
+        got = inspect(st)
+        prior = prior or (bool(got) and st["prior"])
+        for h in got:
+            # The same line reached by two snapshots (or by the parse fallback
+            # beside a parsed record) is one finding.
+            if h[0] and (h[0], h[1], h[2]) in seen:
+                continue
+            seen.add((h[0], h[1], h[2]))
+            found.append(h)
+    if not found:
+        return 0
+    print("PRIOR" if prior else "-")
+    shown = [h for h in found if h[0]][:SHOWN]
+    for top, p, n, line, src in shown:
+        print("  %s:%d: %s  [%s]" % (show(posixpath.join(top, p), 200), n, show(line), src))
+    if len(found) > len(shown):
+        print("  ... and %d more" % (len(found) - len(shown)))
+    return 3
+
+try:
+    sys.exit(main(d))
+except Stop as e:
+    print(e)
+    sys.exit(4)
+except Exception as e:   # a defect here must warn, never pass silently
+    print("internal error: %s: %s" % (type(e).__name__, e))
+    sys.exit(4)
+MKPY
+}
+
+# mk_emit <text> <one-line summary>: the warning, then exit 0 (the commit runs;
+# see the header for why this check never blocks). PreToolUse JSON on stdout
+# carries the text to Claude (additionalContext) and the summary to the
+# Operator (systemMessage); the text also goes to stderr for the transcript.
+# jq builds the JSON, else the Python the check ran with ($py, set by
+# conflict_marker_gate); with neither, stderr alone carries it.
+mk_emit() {
+  local json=""
+  json="$(jq -cn --arg c "$1" --arg s "$2" \
+    '{systemMessage: $s, hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $c}}' 2>/dev/null)" \
+    || json="$(printf '%s' "$1" | "${py:-python3}" -c 'import json, sys; print(json.dumps({"systemMessage": sys.argv[1], "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": sys.stdin.read()}}))' "$2" 2>/dev/null)" \
+    || json=""
+  [ -z "$json" ] || printf '%s\n' "$json"
+  printf '%s\n' "$1" >&2
+  exit 0
+}
+
+mk_warn() {  # <first line> <hit lines>
+  local msg
+  msg="git-guard: WARNING (conflict markers): this commit records unresolved merge conflict markers. The commit was not stopped: a commit is the owner's content, so this check warns and never blocks.
+$2
+Each line above starts the way git writes a conflict marker (seven <, |, = or > characters; a ======= line stands alone)."
+  if [ "$1" = PRIOR ]; then
+    msg="$msg
+This Bash call runs another command before the commit, and the guard read the index and working tree before the call started. If that step resolved these files, the commit may be clean: check it with git show --check HEAD. Next time, run such a step in its own Bash call, then stage and commit in the next, so the guard reads the result."
+  fi
+  msg="$msg
+If the markers are not intended: in each file keep the content you want and delete the marker lines, then commit the fix (or amend the commit if it is not pushed yet), and confirm git show --check HEAD reports no leftover conflict marker before you push.
+Intended marker lines (a test fixture, a document quoting a conflict): generate them at run time, or give the path a conflict-marker-size attribute in .gitattributes, and this check stays quiet for them."
+  mk_emit "$msg" "git-guard: this commit records merge conflict markers (a warning; the commit ran)."
+}
+
+mk_warn_uninspectable() {  # <reason>
+  mk_emit "git-guard: WARNING (conflict markers): cannot inspect what this commit records: $1. The commit was not stopped: this check warns and never blocks. Check it by hand once it has run: git show --check HEAD in the repository reports any leftover conflict marker." \
+    "git-guard: could not check this commit for conflict markers (a warning; the commit ran)."
+}
+
+# mk_names_commit: the raw command names a commit or a --continue as a word
+# (the parse fallback's trigger; see the header above).
+mk_names_commit() {
+  printf '%s' "$CMD_RAW" | grep -qE '(^|[^[:alnum:]_.-])(commit|--continue)([^[:alnum:]_-]|$)'
+}
+
+conflict_marker_gate() {
+  local i py to rc out boot first commit=0
+  local -a lim=()
+  # A command the parser could not read: check the working directory's staged
+  # content as a plain commit when the text names one.
+  if [ "$MK_UNREAD" = 1 ] && mk_names_commit; then
+    mk_store "$PUSH_CWD" "" - commit "" ""
+  fi
+  [ "${#MK_DIR[@]}" -gt 0 ] || return 0
+  for ((i = 0; i < ${#MK_DIR[@]}; i++)); do
+    [ "${MK_W[$((MK_OFF[i] + 1))]}" = add ] || commit=1
+  done
+  [ "$commit" = 1 ] || return 0
+  py="$(hook_python)" || return 0   # no Python 3: not inspected (see the header)
+  if to="$(hook_timeout)"; then lim=("$to" -k 1 8); fi
+  # Program and records reach Python on stdin, split at the first NUL: no
+  # argument-length limit and no quoting for a Windows launch.
+  boot="import sys; p, d = sys.stdin.buffer.read().split(b'\\0', 1); exec(compile(p, 'git-guard-markers', 'exec'))"
+  out="$( { mk_program && printf '\0' && mk_records; } | ${lim[@]+"${lim[@]}"} "$py" -c "$boot" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) first="${out%%$'\n'*}"; mk_warn "$first" "${out#*$'\n'}" ;;
+    124|137) mk_warn_uninspectable "the check passed its hard 8 s limit" ;;
+    4) mk_warn_uninspectable "$(printf '%s' "$out" | tail -n 1 | cut -c1-300)" ;;
+    *) mk_warn_uninspectable "the check exited $rc: $(printf '%s' "$out" | tail -n 2 | tr '\n' ' ' | cut -c1-300)" ;;
+  esac
+}
+
 PUSH_CWD="$(printf '%s' "$RAW_INPUT" | hook_field cwd)"; [ -n "$PUSH_CWD" ] || PUSH_CWD="$PWD"
 PUSH_CWD="$(hook_pathnorm "$PUSH_CWD")"
-# The word "git" must appear for any git command to run; skip the parse otherwise.
-case "$CMD_RAW" in *git*)
+# gg_parse_needed: 0 when the command could run git, so the parser must read it.
+# The word git must appear for a git command to run, but quotes, backslashes and
+# line continuations can split it (g"i"t, g\it), and $'...' can spell it in
+# escapes, so the test strips the first three and always parses the last. A
+# command with none of them that does not hold "git" skips the parse (and its
+# Python start); the string rules above still ran on it.
+gg_parse_needed() {
+  local x
+  case "$CMD_RAW" in
+    *git*|*"\$'"*) return 0 ;;
+    *[\"\'\\]*) ;;
+    *) return 1 ;;
+  esac
+  x="$(printf '%s' "$CMD_RAW" | tr -d "\"'\\\\\n")" || return 0
+  case "$x" in *git*) return 0 ;; esac
+  return 1
+}
+
+# One parse feeds both gates: the push gate here and the conflict-marker check
+# after it. A stream it cannot read (ERROR, or a record cut short) sends the push
+# gate to its fail-safe check and the marker check to its parse fallback.
+if gg_parse_needed; then
   PUSH_COARSE=0
   CHANGED_GATES=$'\n'
-  while IFS= read -r -d '' base; do
-    if [ "$base" = ERROR ]; then PUSH_COARSE=1; break; fi
-    { IFS= read -r -d '' gd && IFS= read -r -d '' unresolved && IFS= read -r -d '' override \
-      && IFS= read -r -d '' count; } || { PUSH_COARSE=1; break; }
+  while IFS= read -r -d '' kind; do
+    case "$kind" in
+      git) ;;
+      mk)
+        { IFS= read -r -d '' base && IFS= read -r -d '' gd && IFS= read -r -d '' count; } \
+          || { PUSH_COARSE=1; MK_UNREAD=1; break; }
+        words=()
+        for ((i = 0; i < count; i++)); do IFS= read -r -d '' word || { PUSH_COARSE=1; MK_UNREAD=1; break 2; }; words+=("$word"); done
+        mk_store "$base" "$gd" "${words[@]}"
+        continue ;;
+      *) PUSH_COARSE=1; MK_UNREAD=1; break ;;
+    esac
+    { IFS= read -r -d '' base && IFS= read -r -d '' gd && IFS= read -r -d '' unresolved \
+      && IFS= read -r -d '' override && IFS= read -r -d '' count; } || { PUSH_COARSE=1; MK_UNREAD=1; break; }
     words=()
-    for ((i = 0; i < count; i++)); do IFS= read -r -d '' word || { PUSH_COARSE=1; break 2; }; words+=("$word"); done
+    for ((i = 0; i < count; i++)); do IFS= read -r -d '' word || { PUSH_COARSE=1; MK_UNREAD=1; break 2; }; words+=("$word"); done
     sub="${words[1]:-}"
     if [ "$unresolved" = 1 ]; then
       PUSH_COARSE=1
@@ -917,8 +1699,11 @@ case "$CMD_RAW" in *git*)
       deny "this command changes where pushes from the OPS copy at $root go (a remote, url, push or upstream setting, or ops.pushVerified) and then pushes; the gate runs before the command, so its verdict would be stale. Run the change on its own, then push in a separate command." ;;
     esac
     ops_push_check "$root" "$gate" resolved "${words[@]:2}"
-  done < <(push_records "$PUSH_CWD")
+  done < <(git_records "$PUSH_CWD")
   [ "$PUSH_COARSE" = 1 ] && coarse_check
-;; esac
+  # Last: it is the only gate here that reads the index and working tree, so
+  # the string rules and the push gate refuse their cases first (this one only warns).
+  conflict_marker_gate
+fi
 
 exit 0

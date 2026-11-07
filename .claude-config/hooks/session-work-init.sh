@@ -16,7 +16,9 @@
 #
 # Registered LAST in the SessionStart chain
 # so the tmux session name is already settled and KEY is stable across the
-# session's whole life.
+# session's whole life. KEY (work_session_key) derives from the tmux session
+# name, the T3 session id (t3-<id>, one stamp per thread), or the cwd, none of
+# which an earlier SessionStart hook changes.
 #
 # Best-effort, never a gate: exit 0 always. A crash here must never block boot.
 set -uo pipefail

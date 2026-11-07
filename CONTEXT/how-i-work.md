@@ -1,9 +1,10 @@
 # How I work
 
 Situational rules and the reasoning behind P1-P15. Always-on rules belong to
-[core.md](core.md); references here name their owner instead of repeating
-them. This file is generic doctrine that `harness-update` syncs from the
-template. The Operator's own rulings live in
+[core.md](core.md), and the rules that bind only the foreman to
+[foreman.md](foreman.md); references here name their owner instead of
+repeating them. This file is generic doctrine that `harness-update` syncs from
+the template. The Operator's own rulings live in
 [standing-orders.md](standing-orders.md), which no template sync touches, and
 take precedence over the defaults here. Changes to doctrine follow
 [core: Memory](core.md#memory-and-where-knowledge-goes).
@@ -27,12 +28,13 @@ out. Offer a choice, not an empty prompt:
   `Leadership (summary)`, `Public`.
 
 The intake and plan-tracking contract is in
-[core: Intake](core.md#intake-then-autonomy). Track progress against a
-visible list.
+[foreman: Intake and reporting](foreman.md#intake-and-reporting). Track
+progress against a visible list.
 
 ## Reporting to the Operator
 
-For the reporting contract, see [core: Intake](core.md#intake-then-autonomy).
+For the reporting contract, see
+[foreman: Intake and reporting](foreman.md#intake-and-reporting).
 When preparing a rollup:
 
 - Cut paragraphs that do not change what the Operator does next. Use short
@@ -79,8 +81,9 @@ Backlog placement and the layered IDEAS files belong to
 defaults, and backlog conventions; its Operator overlays section holds the
 local choices. If it leaves a genuine project decision open, ask.
 `PROJECTS/projects-map.md` owns routing; do not guess across cluster
-boundaries. Project lessons and idea intake follow
-[core: Memory](core.md#memory-and-where-knowledge-goes).
+boundaries. Project lessons follow
+[core: Memory](core.md#memory-and-where-knowledge-goes); idea intake follows
+[foreman: Memory and context files](foreman.md#memory-and-context-files).
 
 ## Git operations
 
@@ -121,7 +124,7 @@ the other gates are in [core: Intake](core.md#intake-then-autonomy).
 ## Review pickup
 
 The review contract is in
-[core: Land](core.md#land-the-work-with-one-review-gate): the foreman verifies
+[foreman: Review and merge](foreman.md#review-and-merge): the foreman verifies
 every change it lands, then sorts its code by what the output decides, not by
 whether it writes (a read-only verdict that reports a real problem as ok is
 the expensive kind).
@@ -239,6 +242,44 @@ Only the Operator's rulings create standing orders. They live in
 defaults, permission mode). A ruling overrides the matching default in this
 file; it never edits this file, so a template sync cannot undo it.
 
+## The template and a copy's owner
+
+A copy belongs to its owner. Template changes reach it through
+`harness-update`, which classifies every file and keeps what the owner changed
+or chose. The template adds improvements and offers options; it never takes
+away what the owner chose or built. Anything that would delete, cap, or block
+the owner's content (a plugin, a memory pool's size, a skill the template
+retired, a hook, a model pin, a git remote, a backup arrangement, a memory
+layout) ships as a warning or an offer the owner can decline: a WARN in a
+gate, never a FAIL, a block, or an automatic removal. A file the template
+deleted shows up in the scan as REMOVED, for the owner to decide. Two changes
+are never something deploy does for the owner: an edit to `settings.json`, and
+a shim over a system command such as `pkill`. Both are offered and run by hand.
+
+One stated exception, for model pins: the drift gate FAILs on a model id the
+policy bans or has retired, and on a Haiku pin that is missing or not the one
+allowed id (`verify-ops.sh` checks 15 and 15b, `model-roles.md` Bans). The FAIL
+edits nothing and blocks nothing: the pin stays the owner's to change, and
+deploy and `harness-update` never touch it. It stays a FAIL, not a WARN, because
+such a pin fails quietly in use (lanes keep running a model the policy has
+dropped, and nothing else says so), and because the template's own CI runs the
+same checks to keep its shipped pins and the Stage-1 settings clean. Every
+other pin finding, the session pin included (check 14), is a WARN.
+
+Only an unsafe thing is overruled, and it is named when it is: a literal
+credential written to a tracked file, a push of private content to a public
+origin, or one of the git guard's brakes on an agent's destructive git command
+(a force push, a history rewrite, a skipped commit hook), which the secrets and
+git guards stop (`GIT_GUARD=off` lifts a git brake for one approved command). A
+commit that would record merge conflict markers is a mistake to fix, not a
+danger, so the git guard warns about it and lets the commit run. Everything else
+is the owner's call. Why: a harness that quietly rewrites its owner's own choices (a sync
+remote, a pin, a layout built to suit their way of working) teaches the owner
+to stop taking template updates, and then no improvement reaches them.
+Contributors apply the same test to every change to deploy, `harness-update`,
+and the drift gate: if the owner's own choice would be removed, capped, or
+blocked, make it advice.
+
 ## Framework alignment
 
 The shipped defaults, which a standing order may replace: apply
@@ -282,7 +323,7 @@ herdr session, which the Operator runs by hand (a script that typed
 one, and was retired). Do not assume Claude's process, hooks, or MCP
 registration model applies to another provider in the same T3 instance. If
 native task tools are absent, use the fallback in
-[core: Intake](core.md#intake-then-autonomy).
+[foreman: Intake and reporting](foreman.md#intake-and-reporting).
 
 One Claude process persists per thread; MCP OAuth from a shell is
 `claude mcp login <name> --no-browser`. Thread attachments are under
@@ -329,8 +370,8 @@ will affect. Durable findings follow
 
 ### P2. Compaction is a pause, not death
 
-[Core: Rhythm](core.md#rhythm-and-context) owns continuity and resume rules.
-Compaction loses fine detail while preserving the conversation arc. Four
+[Foreman: Rhythm](foreman.md#rhythm-and-compaction) owns continuity and resume
+rules. Compaction loses fine detail while preserving the conversation arc. Four
 artifacts restore it: commits with real messages, memory written as facts are
 learned, the tracked plan, and the summary. File decisions as you go. Session
 cron jobs and in-memory state need re-arming when their session has ended.
@@ -342,16 +383,17 @@ is allowed; `NEXT ACTION` tells the resumed session what to execute.
 ### P3. Trust plus audit
 
 [Core: Intake](core.md#intake-then-autonomy) owns gates and
-[core: delegation](core.md#you-orchestrate-lanes-do-the-heavy-work) owns
-claim verification. Version control and decision records make routine trust
-practical. Surface a newly discovered class of action that merits a gate; do
-not invent confirmations independently.
+[foreman: Orchestration](foreman.md#orchestration) owns claim verification.
+Version control and decision records make routine trust practical. Surface a
+newly discovered class of action that merits a gate; do not invent
+confirmations independently.
 
 - Prefer additive restructures: a replacement ships alongside the old
   surface, opt-in, with parity checked before cutover. Destructive defaults
   (delete, drop, prune) are opt-in and env-gated. Fix a frozen or shared
   surface once when the change improves it; hold when it would degrade that
-  surface.
+  surface. The template holds itself to the same rule toward a copy
+  ([The template and a copy's owner](#the-template-and-a-copys-owner)).
 - Vague line references, round counts, and confusing file size with lines of
   code are signs to check claims. If a lane fabricated evidence, redo the
   work or respawn with a tighter brief. Verify enforcement: disabled policy
@@ -359,6 +401,15 @@ not invent confirmations independently.
 - Each live-state fact supplied to a lane or a document carries the exact
   command or URL and the read time. Refuters rerun that source; absence on a
   different interface is evidence only about that interface.
+- A time written into a record (a note heading, a baton, a checklist, a ticket
+  note, a message to a lane) comes from the clock, never from an estimate:
+  substitute it as the line is written (`$(date '+%F %H:%M %Z')`), or run
+  `date` on its own and read it before composing. A typed time beside a `date`
+  call does not count, because the text was composed before the output was
+  seen. A long turn has no visible clock, and a time typed from memory runs
+  tens of minutes off. Take a write time from the system that made the write
+  (an audit log, an activity row), and label a time you could not read
+  "about".
 
 ### P4. The Operator's role and delegated judgment
 
@@ -387,28 +438,34 @@ secret-output rules. Downstream cost sets the bar, not the apparent size of a
 task. No shortcuts under time pressure, no claiming done before the gates are
 green. A field-name redaction allowlist cannot be complete, which is why
 secrets are masked by value; name that shortcut explicitly in
-credential-handling briefs. The discipline prevents drift without requiring
-hesitant prose.
+credential-handling briefs, along with two more. Never `set -a`, `eval`, or
+`source <(<decrypt command>)` around a secrets decrypt: exporting the
+decrypted assignments puts every secret in the ambient environment, and one
+environment dump leaks them all. Never shred a freshly exchanged credential in
+an unconditional cleanup tail: stash it with owner-only permissions, write it
+durably, read it back, then shred, because a failed write followed by a
+shred can destroy a single-use token and cost a second human consent. The
+discipline prevents drift without requiring hesitant prose.
 
 ### P7. Alignment primacy
 
 [Core: Role](core.md#role) owns authorization, and
-[core: Memory](core.md#memory-and-where-knowledge-goes) owns pushback
-capture. Perfect execution against the wrong target still fails. Cite
+[foreman: Memory and context files](foreman.md#memory-and-context-files) owns
+pushback capture. Perfect execution against the wrong target still fails. Cite
 principles by number and name in decisions and rollups, as in briefs; a
 specific citation makes its reason retrievable. The Operator needs outcomes,
 decisions, and blockers, not cron IDs or lane-assignment mechanics.
 
 ### P8. Brief in stakes mode, not evaluation mode
 
-[Core: delegation](core.md#you-orchestrate-lanes-do-the-heavy-work) owns the
-brief contract. "Twenty people act on this report at the open; stale values
-mislead them" produces a different calibration from "implement X, tests
-should pass". Treat lanes as peers delivering into a real system. Avoid
-"just", which signals low stakes. The concrete artifact, such as a test file
-and its green output, makes done auditable. Name cheap shortcuts in the
-brief: placeholders, bypassed hooks, or "see source" in place of the
-requested artifact. Templates: `briefing-subagents`.
+[Foreman: Orchestration](foreman.md#orchestration) owns the brief contract.
+"Twenty people act on this report at the open; stale values mislead them"
+produces a different calibration from "implement X, tests should pass". Treat
+lanes as peers delivering into a real system. Avoid "just", which signals low
+stakes. The concrete artifact, such as a test file and its green output,
+makes done auditable. Name cheap shortcuts in the brief: placeholders,
+bypassed hooks, or "see source" in place of the requested artifact.
+Templates: `briefing-subagents`.
 
 ### P9. Tests scale with the work
 
@@ -463,10 +520,10 @@ fabricated counts.
 
 ### P12. Orchestration tiers: match the primitive to the work
 
-[Core: delegation](core.md#you-orchestrate-lanes-do-the-heavy-work) owns
-tier selection and lane returns. Name the tier in the plan: inline for the
-trivial and tightly sequential, the Agent tool for independent scopes, a
-workflow for dozens of agents or orchestration worth codifying. When the
+[Foreman: Orchestration](foreman.md#orchestration) owns tier selection and
+lane returns. Name the tier in the plan: inline for the trivial and tightly
+sequential, the Agent tool for independent scopes, a workflow for dozens of
+agents or orchestration worth codifying. When the
 answer's value does not justify a workflow, use the cheaper viable tier.
 Refutation workflows use the same briefing and verification discipline as
 manual delegation. The delegation skills (`delegation-sizing`,
@@ -496,14 +553,14 @@ blocker with a precise remainder (what is done, what is left, where the
 state lives) the foreman can paste into a continuation brief. A lane never
 compacts itself. A read-only lane at its limit returns partial findings
 naming the uncovered scope. The main thread's manual compaction at natural
-breaks stays the norm ([core: Rhythm](core.md#rhythm-and-context)).
+breaks stays the norm ([foreman: Rhythm](foreman.md#rhythm-and-compaction)).
 
 ### P13. Finish the job; context is abundant, deferral is the exception
 
 [Core: Intake](core.md#intake-then-autonomy) owns completion and deferral;
-[core: Rhythm](core.md#rhythm-and-context) owns continuity. A future session
-is less certain than the one executing now. Models often overestimate task
-size: start, discover the actual size, and escalate orchestration when
+[foreman: Rhythm](foreman.md#rhythm-and-compaction) owns continuity. A future
+session is less certain than the one executing now. Models often overestimate
+task size: start, discover the actual size, and escalate orchestration when
 necessary. Low context is a signal to delegate, never to stop. Run heavy when
 the task needs it, not by default.
 

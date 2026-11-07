@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# lane-class: what kind of session is this? Prints exactly one word and exits 0,
+# always, in well under 300 ms:
+#
+#   agent-lane  an in-process subagent (Agent tool, workflow lane): the hook JSON
+#               carries a non-empty agent_id.
+#   t3-lane     a T3 Code delegated task or subagent thread: a whole top-level
+#               Claude session that T3 started for a lane, not for the Operator.
+#   foreman     everything else, and every case it cannot resolve.
+#
+# Why it exists. A T3-delegated lane is its own top-level Claude process, so its
+# hooks carry no agent_id and every boot hook took it for the main thread: it got
+# the full briefing, the memory surface and the compaction nag, none of which a
+# lane can act on. One shared test lets every hook ask the same question and get
+# the same answer. A caller that cannot run this script, or gets anything but one
+# of the three words, treats the session as a foreman, which is the behavior
+# before the script existed.
+#
+# Usage (hook JSON on stdin; fields read: agent_id, session_id, transcript_path):
+#   "$OPS_DIR/.claude-config/bin/lane-class" <<<"$HOOK_JSON" 2>/dev/null || echo foreman
+#   lane-class --self     classify the calling session itself, from its own
+#                         environment (no payload): for a person or a Bash call
+#                         inside a session.
+#
+# Evidence, in order; the first that decides wins:
+#   0. OPS_LANE_CLASS=foreman|t3-lane|agent-lane forces the answer (test seam and
+#      operator override).
+#   1. agent_id non-empty in the payload: agent-lane. (agent_type alone is the
+#      --agent MAIN thread, not a lane.)
+#   2. T3CODE_THREAD_ID in the environment, trusted only when the hook payload
+#      names a session_id and that id is the one in CLAUDE_CODE_SESSION_ID (or
+#      that variable is unset). A real hook always carries its session_id and its
+#      process has the same one in its environment; a test that runs a hook with
+#      an empty or invented payload inside a lane inherits the lane's environment
+#      and would otherwise be told it is a lane. --self skips the check. T3 sets
+#      the thread id on every Claude launch. An id that starts with
+#      "thread:delegated-task:" or "thread:provider:" is one T3 made itself, never
+#      a top-level thread (every top-level thread is a bare uuid): t3-lane with no
+#      file read. Any other id is looked up in T3's state db for a lineage of
+#      relationshipToParent=subagent.
+#   3. No trusted thread id: the payload's session_id (with --self,
+#      CLAUDE_CODE_SESSION_ID) is mapped to its thread in T3's read-only state db,
+#      then step 2's test applies to that thread. An unmapped or ambiguous
+#      session is not guessed at.
+#   4. Still nothing, and the transcript already holds a first user message: it
+#      starts "Act as the <kind> sub-agent for this task." (the wrapper T3's
+#      delegate_task puts on every brief) or "Delegated task:": t3-lane. A
+#      SessionStart payload has no first message yet, so this only helps resume,
+#      compact and prompt-time callers.
+#
+# The state db is opened read-only with query_only and a 0.2 s lock wait; nothing
+# is written anywhere. LANE_CLASS_DB points at another db (tests), and
+# LANE_CLASS_NO_DB=1 skips it. The default is T3 0.1.x's statev2.sqlite under
+# ${T3CODE_HOME:-$HOME/.t3}/userdata; a T3 release with another schema reads as
+# "no mapping" and falls through to the next step.
+#
+# A test of a hook that wants a lane verdict sets OPS_LANE_CLASS or passes a
+# payload whose session_id matches the CLAUDE_CODE_SESSION_ID it sets; a test that
+# wants a foreman needs to do nothing.
+
+set -uo pipefail
+
+classify() {
+  local payload="" aid="" sid="" tp="" fields thread py db res self=0 envsid="${CLAUDE_CODE_SESSION_ID:-}"
+  [ "${1:-}" = "--self" ] && self=1
+
+  case "${OPS_LANE_CLASS:-}" in
+    foreman|t3-lane|agent-lane) printf '%s' "$OPS_LANE_CLASS"; return 0 ;;
+  esac
+
+  # A bounded read: callers pass a here-string, but a caller that leaves an open
+  # pipe on stdin must not hold a boot hook. Partial input is kept on timeout.
+  if [ "$self" -eq 0 ] && [ ! -t 0 ]; then IFS= read -r -d '' -t 0.25 payload 2>/dev/null || true; fi
+
+  if [ -n "$payload" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      fields="$(printf '%s' "$payload" | jq -r '
+        def s: if type == "string" then . else "" end;
+        [(.agent_id | s), (.session_id | s), (.transcript_path | s)] | join("\u001f")' 2>/dev/null)" || fields=""
+    else
+      fields=""
+      for py in python3 python py; do
+        command -v "$py" >/dev/null 2>&1 || continue
+        fields="$(printf '%s' "$payload" | "$py" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+def s(k):
+    v = d.get(k) if isinstance(d, dict) else None
+    return v if isinstance(v, str) else ""
+sys.stdout.write("\x1f".join([s("agent_id"), s("session_id"), s("transcript_path")]))' 2>/dev/null)" && break
+      done
+    fi
+    IFS=$'\x1f' read -r aid sid tp <<< "${fields:-}" || true
+  fi
+
+  if [ -n "$aid" ]; then printf 'agent-lane'; return 0; fi
+
+  # The ambient thread id belongs to this process's own session. It is used for
+  # the session in the payload only when both name the same one.
+  thread=""
+  if [ "$self" -eq 1 ]; then thread="${T3CODE_THREAD_ID:-}"; sid="$envsid"
+  elif [ -n "$sid" ] && { [ -z "$envsid" ] || [ "$envsid" = "$sid" ]; }; then thread="${T3CODE_THREAD_ID:-}"; fi
+  case "$thread" in thread:delegated-task:*|thread:provider:*) printf 't3-lane'; return 0 ;; esac
+
+  db="${LANE_CLASS_DB:-${T3CODE_HOME:-$HOME/.t3}/userdata/statev2.sqlite}"
+  [ "${LANE_CLASS_NO_DB:-0}" = 1 ] && db=""
+  [ -n "$db" ] && [ ! -f "$db" ] && db=""
+  # Nothing to look up and nothing to read: the answer is the default.
+  if [ -z "$db" ] && { [ -z "$tp" ] || [ ! -f "$tp" ]; }; then printf 'foreman'; return 0; fi
+
+  py=""
+  for res in python3 python py; do command -v "$res" >/dev/null 2>&1 && { py="$res"; break; }; done
+  [ -n "$py" ] || { printf 'foreman'; return 0; }
+
+  res="$("$py" -I - "$thread" "$sid" "$tp" "$db" <<'PY' 2>/dev/null
+import json, re, sqlite3, sys, urllib.parse
+
+thread, sid, tp, db = sys.argv[1:5]
+
+# A wedged filesystem must not hold a boot hook: give up after half a second
+# (POSIX only; Windows has no SIGALRM and relies on the sqlite lock wait).
+try:
+    import signal
+
+    def _stop(*_):
+        print("none")
+        sys.exit(0)
+    signal.signal(signal.SIGALRM, _stop)
+    signal.setitimer(signal.ITIMER_REAL, 0.5)
+except (AttributeError, ValueError, ImportError):
+    pass
+
+# Session id to thread: the provider thread whose native session id is the
+# payload's, joined to its projection row.
+SESSION_SQL = (
+    "SELECT pt.thread_id, pt.provider_thread_id, t.active_provider_thread_id "
+    "FROM orchestration_v2_projection_provider_threads AS pt "
+    "LEFT JOIN orchestration_v2_projection_threads AS t ON t.thread_id = pt.thread_id "
+    "WHERE pt.owner_node_id IS NULL "
+    "AND json_extract(pt.payload_json, '$.nativeThreadRef.nativeId') = ? LIMIT 33"
+)
+
+def verdict_for_thread(con, tid):
+    """lane or top for a thread id; None when the row is unreadable."""
+    row = con.execute("SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ?",
+                      (tid,)).fetchone()
+    if not row:
+        return None
+    try:
+        lineage = json.loads(row[0]).get("lineage")
+    except Exception:
+        return None
+    if isinstance(lineage, dict) and lineage.get("relationshipToParent") == "subagent":
+        return "lane"
+    return "top"
+
+def from_db():
+    if not db:
+        return None
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(db), uri=True, timeout=0.2)
+    except Exception:
+        return None
+    try:
+        con.execute("PRAGMA query_only=1")
+        tid = thread
+        if not tid:
+            if not sid:
+                return None
+            rows = con.execute(SESSION_SQL, (sid,)).fetchall()
+            ids = {r[0] for r in rows if isinstance(r[0], str) and r[0]}
+            if len(ids) > 1:
+                # A session that maps to several threads is ambiguous: a guess
+                # would classify the wrong session. A lane-looking prompt must not
+                # override known ambiguity between a foreman and a lane.
+                return "top"
+            if not ids:
+                return None
+            tid = ids.pop()
+        return verdict_for_thread(con, tid)
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+# Match the observed wrapper, not any role prompt containing "lane" or
+# "sub-agent": a normal "Act as the lane architect" prompt is still a foreman.
+BRIEF = re.compile(r"^\s*(?:Act as the [^\n]{1,80}? sub-agent for this task\.(?:[ \t]*\r?\n|$)|Delegated task:)", re.I)
+
+def from_transcript():
+    if not tp:
+        return None
+    try:
+        with open(tp, "rb") as f:
+            for _, raw in zip(range(400), f):
+                try:
+                    e = json.loads(raw)
+                except Exception:
+                    continue
+                if not isinstance(e, dict) or e.get("type") != "user" or e.get("isSidechain"):
+                    continue
+                c = (e.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+                if isinstance(c, str) and c.strip():
+                    return "lane" if BRIEF.search(c) else "top"
+    except Exception:
+        return None
+    return None
+
+v = from_db()
+if v is None and not thread:
+    v = from_transcript()
+print(v or "none")
+PY
+)" || res=""
+  case "$res" in lane) printf 't3-lane' ;; *) printf 'foreman' ;; esac
+  return 0
+}
+
+out="$(classify "$@" 2>/dev/null)" || out=""
+case "$out" in foreman|t3-lane|agent-lane) ;; *) out=foreman ;; esac
+printf '%s\n' "$out"
+exit 0

@@ -14,7 +14,7 @@ Stage 2 automatically; there is no manual step between them.
 | Stage | Owner | Repo | What it does |
 |-------|-------|------|--------------|
 | **1. Host setup** | `shellSetup.sh` / `winSetup.ps1` | `linuxploitacious` (public) | OS packages, dotfiles via Stow, AI CLI install, `gh` auth, Level 1 Claude files (`CLAUDE.md`, `settings.json`, `statusline.sh`), clone your private OPS copy, **then invoke Stage 2**. |
-| **2. OPS setup** | `.claude-config/deploy.sh` (Linux/macOS) / `deploy.ps1` (Windows) | your private OPS copy | Symlink `~/.claude/{skills,commands,agents,workflows}`. Mount the shared skills. Link the always-loaded core into `~/.claude/rules/`. Strip the retired fleet wiring. Wire the root wrapper. Write the ultracode shim. Initialize auto-memory git-sync. Schedule daily backup. Retire the caveman and ponytail plugins. Seed the trust anchor. |
+| **2. OPS setup** | `.claude-config/deploy.sh` (Linux/macOS) / `deploy.ps1` (Windows) | your private OPS copy | Symlink `~/.claude/{skills,commands,agents,workflows}`. Mount the shared skills. Link the always-loaded core into `~/.claude/rules/`. Strip the retired fleet wiring. Wire the root wrapper. Write the ultracode shim. Initialize auto-memory git-sync. Schedule daily backup. Report the caveman and ponytail plugins (never removes them). Seed the trust anchor. |
 
 Rule: **anything OPS-specific lives in Stage 2.** linuxploitacious clones the
 repo and hands off; it does not configure OPS itself.
@@ -52,6 +52,21 @@ Check it on a host: `readlink -f ~/.claude/rules/ops-core.md` prints
 `core.md loaded via rules/ops-core.md`, and `/context` in a new session lists
 the rule under memory files. A second Claude Code profile
 (`CLAUDE_CONFIG_DIR`) needs the same link in its own `rules/`.
+
+`CONTEXT/foreman.md` is not a rule file. It binds only the main thread, so
+loading it into every lane would charge each lane for rules it is told not to
+apply. The `foreman-context.sh` SessionStart hook prints it into a foreman
+session at startup, resume, clear, and compact, and prints nothing into a lane
+(`bin/lane-class` decides). The Stage-1 settings register the hook behind a
+`test -x` guard, so a copy without the script stays silent and the hook needs
+no Stage 2 step. It fails open, and a file over 8,192 bytes prints nothing at
+all: Claude Code shows the model only a short preview of hook output past
+10,000 characters, and a preview that opens with the heading would pass for the
+whole rule set. In every silent case `core.md` tells a main thread with no
+"Foreman doctrine" block to read the file itself, so a fault degrades to a
+manual read, never to a missing rule. Check it on a host:
+`bash ~/OPS/.claude-config/hooks/foreman-context.sh </dev/null | head -1`
+prints `# Foreman doctrine`.
 
 ## Stage 1: Host setup
 
@@ -187,7 +202,11 @@ In order:
    cwd subdirs under `~/.claude/projects/` and symlinks each `memory/` into
    `.claude-memory/<host>-<encoded>/` so per-session memory survives in this
    repo and syncs to your other machines. It commits each new pool and pushes
-   only to a private origin (see "The push gate" below).
+   only to a private origin (see "The push gate" below). Which loader reads a
+   pool into a session follows your auto-memory setting: with Claude Code's
+   native auto-memory on, Claude Code loads the pool's `MEMORY.md`; with it off
+   (the current Stage-1 settings turn it off), the `memory-digest.sh`
+   SessionStart hook prints the pool's digest instead (`.claude-memory/README.md`).
 
 8. **Schedule daily backup.** Installs a user crontab entry
    (`0 9 * * * ~/OPS/.claude-config/backup/daily-sync.sh`). The sync script
@@ -246,25 +265,24 @@ In order:
    parsed. The real protection is a private origin. The hook header in
    `.claude-config/hooks/git-guard.sh` lists what it covers and its limits.
 
-9. **Retire the caveman and ponytail plugins.** Runs
-   `claude plugin uninstall <name>@<name>` and
-   `claude plugin marketplace remove <name>` for both, so a host provisioned by
-   an earlier OPS release loses them; a no-op once they are gone. Stage 1
-   retires them too: their modes are now part of the harness's own operating
-   rules, and an earlier Stage 2 reinstalled caveman, unpinned, from its
-   third-party marketplace right after Stage 1 removed it. Removal goes through
-   the CLI only; no plugins directory is deleted by hand. A bare
-   `bash deploy.sh` doesn't source a login profile, so it probes known install
-   locations (`~/.local/bin`, pnpm, npm-global, `/usr/local/bin`,
-   `/opt/homebrew/bin`) to find `claude`.
+9. **Report the caveman and ponytail plugins.** OPS no longer installs
+   either one: their modes are now part of the harness's own operating rules,
+   and an earlier Stage 2 had installed caveman, unpinned, from its third-party
+   marketplace. Whether a copy keeps one is its owner's call, so this step only
+   reads `claude plugin list --json`, `claude plugin marketplace list --json`
+   and `settings.json`, warns about each one it finds, and prints the command
+   that would remove it (`claude plugin uninstall <name>@<name> --scope user`,
+   `claude plugin marketplace remove <name> --scope user`); it runs neither.
+   An earlier release removed them itself; that step is gone. Nothing found is
+   a quiet no-op. A bare `bash deploy.sh` doesn't source a login profile, so it
+   probes known install locations (`~/.local/bin`, pnpm, npm-global,
+   `/usr/local/bin`, `/opt/homebrew/bin`) to find `claude`.
 
-   Retirement first reads the CLI inventories. If a retired plugin or
-   marketplace is still declared in the user's settings, it warns and skips
-   that item: CLI removal would also rewrite `settings.json`, following its
-   Stage-1 symlink. Update Stage 1 before re-running deploy. Removals use
-   `--scope user` so they cannot alter the caller's project settings; a
-   marketplace registered outside that scope stays put with a warning.
-   Inventory and removal failures are visible warnings, never a silent success.
+   A plugin or marketplace still declared in `settings.json` gets a warning
+   that points at Stage 1 instead of a command: the CLI's removal would rewrite
+   that file through its Stage-1 symlink. One installed in a project or local
+   scope is that project's choice and is only named. An inventory that cannot
+   be read is a visible warning, never a silent pass.
 
 10. **Seed the trust anchor.** Marks `$HOME` trusted in `~/.claude.json`, which
     sits beside `~/.claude/`, not inside it (`hasTrustDialogAccepted: true`), so
@@ -292,8 +310,10 @@ which is tied to the public linuxploitacious repo); the git identity check
 anchor; the ultracode shim in the seam; an `OPS Daily Backup` scheduled task
 that runs `daily-sync.sh` in Git Bash (skipped with `-NoSystem`; registered
 with or without an `origin` remote, as on Linux); the skill mount
-(clone, then `skills-vendor.sh sync` through Git Bash); plugin retirement (same
-CLI calls as step 9); and a Git Bash pin plus the guard self-test.
+(clone, then `skills-vendor.sh sync` through Git Bash); the plugin report (same
+CLI reads as step 9); and a Git Bash pin plus the guard self-test (its
+`--quick` probe set, with a line saying it is running, because the full set
+is slow under Git Bash).
 
 **Windows parity gap:** the root wrapper is Linux-only (a root/user lock is
 meaningless on single-user Windows).
@@ -310,7 +330,8 @@ readlink -f ~/.claude/rules/ops-core.md
 diff <(ls ~/.claude/skills/) <(ls ~/OPS/SKILLS/)   # empty diff == correct
 ~/OPS/.claude-config/bin/skills-vendor.sh --check
 
-# No retired plugin should remain (expect: neither caveman nor ponytail listed)
+# Deploy reported, and did not remove, any caveman or ponytail plugin
+# (remove one yourself only if you choose: the commands are in its warning)
 claude plugin list
 
 # Stage 2 left the Stage-1 settings alone (expect: no output)
@@ -408,8 +429,10 @@ Three pieces of OPS machinery ship in the repo but are **not** wired by the
 Stage 2 deploy scripts.
 
 - **Hooks:** the scripts in `.claude-config/hooks/` (SessionStart briefing,
-  pre-compact snapshot, post-compact resume, handoff-check, memory-index, the
-  context-watch ladder and readout, and the secrets/git guards) are registered
+  foreman-context, lane-rules, pre-compact snapshot, post-compact resume with
+  the deferred-tool re-select list, handoff-check, memory-index, memory-digest,
+  memory-hint, report-lint, askuser-cancel, the context-watch ladder and
+  readout, and the secrets/git guards) are registered
   in `settings.json`, a **Level 1 file owned by Stage 1**. Its hook entries
   point at these scripts by path, so they come alive once Stage 1 has deployed
   `settings.json` and this repo is at `~/OPS`. Editing a hook script here takes
@@ -450,7 +473,8 @@ Stage 2 deploy scripts.
 **SessionStart matchers.** Keep the Stage-1 SessionStart hooks split by source,
 so a resume or compact does not re-pay the full boot: a `"startup|clear"` group
 for the full set and a `"resume|compact"` group for the light continuity hooks
-(post-compact-resume, handoff-check, session-briefing, session-work-init).
+(post-compact-resume, handoff-check, session-briefing, memory-digest,
+foreman-context, lane-rules, session-work-init).
 `session-work-init.sh` belongs in both groups: a revived session fires
 `source=resume` for its whole life. `verify-ops.sh` checks the split (check 18)
 and the stdout budget of every SessionStart payload (check 19).
@@ -500,6 +524,28 @@ bash ~/OPS/.claude-config/deploy.sh   # or deploy.ps1 on Windows
 ```
 
 Stage 2 is idempotent: it no-ops where state is already correct.
+
+### Upgrading from a copy older than 2026-11-07
+
+The 2026-11-07 release split the always-loaded core. The rules that bind only
+the main thread (intake and reporting, orchestration, review and merge, model
+choice, rhythm) moved from `CONTEXT/core.md` to the new `CONTEXT/foreman.md`,
+and `core.md` shrank to what a lane needs too. Nothing is taken away from a
+copy: the sync only adds and updates files, and every `core.md#...` anchor
+still resolves. After you sync the template (the `harness-update` skill):
+
+1. **Read the sync report for `core.md`.** If you never edited it, it arrives
+   as an UPDATE. If you did, it is a CONFLICT, which the sync lists and leaves
+   alone: take the template's `core.md` by hand and move your own addition to
+   `standing-orders.md`, where a template sync cannot touch it. Rulings written
+   into `core.md` are the one thing a split can strand.
+2. **Check that the foreman rules reach the main thread.** The Stage-1
+   settings already register the `foreman-context.sh` hook behind a `test -x`
+   guard, so nothing needs registering. Run the check in "How the core
+   loads"; until the script is on the host, the core tells the main thread to
+   read `CONTEXT/foreman.md` itself.
+3. **Run the gate.** `bash ~/OPS/.claude-config/bin/verify-ops.sh` should end
+   with `0 fail`.
 
 ### Migrating to the core boot (copies older than 2026-10-19)
 
@@ -602,6 +648,12 @@ Explicitly NOT handled by Stage 2 (`deploy.sh` / `deploy.ps1`):
   Stage 1's responsibility.
 - **System packages and host security settings**, including T3's browser
   setup (see "T3 Code hosts").
+- **Your own choices.** Your git remotes, your backup arrangements, your memory
+  layout and sync, your plugins, your hooks, and your model pins are yours: neither deploy
+  nor `harness-update` changes them (`CONTEXT/how-i-work.md`, "The template
+  and a copy's owner"). A shim over a system command, such as the one
+  `safe-pkill --install-shims` places over `pkill` and `pgrep` where that tool
+  ships, is a step you run by hand; deploy never installs one.
 - **The `ops-verify` timer**: shipped here but enabled manually (see "Hooks
   and the drift gate").
 - **Project-scoped skills** inside specific

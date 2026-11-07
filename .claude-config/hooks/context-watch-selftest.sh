@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # context-watch-selftest.sh: prove the escalation ladder fires, throttles,
 # escalates, and stays silent exactly where designed, for the main session and
-# for sub-agent lanes (the agent_id backstop sized from the lane's model). Run after deploying the
+# for sub-agent lanes (the agent_id backstop sized from the lane's model) and for T3
+# delegated lanes (silence at Stop and the readout, the wrap-up text at PostToolUse, by
+# the lane-class answer). Run after deploying the
 # hooks and any time by hand. Companion to guard-selftest.sh, with one
 # deliberate difference: context-watch is fail-OPEN (a dead nag costs a manual
 # compact, not a security hole), so a missing python3 SKIPS with exit 0 here
@@ -21,6 +23,21 @@ trap 'rm -rf "$WORK"' EXIT
 export CC_CYCLE_RUNDIR="$WORK/rundir"
 fails=0
 
+# Hermetic lane-class (bin/lane-class). Answers LANE_STUB_CLASS (default foreman), logs one
+# line per call to LANE_STUB_LOG and keeps the stdin it was given in LANE_STUB_STDIN, so a
+# case can assert how often it is asked and what it is told. Exported for every case: the
+# host's own classifier must never run against test payloads.
+export LANE_STUB_LOG="$WORK/lane-class-calls" LANE_STUB_STDIN="$WORK/lane-class-stdin"
+cat > "$WORK/lane-class-stub" <<'STUB'
+#!/usr/bin/env bash
+cat >> "$LANE_STUB_STDIN"; printf '\n' >> "$LANE_STUB_STDIN"
+printf 'ask\n' >> "$LANE_STUB_LOG"
+[ -z "${LANE_STUB_SLEEP:-}" ] || sleep "$LANE_STUB_SLEEP"
+printf '%s\n' "${LANE_STUB_CLASS:-foreman}"
+STUB
+chmod +x "$WORK/lane-class-stub"
+export LANE_CLASS="$WORK/lane-class-stub"
+
 mk_transcript() { # $1=path $2=tokens
   python3 - "$1" "$2" <<'PYEOF'
 import json, sys
@@ -34,7 +51,8 @@ run() { # $1=mode $2=tokens $3=sid [$4=stop_hook_active]
   local tp="$WORK/t-$2-$3.jsonl"
   mk_transcript "$tp" "$2"
   printf '{"session_id":"%s","transcript_path":"%s","stop_hook_active":%s}' \
-    "$3" "$tp" "${4:-false}" | env -u TMUX bash "$DIR/context-watch.sh" "$1"
+    "$3" "$tp" "${4:-false}" | env -u TMUX -u T3CODE_THREAD_ID -u T3CODE_HOME -u CLAUDE_CODE_SESSION_ID \
+    bash "$DIR/context-watch.sh" "$1"
 }
 
 # Build a transcript that carries one boundary signal (task|push|merge|workflow|
@@ -95,7 +113,8 @@ run_b() { # $1=tokens $2=sid $3=signal  (always readout mode; no tmux)
   local tp="$WORK/b-$3-$2.jsonl"
   mk_boundary "$tp" "$1" "$3"
   printf '{"session_id":"%s","transcript_path":"%s"}' "$2" "$tp" \
-    | env -u TMUX bash "$DIR/context-watch.sh" readout
+    | env -u TMUX -u T3CODE_THREAD_ID -u T3CODE_HOME -u CLAUDE_CODE_SESSION_ID \
+        bash "$DIR/context-watch.sh" readout
 }
 
 chk_state() { # $1=label $2=sid $3=expected-literal-state-contents
@@ -377,6 +396,141 @@ chk "workflow lane under subagents/workflows/ wraps at 800K" 'lane] Wrap up' \
 # the lane's reminder and wrap weights stays silent.
 chk "main posttool at 600K (no agent_id) silent" EMPTY "$(run posttool 600000 mainy)"
 chk "main posttool at 800K (no agent_id) silent" EMPTY "$(run posttool 800000 mainz)"
+
+# --- T3 delegated lanes (lane-class) ------------------------------------------------
+# A T3 delegated lane is its own top-level claude process, so its hooks carry NO agent_id
+# and it used to be nagged like a foreman, declined, and paid a full-context turn for the
+# nag. Stop and the readout's compaction texts are now silent for a session lane-class
+# calls a lane; PostToolUse gives it its wrap-up text. Silence needs positive evidence:
+# a missing, garbled, slow or foreman answer keeps a foreman's nag. Every case uses its
+# own session id (the lane-class answer is cached per session, and the throttle per session).
+yes_no() { # $1=label $2=condition-exit-status
+  if [ "$2" -eq 0 ]; then printf '  PASS  %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); fi
+}
+count_is() { # $1=label $2=want $3=got
+  if [ "$3" = "$2" ]; then printf '  PASS  %s\n' "$1"; else printf '  FAIL  %s (want %s, got %s)\n' "$1" "$2" "$3"; fails=$((fails + 1)); fi
+}
+lane_asks() { if [ -s "$LANE_STUB_LOG" ]; then wc -l < "$LANE_STUB_LOG" | tr -d ' '; else echo 0; fi; }
+run_t3() { # $1=mode $2=tokens $3=sid $4=signal [NAME=VALUE ...]: a T3 session (T3CODE_HOME set)
+  local mode="$1" tokens="$2" sid="$3" signal="$4"; shift 4
+  local tp="$WORK/e-$signal-$sid.jsonl"
+  mk_boundary "$tp" "$tokens" "$signal"
+  printf '{"session_id":"%s","transcript_path":"%s"}' "$sid" "$tp" \
+    | env -u TMUX -u T3CODE_THREAD_ID -u CLAUDE_CODE_SESSION_ID -u OPS_DIR T3CODE_HOME=/tmp/t3x "$@" \
+        bash "$DIR/context-watch.sh" "$mode"
+}
+
+# Large tool responses must not become environment variables: Linux refuses a
+# single string past 128 KiB before Python even starts, hiding every warning.
+tp="$WORK/large-response.jsonl"; mk_boundary "$tp" 880000 none
+out="$(python3 - "$tp" <<'PYEOF' | env -u TMUX -u T3CODE_THREAD_ID -u CLAUDE_CODE_SESSION_ID \
+    T3CODE_HOME=/tmp/t3x bash "$DIR/context-watch.sh" posttool
+import json, sys
+print(json.dumps({"session_id": "large-response", "transcript_path": sys.argv[1],
+                  "tool_response": "x" * 300000}))
+PYEOF
+)"
+chk "posttool: a large response still produces the foreman's warning" 'mid-turn] URGENT' "$out"
+grep -q '"session_id":"large-response"' "$LANE_STUB_STDIN" && ! grep -q tool_response "$LANE_STUB_STDIN"
+yes_no "lane-class receives only its three input fields, not the tool response" $?
+
+# (1) STOP, lane-class says lane: silent at every tier, and it must not use up the throttle.
+chk "stop: a t3-lane is not nagged at NOTICE" EMPTY "$(run_t3 stop 700000 ls1 none LANE_STUB_CLASS=t3-lane)"
+chk "stop: a t3-lane is not nagged at CRITICAL" EMPTY "$(run_t3 stop 950000 ls1 none LANE_STUB_CLASS=t3-lane)"
+chk_no_nag_state "stop: a silent lane writes no nag state" ls1
+chk "stop: an agent-lane answer is not nagged either" EMPTY "$(run_t3 stop 700000 ls2 none LANE_STUB_CLASS=agent-lane)"
+grep -q '"session_id":"ls1"' "$LANE_STUB_STDIN" && grep -q '"transcript_path"' "$LANE_STUB_STDIN"
+yes_no "stop: lane-class receives the hook JSON on stdin" $?
+grep -q ' stop sid=ls1 ctx=700K lane-class' "$CC_CYCLE_RUNDIR/context-watch-silenced.log" 2>/dev/null
+yes_no "stop: a silenced nag is logged with its reason" $?
+
+# (2) STOP, anything but a clean lane answer keeps the foreman's warnings.
+chk "stop: a foreman answer keeps its NOTICE" '] NOTICE' "$(run_t3 stop 700000 ls3 none)"
+chk "stop: a foreman answer keeps its CRITICAL" 'CRITICAL' "$(run_t3 stop 950000 ls3 none)"
+chk "stop: no lane-class installed keeps the NOTICE" '] NOTICE' "$(run_t3 stop 700000 ls4 none LANE_CLASS=$WORK/no-such-lane-class)"
+chk "stop: a garbled lane-class answer reads as foreman" '] NOTICE' "$(run_t3 stop 700000 ls9 none LANE_STUB_CLASS=banana)"
+! grep -q ' stop sid=ls3 ' "$CC_CYCLE_RUNDIR/context-watch-silenced.log" 2>/dev/null
+yes_no "stop: a foreman is never logged as silenced" $?
+: > "$LANE_STUB_LOG"
+t0="$(date +%s)"
+chk "stop: a hung lane-class reads as foreman" '] NOTICE' "$(run_t3 stop 700000 ls10 none LANE_STUB_SLEEP=30 LANE_STUB_CLASS=t3-lane)"
+t1="$(date +%s)"
+# The stub forks a `sleep 30`: only a kill of the whole process group frees the hook at the
+# cap (killing the stub alone leaves the sleep holding the output pipe for 30 s).
+[ $((t1 - t0)) -le 8 ]; yes_no "stop: a hung lane-class (and its hung child) is cut off at 2 s ($((t1 - t0))s)" $?
+chk "stop: a failed ask is cached (the next call does not wait again)" 'WARNING' \
+  "$(run_t3 stop 790000 ls10 none LANE_STUB_SLEEP=30 LANE_STUB_CLASS=t3-lane)"
+count_is "stop: a hung lane-class is asked once, not on every stop" 1 "$(lane_asks)"
+
+# (3) STOP, outside T3 nothing is asked and the nag is as before.
+: > "$LANE_STUB_LOG"
+chk "stop: outside T3 the manual route still nags" 'manual /compact is clear' "$(run stop 700000 ls11)"
+count_is "stop: outside T3 lane-class is never asked" 0 "$(lane_asks)"
+chk "stop: below the ladder nothing is asked of lane-class" EMPTY "$(run_t3 stop 500000 ls12 none LANE_STUB_CLASS=t3-lane)"
+count_is "stop: below the ladder lane-class is not asked" 0 "$(lane_asks)"
+# asked once per session that would be nagged, then cached
+: > "$LANE_STUB_LOG"
+chk "stop: a foreman session is nagged at 66%" '] NOTICE' "$(run_t3 stop 660000 ls6 none)"
+chk "stop: and again at CRITICAL" 'CRITICAL' "$(run_t3 stop 950000 ls6 none)"
+count_is "stop: the lane-class answer is cached per session (one ask for two nags)" 1 "$(lane_asks)"
+# the thread id alone is no lane evidence: T3CODE_THREAD_ID set, lane-class says foreman
+chk "stop: T3CODE_THREAD_ID alone does not silence a foreman" '] NOTICE' "$(run_t3 stop 700000 ls13 none T3CODE_THREAD_ID=thread:delegated-task:x)"
+
+# (4) POSTTOOL: a lane-class lane gets the lane text, not the foreman's compaction text.
+chk "posttool: a t3-lane reminds at 600K" 'lane] Reminder' "$(run_t3 posttool 600000 lp1 none LANE_STUB_CLASS=t3-lane)"
+chk "posttool: the t3-lane reminder rides additionalContext" 'additionalContext' "$(run_t3 posttool 600000 lp1b none LANE_STUB_CLASS=t3-lane)"
+chk "posttool: a t3-lane reminder is throttled (+10K<100K)" EMPTY "$(run_t3 posttool 610000 lp1 none LANE_STUB_CLASS=t3-lane)"
+chk "posttool: a t3-lane wraps up at 800K (crossing beats the throttle)" 'lane] Wrap up' "$(run_t3 posttool 800000 lp1 none LANE_STUB_CLASS=t3-lane)"
+chk "posttool: a t3-lane at URGENT weight gets the wrap-up, not the foreman text" 'lane] Wrap up' "$(run_t3 posttool 880000 lp2 none LANE_STUB_CLASS=t3-lane)"
+case "$(run_t3 posttool 880000 lp3 none LANE_STUB_CLASS=t3-lane)" in
+  *'compact ritual'*|*'mid-turn'*|*'manual /compact'*) printf '  FAIL  posttool: a t3-lane must never be handed a compaction route\n'; fails=$((fails + 1)) ;;
+  *) printf '  PASS  posttool: a t3-lane is never handed a compaction route\n' ;;
+esac
+[ -f "$CC_CYCLE_RUNDIR/lane-t3-lp1" ] && [ ! -e "$CC_CYCLE_RUNDIR/nag-lp1" ]
+yes_no "posttool: a t3-lane keeps its own throttle file and writes no nag state" $?
+chk "posttool: a t3-lane below its reminder is silent" EMPTY "$(run_t3 posttool 500000 lp4 none LANE_STUB_CLASS=t3-lane)"
+chk_no_block "posttool: the t3-lane text is never a block payload" "$(run_t3 posttool 880000 lp5 none LANE_STUB_CLASS=t3-lane)"
+: > "$LANE_STUB_LOG"
+for i in 1 2 3; do run_t3 posttool 500000 lp6 none LANE_STUB_CLASS=foreman >/dev/null; done
+count_is "posttool: lane-class is asked once for three tool calls (cached per session)" 1 "$(lane_asks)"
+# A cached answer ages out after 30 minutes: a stale "foreman" is asked again.
+printf 'foreman %d' "$(( $(date +%s) - 4000 ))" > "$CC_CYCLE_RUNDIR/laneclass-lp7"
+: > "$LANE_STUB_LOG"
+chk "posttool: a cache older than 30 minutes is asked again" 'lane] Wrap up' "$(run_t3 posttool 880000 lp7 none LANE_STUB_CLASS=t3-lane)"
+count_is "posttool: the stale cache entry was refreshed (one ask)" 1 "$(lane_asks)"
+# A foreman is untouched: the same weight with a foreman answer still gets the mid-turn text.
+chk "posttool: a foreman at 87% still gets URGENT" 'mid-turn] URGENT' "$(run_t3 posttool 870000 lp9 none)"
+# Outside T3 the lane check never runs and posttool is as before.
+: > "$LANE_STUB_LOG"
+chk "posttool: outside T3 the foreman text is unchanged" 'mid-turn] URGENT' "$(run posttool 870000 lp12)"
+count_is "posttool: outside T3 lane-class is never asked" 0 "$(lane_asks)"
+
+# (5) READOUT: the compaction routes are for foremen. A lane gets none; the plain headroom line stays.
+chk "readout: a t3-lane at 450K is silent" EMPTY "$(run_t3 readout 450000 lr2 none LANE_STUB_CLASS=t3-lane)"
+chk "readout: a t3-lane at a natural break is silent" EMPTY "$(run_t3 readout 300000 lr4 task LANE_STUB_CLASS=t3-lane)"
+chk_plain "readout: a t3-lane still gets the plain headroom line at 200K" 'Ample headroom' "$(run_t3 readout 200000 lr5 none LANE_STUB_CLASS=t3-lane)"
+chk_plain "readout: a foreman at 450K still gets the long-session text" 'has run long' "$(run_t3 readout 450000 lr6 none)"
+grep -q ' readout sid=lr2 ctx=450K lane' "$CC_CYCLE_RUNDIR/context-watch-silenced.log" 2>/dev/null
+yes_no "readout: a silenced readout is logged" $?
+
+# (6) The harness root: the classifier is found through OPS_DIR, else the hook's own checkout.
+ROOT="$(cd -P "$DIR/../.." && pwd)"
+mkdir -p "$WORK/fake-root/.claude-config/bin"
+printf '#!/usr/bin/env bash\ncat >/dev/null\necho t3-lane\n' > "$WORK/fake-root/.claude-config/bin/lane-class"; chmod +x "$WORK/fake-root/.claude-config/bin/lane-class"
+tp="$WORK/e-root.jsonl"; mk_boundary "$tp" 700000 none
+out="$(printf '{"session_id":"rt1","transcript_path":"%s"}' "$tp" | env -u TMUX -u LANE_CLASS -u T3CODE_THREAD_ID T3CODE_HOME=/tmp/t3x OPS_DIR="$WORK/fake-root" bash "$DIR/context-watch.sh" stop)"
+chk "root: OPS_DIR names the checkout whose lane-class is asked" EMPTY "$out"
+out="$(printf '{"session_id":"rt2","transcript_path":"%s"}' "$tp" | env -u TMUX -u LANE_CLASS -u T3CODE_THREAD_ID T3CODE_HOME=/tmp/t3x OPS_DIR="$WORK/not-a-checkout" bash "$DIR/context-watch.sh" stop)"
+if [ -x "$ROOT/.claude-config/bin/lane-class" ]; then
+  chk "root: an OPS_DIR with no .claude-config falls back to the hook's own checkout (a real foreman)" '] NOTICE' "$out"
+else
+  printf '  SKIP  root fallback (no lane-class beside this hook)\n'
+fi
+ln -s "$DIR" "$WORK/linked-hooks"
+out="$(printf '{"session_id":"rt3","transcript_path":"%s"}' "$tp" | env -u TMUX -u LANE_CLASS -u OPS_DIR -u T3CODE_THREAD_ID T3CODE_HOME=/tmp/t3x bash "$WORK/linked-hooks/context-watch.sh" stop)"
+if [ -x "$ROOT/.claude-config/bin/lane-class" ]; then
+  chk "root: a symlinked hooks dir resolves to the real checkout (a real foreman is nagged)" '] NOTICE' "$out"
+fi
 
 if [ "$fails" -eq 0 ]; then
   echo "context-watch-selftest: LADDER BEHAVES"

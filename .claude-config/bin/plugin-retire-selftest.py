@@ -1,8 +1,13 @@
-"""Exercise only deploy's retirement block, never its host setup or services.
+"""Exercise only deploy's caveman + ponytail check, never its host setup or services.
+
+The check reports what it finds and prints the removal command; it never
+uninstalls a plugin or removes a marketplace, because keeping one is the copy
+owner's call. Every case asserts that no mutating CLI call was made.
 
 Both deployers run under a throwaway HOME. The mock models the CLI's settings
-writes; a real local CLI, when available, also checks the symlink boundary.
-No API calls, real configuration changes, or plugin downloads.
+writes, so a mutation would show; a real local CLI, when available, also checks
+that the installed plugin survives. No API calls, real configuration changes,
+or plugin downloads.
 """
 
 import os, runpy; runpy.run_path(os.path.join(os.path.dirname(os.path.realpath(__file__)), "sandbox_guard.py"))["require"]()
@@ -58,7 +63,7 @@ def retirement_script(engine):
     if engine == "bash":
         text = (ROOT / ".claude-config/deploy.sh").read_text()
         block = text.split(
-            "# --- Claude Code plugins: retire caveman + ponytail ---", 1
+            "# --- Claude Code plugins: caveman + ponytail check ---", 1
         )[1]
         block = block.split("# --- Trust anchor ---", 1)[0]
         return (
@@ -66,7 +71,7 @@ def retirement_script(engine):
             + block
         )
     text = (ROOT / ".claude-config/deploy.ps1").read_text()
-    block = text.split("# --- Claude Code plugins: retire caveman + ponytail ---", 1)[1]
+    block = text.split("# --- Claude Code plugins: caveman + ponytail check ---", 1)[1]
     block = block.split("# --- Git Bash pin + doctor", 1)[0]
     return (
         '$ErrorActionPreference = "Stop"\n'
@@ -206,7 +211,7 @@ class RetirementTests(unittest.TestCase):
                 self.assertFalse(mutations)
                 self.assertNotIn("WARN:", output)
 
-    def test_declarations_are_never_rewritten(self):
+    def test_declarations_point_at_stage1(self):
         for engine in ENGINES:
             for settings in (
                 {"enabledPlugins": {"caveman@caveman": True}},
@@ -220,24 +225,29 @@ class RetirementTests(unittest.TestCase):
                 },
             ):
                 with self.subTest(engine=engine, settings=settings):
-                    output, mutations, _ = self.run_case(
+                    output, mutations, remaining = self.run_case(
                         engine,
                         settings,
                         plugins=[{"id": "caveman@caveman", "scope": "user"}],
                         markets=[{"name": "caveman"}],
                     )
                     self.assertFalse(mutations)
-                    self.assertIn("removal would edit Stage-1 settings", output)
+                    self.assertTrue(remaining)
+                    self.assertIn("which Stage 1 owns", output)
+                    self.assertNotIn("claude plugin uninstall", output)
 
-    def test_undeclared_user_install_is_removed(self):
+    def test_user_install_is_offered_not_removed(self):
         for engine in ENGINES:
             with self.subTest(engine=engine):
                 output, mutations, remaining = self.run_case(
                     engine, plugins=[{"id": "caveman@caveman", "scope": "user"}]
                 )
-                self.assertEqual(len(mutations), 1)
-                self.assertFalse(remaining)
-                self.assertIn("Removed retired plugin: caveman", output)
+                self.assertFalse(mutations)
+                self.assertTrue(remaining)
+                self.assertIn(
+                    "claude plugin uninstall caveman@caveman --scope user", output
+                )
+                self.assertIn("Nothing was changed.", output)
 
     def test_project_install_is_left_alone(self):
         for engine in ENGINES:
@@ -246,33 +256,31 @@ class RetirementTests(unittest.TestCase):
                     engine, plugins=[{"id": "caveman@caveman", "scope": "project"}]
                 )
                 self.assertFalse(mutations)
-                self.assertIn("left unchanged to protect project settings", output)
+                self.assertIn("that project's choice", output)
+                self.assertNotIn("claude plugin uninstall", output)
 
     def test_inventory_failure_is_visible_and_nonfatal(self):
         for engine in ENGINES:
             with self.subTest(engine=engine):
                 output, mutations, _ = self.run_case(engine, failure="inventory")
                 self.assertFalse(mutations)
-                self.assertIn("retirement skipped", output)
+                self.assertIn("check was skipped", output)
 
-    def test_uninstall_failure_does_not_remove_marketplace(self):
+    def test_marketplace_is_offered_not_removed(self):
         for engine in ENGINES:
             with self.subTest(engine=engine):
-                output, mutations, remaining = self.run_case(
+                output, mutations, _ = self.run_case(
                     engine,
-                    failure="uninstall",
-                    plugins=[{"id": "caveman@caveman", "scope": "user"}],
-                    markets=[{"name": "caveman"}],
+                    plugins=[{"id": "ponytail@ponytail", "scope": "user"}],
+                    markets=[{"name": "ponytail"}],
                 )
-                self.assertEqual(len(mutations), 1)
-                self.assertTrue(remaining)
-                self.assertIn("could not be removed (rc=7)", output)
-
-    def test_marketplace_failure_is_visible(self):
-        for engine in ENGINES:
-            with self.subTest(engine=engine):
-                output, _, _ = self.run_case(engine, markets=[{"name": "caveman"}])
-                self.assertIn("marketplace caveman remains (rc=1)", output)
+                self.assertFalse(mutations)
+                self.assertIn(
+                    "claude plugin marketplace remove ponytail --scope user", output
+                )
+                self.assertIn(
+                    "claude plugin uninstall ponytail@ponytail --scope user", output
+                )
 
     @unittest.skipUnless("pwsh" in ENGINES, "PowerShell is unavailable")
     def test_powershell_ignores_loaded_shell_function(self):
@@ -281,12 +289,12 @@ class RetirementTests(unittest.TestCase):
             plugins=[{"id": "caveman@caveman", "scope": "user"}],
             shell_function=True,
         )
-        self.assertEqual(len(mutations), 1)
-        self.assertFalse(remaining)
-        self.assertIn("Removed retired plugin: caveman", output)
+        self.assertFalse(mutations)
+        self.assertTrue(remaining)
+        self.assertIn("claude plugin uninstall caveman@caveman --scope user", output)
 
     @unittest.skipUnless(REAL_CLI, "local Claude CLI is unavailable")
-    def test_real_cli_preserves_symlinked_settings(self):
+    def test_real_cli_keeps_the_plugin(self):
         for engine in ENGINES:
             for declared in (False, True):
                 with self.subTest(engine=engine, declared=declared):
@@ -295,8 +303,9 @@ class RetirementTests(unittest.TestCase):
                         if declared
                         else {}
                     )
-                    _, _, remaining = self.run_case(engine, settings, real=True)
-                    self.assertEqual(bool(remaining.get("caveman@caveman")), declared)
+                    _, mutations, remaining = self.run_case(engine, settings, real=True)
+                    self.assertFalse(mutations)
+                    self.assertTrue(remaining.get("caveman@caveman"))
 
 
 if __name__ == "__main__":

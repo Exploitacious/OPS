@@ -88,6 +88,22 @@
 # MAIN id and would collide across concurrent lanes. Main-session behaviour is
 # unchanged: the lane branch is skipped whenever agent_id is absent.
 #
+# T3 delegated lanes. A lane that T3 Code launches as a delegated task is its own
+# top-level claude process: its hooks carry no agent_id, so it used to be nagged like
+# a foreman, declined (its brief says a lane never arms a compactor) and paid a
+# full-context turn for the nag. Now Stop and the readout's compaction texts are
+# silent for a session bin/lane-class calls a lane (t3-lane or agent-lane), and
+# PostToolUse gives it the same 60% reminder and 80% wrap-up an agent_id lane gets,
+# sized from its own transcript and throttled per session id. Silence needs positive
+# evidence: a missing, slow, garbled or foreman answer keeps the foreman's warnings.
+# The classifier is asked only inside T3 (T3CODE_THREAD_ID or T3CODE_HOME in the
+# environment), at most once per call, and its answer is cached per session id for
+# 30 minutes (a failed ask for 2). Every silenced nag is one line in
+# $RUNDIR/context-watch-silenced.log, so a wrongly silenced foreman can be found.
+# lane-class is bin/lane-class, found through one resolved harness root (OPS_DIR if
+# set, else the checkout this file sits in, else ~/OPS); LANE_CLASS overrides the
+# path (tests).
+#
 # Suppressed when:
 #   - stop_hook_active (we already blocked this stop; loop guard; stop mode)
 #   - inside a lane, any mode but posttool (above)
@@ -118,6 +134,19 @@ PAYLOAD=""
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HOOK_DIR/hooklib.sh"
+# One harness root for every sibling script this hook runs, so the same file works from
+# the deployed ~/OPS, a worktree or another checkout. OPS_DIR overrides (the override
+# the other hooks honor); else the checkout this file sits in (cd -P resolves a symlinked
+# hooks dir first, so ../.. is the real checkout root); else the fixed fallback.
+H="${OPS_DIR:-}"
+[ -n "$H" ] && [ -d "$H/.claude-config/bin" ] || H="$(cd -P "$HOOK_DIR/../.." 2>/dev/null && pwd)"
+[ -d "$H/.claude-config/bin" ] || H="$HOME/OPS"
+# lane-class says foreman, t3-lane or agent-lane (a missing script reads as foreman).
+LANE_CLASS="${LANE_CLASS:-$H/.claude-config/bin/lane-class}"
+# Only T3 Code starts delegated lanes as their own sessions, so only there is the
+# classifier worth asking.
+IN_T3=""
+if [ -n "${T3CODE_THREAD_ID:-}" ] || [ -n "${T3CODE_HOME:-}" ]; then IN_T3=1; fi
 
 # Simple field reads use hook_field (jq-first, python3/python/py fallback):
 # only the transcript tail-scan further down is python3-only.
@@ -128,6 +157,7 @@ fi
 TRANSCRIPT="$(printf '%s' "$PAYLOAD" | hook_field transcript_path)" || exit 0
 [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] || exit 0
 SID="$(printf '%s' "$PAYLOAD" | hook_field session_id)" || exit 0
+CLASS_SID="$SID"
 SID="${SID:-unknown}"
 SID="${SID:0:64}"
 AGENT_ID="$(printf '%s' "$PAYLOAD" | hook_field agent_id)" || exit 0
@@ -141,11 +171,12 @@ mkdir -p "$RUNDIR" 2>/dev/null || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
 CW_TRANSCRIPT="$TRANSCRIPT" CW_SID="$SID" CW_AGENT_ID="$AGENT_ID" RUNDIR="$RUNDIR" MODE="$MODE" \
+CW_CLASS_SID="$CLASS_SID" IN_T3="$IN_T3" LANE_CLASS="$LANE_CLASS" \
 WINDOW="${CC_CONTEXT_WINDOW:-1000000}" \
 LANE_WINDOW_OVERRIDE="${LANE_WINDOW_OVERRIDE:-}" LANE_REMIND_PCT="${LANE_REMIND_PCT:-}" LANE_WRAP_PCT="${LANE_WRAP_PCT:-}" \
 NAG_OVERRIDE="${CC_COMPACT_NAG_TOKENS:-}" RENAG_OVERRIDE="${CC_COMPACT_RENAG_TOKENS:-}" \
 python3 - <<'PY' 2>/dev/null || exit 0
-import json, os, re, sys
+import json, os, re, signal, subprocess, sys, time
 
 
 def _parse_ts(s):
@@ -348,24 +379,142 @@ def lane_pct(name, default):
     return v if 1 <= v <= 100 else default
 
 
+LANE_CLASSES = ("foreman", "t3-lane", "agent-lane")
+LANE_CLASS_TTL_S = 30 * 60
+_lc = {}
+
+
+def lane_class():
+    """bin/lane-class's verdict for this session: "foreman", "t3-lane" or "agent-lane"
+    (its contract: one word, exit 0, under 300 ms, the hook JSON on stdin). A missing,
+    failing, slow or garbled classifier reads as "foreman", the contract's default, so
+    a box without it behaves as before. Asked only inside T3 (outside it the answer is
+    meaningless), at most once per call, and cached per session id for LANE_CLASS_TTL_S:
+    a thread never stops being a lane, and PostToolUse asks on every tool call, so the
+    classifier must not run each time. A failed ask is cached for 2 minutes only, so a
+    broken or hung classifier holds a tool call for 2 s once per 2 minutes, never on
+    every tool call, and a transient failure does not pin "foreman" for the whole TTL."""
+    if "cls" in _lc:
+        return _lc["cls"]
+    cls = "foreman"
+    path = os.environ.get("LANE_CLASS") or ""
+    if os.environ.get("IN_T3") and path and os.access(path, os.X_OK):
+        cache = os.path.join(os.environ["RUNDIR"], "laneclass-" + re.sub(r"[^A-Za-z0-9_-]", "", sid)[:64])
+        now = time.time()
+        cached = ""
+        try:
+            with open(cache) as f:
+                c, at = f.read().split()[:2]
+            if c in LANE_CLASSES and 0 <= now - float(at) < LANE_CLASS_TTL_S:
+                cached = c
+        except Exception:
+            pass
+        if cached:
+            cls = cached
+        else:
+            stamp = now - LANE_CLASS_TTL_S + 120   # a failed ask expires in 2 minutes
+            try:
+                # Its own process group, killed whole at the 2 s cap: subprocess.run's
+                # timeout kills only the child, and a classifier that forked a hung
+                # grandchild would then hold the output pipe open and keep this hook
+                # waiting past the cap.
+                p = subprocess.Popen([path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+                try:
+                    # Only these fields belong to lane-class. Exporting the full
+                    # tool response hits Linux's per-environment-string limit on
+                    # a large Read and silences the entire context warning.
+                    payload = json.dumps({"session_id": os.environ.get("CW_CLASS_SID") or "",
+                                          "agent_id": os.environ.get("CW_AGENT_ID") or "",
+                                          "transcript_path": tp}, separators=(",", ":"))
+                    out = p.communicate(input=payload, timeout=2)[0].strip()
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except Exception:
+                        p.kill()
+                    try:
+                        p.communicate(timeout=2)
+                    except Exception:
+                        pass
+                    out = ""
+                if p.returncode == 0 and out in LANE_CLASSES:
+                    cls, stamp = out, now
+            except Exception:
+                pass
+            try:
+                with open(cache, "w") as f:
+                    f.write("%s %d" % (cls, stamp))
+            except OSError:
+                pass
+    _lc["cls"] = cls
+    return cls
+
+
+def session_is_lane():
+    """True when lane-class says this session is DEFINITELY a lane that cannot compact
+    itself: a T3 delegated task or a subagent thread. A lane that obeys the foreman's
+    compaction text either declines it after a full-context turn read just to refuse it,
+    or tries and stalls. Silence needs positive evidence, so an unresolved or foreman
+    answer is not a lane."""
+    return lane_class() in ("t3-lane", "agent-lane")
+
+
+def log_silenced(where, ctx_tokens, why):
+    """One line per silenced nag in $RUNDIR/context-watch-silenced.log, so the silence is
+    observable (how often it fires, on which sessions) and a wrongly silenced foreman can
+    be found. Best effort and bounded: a write failure never reaches the session, and the
+    file rolls to .1 at 256 KB."""
+    path = os.path.join(os.environ["RUNDIR"], "context-watch-silenced.log")
+    try:
+        if os.path.getsize(path) > 262144:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+    try:
+        with open(path, "a") as f:
+            f.write("%s %s sid=%s ctx=%dK %s\n" % (
+                time.strftime("%Y-%m-%dT%H:%M:%S%z"), where, re.sub(r"[^A-Za-z0-9_-]", "", sid),
+                ctx_tokens // 1000, why))
+    except OSError:
+        pass
+
+
 agent_id = os.environ.get("CW_AGENT_ID") or ""
-if agent_id:
+# A T3 delegated lane is not an in-process subagent: T3 starts it as its own top-level
+# claude process, so its hooks carry NO agent_id and used to take the foreman branch
+# below (the foreman's compaction text, which a lane cannot act on). lane-class names
+# it. PostToolUse only: in stop and the readout a T3 lane is silenced where the text
+# would print (session_is_lane). The classifier is asked only in posttool, only inside
+# T3, and cached per session (lane_class), because posttool runs after every tool call.
+t3_lane = False
+if not agent_id and mode == "posttool" and os.environ.get("IN_T3"):
+    t3_lane = session_is_lane()
+if agent_id or t3_lane:
     # A lane speaks ONLY mid-turn via PostToolUse. Its own end fires SubagentStop
     # (unregistered in settings.json), and blocking a stop would force the lane to
     # CONTINUE, not return; so stop/readout in a lane are silent.
     if mode != "posttool":
         sys.exit(0)
-    import glob
-    # The hook input's transcript_path is the MAIN transcript even here, so derive
-    # the lane's own transcript to weigh the lane's context, not the session's.
-    base = tp[:-6] if tp.endswith(".jsonl") else tp
-    lane_tp = os.path.join(base, "subagents", "agent-%s.jsonl" % agent_id)
-    if not os.path.isfile(lane_tp):
-        lane_tp = next(iter(glob.glob(
-            os.path.join(glob.escape(base), "subagents", "**", "agent-%s.jsonl" % glob.escape(agent_id)),
-            recursive=True)), "")
-    if not lane_tp or not os.path.isfile(lane_tp):
-        sys.exit(0)  # cannot locate the lane transcript: fail open, stay silent
+    if agent_id:
+        import glob
+        # The hook input's transcript_path is the MAIN transcript even here, so derive
+        # the lane's own transcript to weigh the lane's context, not the session's.
+        base = tp[:-6] if tp.endswith(".jsonl") else tp
+        lane_tp = os.path.join(base, "subagents", "agent-%s.jsonl" % agent_id)
+        if not os.path.isfile(lane_tp):
+            lane_tp = next(iter(glob.glob(
+                os.path.join(glob.escape(base), "subagents", "**", "agent-%s.jsonl" % glob.escape(agent_id)),
+                recursive=True)), "")
+        if not lane_tp or not os.path.isfile(lane_tp):
+            sys.exit(0)  # cannot locate the lane transcript: fail open, stay silent
+        lane_key = agent_id
+    else:
+        # A T3 lane's transcript_path IS its own transcript. Its throttle keys on the
+        # session id (unique per lane process), under a "t3-" prefix so it cannot
+        # collide with an agent_id key.
+        lane_tp = tp
+        lane_key = "t3-" + sid
     lctx, lmodel = 0, ""
     try:
         lsize = os.path.getsize(lane_tp)
@@ -414,10 +563,11 @@ if agent_id:
     else:
         remind_at, wrap_at = lwin * remind_pct // 100, lwin * wrap_pct // 100
         stage = 2 if lctx >= wrap_at else 1 if lctx >= remind_at else 0
-    # Throttle per LANE: session_id in a lane is the MAIN id, so keying on it
-    # would let concurrent lanes share one throttle. agent_id is unique per lane.
-    # State: "<last injected ctx> <its stage>".
-    lstate = os.path.join(os.environ["RUNDIR"], "lane-%s" % re.sub(r"[^A-Za-z0-9_-]", "", agent_id)[:64])
+    # Throttle per LANE: session_id in an in-process lane is the MAIN id, so keying on
+    # it would let concurrent lanes share one throttle. agent_id is unique per lane. A
+    # T3 lane has its own session id and keys on that. State: "<last injected ctx> <its
+    # stage>".
+    lstate = os.path.join(os.environ["RUNDIR"], "lane-%s" % re.sub(r"[^A-Za-z0-9_-]", "", lane_key)[:64])
     last_l = last_stage = 0
     try:
         with open(lstate) as f:
@@ -562,6 +712,13 @@ if mode == "readout":
         sys.exit(0)
     pct0 = int(round(100.0 * ctx / win))
     at_boundary, _why = detect_boundary(tp)
+    if (at_boundary and ctx >= BREAK_TURN) or ctx >= LONG_TURN:
+        # Both texts below send the session to the compact ritual, which a lane cannot
+        # use: stay silent for a definite lane (the plain headroom line below names no
+        # route and needs no lane check).
+        if session_is_lane():
+            log_silenced("readout", ctx, "lane")
+            sys.exit(0)
     if at_boundary and ctx >= BREAK_TURN:
         # A real break AND a turn heavy enough to be worth the nudge. Rest-stop
         # framing, never pressure: a compact here is hygiene, not scarcity.
@@ -648,6 +805,17 @@ if mode == "posttool":
 
 # stop mode: fire on tier escalation, on the every-stop tier, or after enough growth.
 if not (tier > last_tier or gap == 0 or not last_ctx or ctx >= last_ctx + gap):
+    sys.exit(0)
+
+# A nag only works on a session that can compact itself. A lane (a T3 delegated task, or
+# a subagent thread) cannot: it declines the nag, as its brief tells it to, after a
+# full-context turn read just to refuse it, or tries and stalls. Silence requires
+# positive lane evidence; an unresolved session is a foreman and still needs the warning.
+# Before the state write on purpose: a silent exit must not use up the throttle. The
+# lane's own wrap-up text comes through PostToolUse above; a Stop block would force a
+# lane to continue.
+if session_is_lane():
+    log_silenced("stop", ctx, "lane-class")
     sys.exit(0)
 
 # Record BEFORE blocking so a crash can never nag-spam.

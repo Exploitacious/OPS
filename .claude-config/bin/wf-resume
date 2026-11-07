@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+"""wf-resume: find the workflow lanes that never returned and print how to relaunch them.
+
+Why it exists. A usage-limit hold (or a crash, or a restart) ends every running
+lane of a dynamic workflow at the same second. No task notification says so:
+the workflow just never returns, and the foreman used to read the journal, each
+lane's transcript tail and each worktree by hand to find out what died. This
+reads the same files, read-only, and prints the answer.
+
+What it reads, per run (all under <projects>/<workspace>/<session id>/):
+  subagents/workflows/<run id>/journal.jsonl     rows: launched, started, result, failed
+  subagents/workflows/<run id>/agent-<id>.jsonl  each lane's transcript
+  workflows/scripts/<name>-<run id>.js           the persisted script the relaunch needs
+
+A lane's final state is its key's last journal row. `started` with no later
+`result` or `failed` means it never returned. Such a lane is reported as
+  interrupted  its transcript ends on "[Request interrupted by user]" (a hold or
+               a stop killed it: dead, not slow),
+  idle         no transcript activity for --stale-min minutes (default 15; a long
+               tool call can be quiet for several minutes, so this is advisory),
+  active       activity inside that window: probably still running. Do not
+               relaunch it: a second copy writes the same worktree.
+For each lane that worked in a linked git worktree it also prints the worktree's
+branch, changed-file count, commits ahead of the default branch and last commit,
+all with read-only git commands (git --no-optional-locks, so even `status` leaves
+the index and its lock alone). Nothing is written, killed or relaunched.
+
+Usage:
+  wf-resume                      list this session's runs ($CLAUDE_CODE_SESSION_ID)
+  wf-resume --session ID         list another session's runs
+  wf-resume RUN                  detail one run: a run id (wf_...), a transcript dir
+                                 or a journal.jsonl path
+  wf-resume ... --json           the same facts as JSON
+Exit status: 0 nothing never returned, 1 at least one lane never returned,
+2 a usage or read error.
+
+Environment: WF_RESUME_PROJECTS (colon-separated projects directories; default
+${CLAUDE_CONFIG_DIR:-~/.claude}/projects and ~/.claude-personal/projects).
+WF_RESUME_TZ (an IANA zone name such as Europe/Berlin) sets the zone times are
+printed in; the default is this machine's local zone.
+"""
+import argparse, datetime, glob, json, os, subprocess, sys
+from zoneinfo import ZoneInfo
+
+# Times print in the machine's local zone unless WF_RESUME_TZ names one. A bad name
+# is a usage error, never a silent fallback to a zone the reader did not ask for.
+_TZ_NAME = os.environ.get("WF_RESUME_TZ")
+try:
+    LOCAL_TZ = ZoneInfo(_TZ_NAME) if _TZ_NAME else None
+except Exception:
+    print("wf-resume: WF_RESUME_TZ is not an IANA zone name: %r" % _TZ_NAME, file=sys.stderr)
+    sys.exit(2)
+RESUME_NOTE = (
+    "RESUMED RUN: a usage-limit hold or a restart stopped this lane mid-run. Before anything else, "
+    "read your worktree's state (git status, git log <base>..HEAD, git diff): partial commits and edits "
+    "survive. Keep sound work, never reset, stash or discard it, finish what remains, and push without force."
+)
+
+p = argparse.ArgumentParser(description="List workflow lanes that never returned and print the relaunch command.")
+p.add_argument("run", nargs="?", help="a run id (wf_...), a transcript dir, or a journal.jsonl path")
+p.add_argument("--session", default=None, help="session id to list (default $CLAUDE_CODE_SESSION_ID)")
+p.add_argument("--stale-min", type=float, default=15.0, help="minutes without lane activity before an unreturned lane reads as idle (default 15)")
+p.add_argument("--json", action="store_true", help="print JSON instead of text")
+p.add_argument("--now", default=None, help="ISO clock to age lanes against (tests)")
+a = p.parse_args()
+
+
+def die(msg):
+    """Usage and read errors exit 2, so exit 1 always means "a lane never returned"."""
+    print(msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def parse(t):
+    try:
+        dt = datetime.datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+
+NOW = parse(a.now) if a.now else datetime.datetime.now(datetime.timezone.utc)
+if NOW is None:
+    p.error("--now: not an ISO time: %r" % a.now)
+
+
+def dur(minutes):
+    """Minutes as a short human span: 12 min, 5.5 h, 3 d."""
+    if minutes is None:
+        return "unknown"
+    if minutes < 90:
+        return "%d min" % round(minutes)
+    if minutes < 48 * 60:
+        return "%.1f h" % (minutes / 60)
+    return "%d d" % round(minutes / 1440)
+
+
+def et(dt):
+    """A timestamp as month-day hour:minute zone in the configured or local zone."""
+    return dt.astimezone(LOCAL_TZ).strftime("%m-%d %H:%M %Z") if dt else "unknown"
+
+
+def roots():
+    env = os.environ.get("WF_RESUME_PROJECTS")
+    if env:
+        return [r for r in env.split(":") if r]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    out = [os.path.join(cfg, "projects")]
+    personal = os.path.expanduser("~/.claude-personal/projects")
+    if personal not in out:
+        out.append(personal)
+    return [r for r in out if os.path.isdir(r)]
+
+
+def runs_of_session(session):
+    found = []
+    for r in roots():
+        found += glob.glob(os.path.join(r, "*", session, "subagents", "workflows", "wf_*"))
+    return sorted({d for d in found if os.path.isfile(os.path.join(d, "journal.jsonl"))},
+                  key=lambda d: os.path.getmtime(os.path.join(d, "journal.jsonl")), reverse=True)
+
+
+def resolve_run(arg):
+    if os.path.isfile(arg) and os.path.basename(arg) == "journal.jsonl":
+        return [os.path.dirname(os.path.abspath(arg))]
+    if os.path.isdir(arg) and os.path.isfile(os.path.join(arg, "journal.jsonl")):
+        return [os.path.abspath(arg)]
+    found = []
+    for r in roots():
+        found += glob.glob(os.path.join(r, "*", "*", "subagents", "workflows", arg + "*"))
+    return sorted({d for d in found if os.path.isfile(os.path.join(d, "journal.jsonl"))})
+
+
+def read_jsonl(path):
+    rows, bad = [], 0
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    bad += 1
+                    continue
+                if isinstance(d, dict):
+                    rows.append(d)
+    except OSError as e:
+        die("wf-resume: cannot read %s: %s" % (path, e))
+    return rows, bad
+
+
+def tail_records(path, nbytes=65536):
+    """The last parseable records of a (possibly huge) transcript."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - nbytes))
+            data = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    lines = data.splitlines()
+    if size > nbytes:
+        lines = lines[1:]  # the first line is a fragment
+    out = []
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def record_text(d):
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(str(x.get("text", "")) for x in c if isinstance(x, dict))
+    return ""
+
+
+def git(cwd, *args):
+    # --no-optional-locks on every call: a plain `git status` refreshes the index
+    # stat cache and rewrites .git/index under index.lock, which is a write to a
+    # live lane's worktree and can collide with that lane's own add or commit.
+    # With the option status only reads (refutation of hfr/skills-ops).
+    try:
+        r = subprocess.run(["git", "--no-optional-locks", "-C", cwd, *args], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def worktree_state(cwd):
+    """Read-only state of a linked git worktree, or None when cwd is not one."""
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    gd, common = git(cwd, "rev-parse", "--git-dir"), git(cwd, "rev-parse", "--git-common-dir")
+    if gd is None or common is None:
+        return None
+    if os.path.realpath(os.path.join(cwd, gd)) == os.path.realpath(os.path.join(cwd, common)):
+        return {"path": cwd, "linked": False}
+    status = git(cwd, "status", "--short")
+    base = None
+    head = git(cwd, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    for cand in ([head] if head else []) + ["refs/remotes/origin/master", "refs/remotes/origin/main", "refs/heads/master", "refs/heads/main"]:
+        if git(cwd, "rev-parse", "--verify", "--quiet", cand):
+            base = cand
+            break
+    ahead = git(cwd, "rev-list", "--count", base + "..HEAD") if base else None
+    return {
+        "path": cwd, "linked": True,
+        "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
+        "changed_files": len(status.splitlines()) if status else 0,
+        "ahead_of": base.replace("refs/remotes/", "").replace("refs/heads/", "") if base else None,
+        "ahead": int(ahead) if ahead and ahead.isdigit() else None,
+        "last_commit": git(cwd, "log", "-1", "--format=%h %s"),
+    }
+
+
+def analyze(run_dir):
+    run_id = os.path.basename(run_dir)
+    journal = os.path.join(run_dir, "journal.jsonl")
+    rows, bad = read_jsonl(journal)
+    lanes = {}   # key -> final state, in first-seen order
+    for r in rows:
+        t, key = r.get("type"), r.get("key") or r.get("agentId")
+        if t not in ("started", "result", "failed") or not key:
+            continue
+        cur = lanes.setdefault(key, {"key": key, "label": None, "phase": None, "agent_id": None, "state": t})
+        cur["state"] = t
+        if t == "started":
+            cur.update(label=r.get("label") or cur["label"], phase=r.get("phase") or cur["phase"], agent_id=r.get("agentId"))
+        elif r.get("agentId"):
+            cur["agent_id"] = r.get("agentId")
+    never, failed, returned = [], [], 0
+    for lane in lanes.values():
+        if lane["state"] == "result":
+            returned += 1
+            continue
+        tpath = os.path.join(run_dir, "agent-%s.jsonl" % lane["agent_id"]) if lane["agent_id"] else None
+        meta = {}
+        if lane["agent_id"]:
+            try:
+                meta = json.load(open(os.path.join(run_dir, "agent-%s.meta.json" % lane["agent_id"])))
+            except Exception:
+                meta = {}
+        lane["label"] = lane["label"] or meta.get("description") or lane["key"]
+        lane["phase"] = lane["phase"] or meta.get("workflowPhase")
+        recs = tail_records(tpath) if tpath and os.path.isfile(tpath) else []
+        stamps = [parse(d.get("timestamp")) for d in recs if d.get("timestamp")]
+        stamps = [s for s in stamps if s]
+        last = max(stamps) if stamps else None
+        if last is None and tpath and os.path.isfile(tpath):
+            last = datetime.datetime.fromtimestamp(os.path.getmtime(tpath), datetime.timezone.utc)
+        age = (NOW - last).total_seconds() / 60 if last else None
+        interrupted = any("[Request interrupted" in record_text(d) for d in recs[-6:])
+        cwd = next((d.get("cwd") for d in reversed(recs) if d.get("cwd")), None)
+        if lane["state"] == "failed":
+            status = "failed"
+        elif interrupted:
+            status = "interrupted"
+        elif age is None:
+            status = "no-transcript"
+        elif age >= a.stale_min:
+            status = "idle"
+        else:
+            status = "active"
+        entry = {
+            "key": lane["key"], "label": lane["label"], "phase": lane["phase"], "agent_id": lane["agent_id"],
+            "status": status, "transcript": tpath if tpath and os.path.isfile(tpath) else None,
+            "last_activity": last.isoformat() if last else None, "age_min": round(age, 1) if age is not None else None,
+            "last_record_type": recs[-1].get("type") if recs else None, "interrupted": interrupted,
+            "worktree": worktree_state(cwd) if cwd else None, "cwd": cwd,
+        }
+        (failed if lane["state"] == "failed" else never).append(entry)
+    session_dir = os.path.dirname(os.path.dirname(os.path.dirname(run_dir)))
+    scripts = sorted(glob.glob(os.path.join(session_dir, "workflows", "scripts", "*-%s.js" % run_id)))
+    script = scripts[0] if scripts else None
+    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(journal), datetime.timezone.utc)
+    return {
+        "run": run_id, "dir": run_dir, "journal_rows": len(rows), "journal_unparsed_rows": bad,
+        "journal_last_write": mtime.isoformat(), "journal_age_min": round((NOW - mtime).total_seconds() / 60, 1),
+        "script": script,
+        "counts": {"started": len(lanes), "returned": returned, "failed": len(failed), "never_returned": len(never)},
+        "never_returned": never, "failed": failed,
+        "relaunch": 'Workflow({scriptPath: "%s", resumeFromRunId: "%s"})' % (script, run_id) if script else None,
+    }
+
+
+def lane_lines(e):
+    out = ["  %s  (phase %s, agent %s)" % (e["label"], e["phase"] or "?", e["agent_id"] or "?")]
+    if e["status"] == "interrupted":
+        out.append("    INTERRUPTED: its transcript ends on \"[Request interrupted by user]\", last activity %s (%s ago). Dead, not slow." % (
+            et(parse(e["last_activity"])) if e["last_activity"] else "unknown", dur(e["age_min"])))
+    elif e["status"] == "idle":
+        out.append("    idle %s (last activity %s, last record: %s). Probably dead; confirm the workflow task has ended." % (
+            dur(e["age_min"]), et(parse(e["last_activity"])), e["last_record_type"]))
+    elif e["status"] == "active":
+        out.append("    ACTIVE %s ago (last record: %s). Probably still running: do not relaunch it." % (dur(e["age_min"]), e["last_record_type"]))
+    elif e["status"] == "failed":
+        out.append("    FAILED: the runtime recorded an error for it; the script resolved it to null.")
+    else:
+        out.append("    no transcript file for this lane (agent %s)." % (e["agent_id"] or "unknown"))
+    w = e["worktree"]
+    if w and w.get("linked"):
+        out.append("    worktree %s: branch %s, %s changed file(s), %s commit(s) ahead of %s, last commit \"%s\"" % (
+            w["path"], w["branch"], w["changed_files"], w["ahead"] if w["ahead"] is not None else "?", w["ahead_of"] or "the default branch", w["last_commit"]))
+    elif e["cwd"]:
+        out.append("    worked in %s (not a linked worktree: partial edits are in that checkout)" % e["cwd"])
+    return out
+
+
+def render(r):
+    c = r["counts"]
+    out = ["run %s: %d lanes started, %d returned, %d failed, %d never returned" % (r["run"], c["started"], c["returned"], c["failed"], c["never_returned"]),
+           "journal last written %s (%s ago); %s" % (et(parse(r["journal_last_write"])), dur(r["journal_age_min"]), r["dir"])]
+    if r["journal_unparsed_rows"]:
+        out.append("note: %d journal row(s) could not be parsed and were skipped" % r["journal_unparsed_rows"])
+    if r["never_returned"]:
+        out.append("")
+        out.append("NEVER RETURNED (%d):" % len(r["never_returned"]))
+        for e in r["never_returned"]:
+            out += lane_lines(e)
+    if r["failed"]:
+        out.append("")
+        out.append("FAILED (%d; returned an error, decide whether each needs a rerun):" % len(r["failed"]))
+        for e in r["failed"]:
+            out += lane_lines(e)
+    if r["never_returned"]:
+        out += ["", "RELAUNCH"]
+        if r["relaunch"]:
+            out.append("  %s" % r["relaunch"])
+            out.append("  Lanes that returned replay from cache; the lanes above run live. If no lane returned, nothing replays and it is a full rerun.")
+        else:
+            out.append("  The persisted script for %s was not found under workflows/scripts/. The launch result named it (\"Script file: ...\"); relaunch with that path and resumeFromRunId \"%s\"." % (r["run"], r["run"]))
+        out += [
+            "  Before you relaunch:",
+            "   1. Confirm the workflow task ended (no running task for it). An ACTIVE lane means it may be alive, and a second copy writes the same worktree.",
+            "   2. Never SendMessage a workflow lane, finished or running: it forks a copy or errors. Relaunch the script.",
+            "   3. Put the resume note below in the prompt of the never-returned lanes only. Editing a returned lane's prompt makes it miss the cache and run again.",
+            "   4. If you took over a lane's branch (fixes, review, retest), skip that lane in the script first, or the resume re-runs its stages against the branch as it is now.",
+            "  Resume note: %s" % RESUME_NOTE,
+        ]
+    return out
+
+
+# --- main ---------------------------------------------------------------------
+
+if a.run:
+    dirs = resolve_run(a.run)
+    if not dirs:
+        die("wf-resume: no workflow run matches %r under %s" % (a.run, ", ".join(roots()) or "any projects directory"))
+    if len(dirs) > 1:
+        die("wf-resume: %r matches %d runs, name one:\n  %s" % (a.run, len(dirs), "\n  ".join(dirs)))
+    result = analyze(dirs[0])
+    if a.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("\n".join(render(result)))
+    sys.exit(1 if result["never_returned"] else 0)
+
+session = a.session or os.environ.get("CLAUDE_CODE_SESSION_ID")
+if not session:
+    die("wf-resume: no run given and no session (set CLAUDE_CODE_SESSION_ID or pass --session ID or a run id)")
+results = [analyze(d) for d in runs_of_session(session)]
+if a.json:
+    print(json.dumps(results, indent=2))
+else:
+    if not results:
+        print("session %s: no workflow runs found" % session)
+    for r in results:
+        c = r["counts"]
+        flag = "NEVER RETURNED %d" % c["never_returned"] if c["never_returned"] else ("%d failed, rest returned" % c["failed"] if c["failed"] else "all returned")
+        print("%s  %d started, %d returned, %d failed  %s  (journal %s)" % (r["run"], c["started"], c["returned"], c["failed"], flag, et(parse(r["journal_last_write"]))))
+    dead = [r for r in results if r["never_returned"]]
+    if dead:
+        print("\nDetail: wf-resume <run id> for each run flagged NEVER RETURNED (%s)." % ", ".join(r["run"] for r in dead))
+sys.exit(1 if any(r["never_returned"] for r in results) else 0)

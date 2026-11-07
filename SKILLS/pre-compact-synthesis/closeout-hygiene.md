@@ -39,9 +39,11 @@ This session's entries plus the flush queue. Read `~/.claude-compact-cycle/memor
 
 Ask the last two explicitly per line: is this universal? is this a ruling? A universal habit and a project lesson read identically from the inside, and no content heuristic separates them. The two promotion dispositions exist because "kept" silently absorbs both classes otherwise: a routing audit found that most of the entries it moved out of a pool were exactly those two. Single-project material folds to that project's own docs tree by PR when the repo has one the team reads (a pointer stays in its lessons file), else into `CONTEXT/projects/<project>-lessons.md`, and the source entry is deleted once it lands; the startup read-order already routes project sessions to their lessons file. Deferring the evaluation to `/memory-prune` is NOT a disposition. The prune drains leftover queue lines as a quarterly backstop, not the routine path; treating it as routine is what produces a backlog.
 
-Terminal projects. Any project touched this session that is now CLOSED, SHIPPED, or PARKED: fold whatever is durable from its memory entries to that project's home per the routing above, then delete the entries and their index lines. Closed projects hold no cache lines.
+Deletion authority. A closeout deletes a memory entry only after its content has landed in its home (folded, split, or promoted). Evicting for budget an entry whose content has not landed anywhere, and discarding an entry outright, wait for the operator's yes (`memory-prune`, Guardrails, holds the why: deleting a live-verified vendor, host, or credential fact forces painful re-discovery). A wrong entry is corrected by editing it, never by deleting it.
 
-Budget check. If MEMORY.md exceeds the ~20KB soft budget, evict the stalest entries down to budget (fold first if durable, then delete). Deletion is safe; the mirror is git-synced, nothing is lost.
+Terminal projects. Any project touched this session that is now CLOSED, SHIPPED, or PARKED: fold whatever is durable from its memory entries to that project's home per the routing above, then delete the entries and their index lines under the deletion rule above. Closed projects hold no cache lines.
+
+Budget check. If MEMORY.md exceeds the ~20KB soft budget, evict the stalest entries until it fits: fold first if durable, then delete under the deletion rule above. A pool is also easier to use under about 60 entries: `memory-index --check <pool dir>` prints a warning above that count (its exit status does not change) and verify-ops warns about such a pool. Neither removes anything (a warning is an offer to run `memory-prune`, never an automatic eviction), and `memory-index --find <words>` searches a pool by hand. A generic shell, git, Python, CI or Claude Code CLI gotcha that spans projects folds into one shared file, `CONTEXT/projects/shell-git-gotchas.md` (create it on first use, one heading per entry name), not into one project's lessons file.
 
 Whenever you update a memory entry's BODY, update its frontmatter `description:` in the same edit. MEMORY.md is a DERIVED artifact: the SessionStart `memory-index.sh` hook regenerates it from frontmatter every boot, so an index-only edit silently reverts. Frontmatter is the only durable layer. Regenerate the index mid-session with `MEMORY_INDEX_DEBUG=1 MEMORY_INDEX_DIR=<mem-dir> ~/OPS/.claude-config/hooks/memory-index.sh </dev/null` if you need it current.
 
@@ -49,11 +51,14 @@ Whenever you update a memory entry's BODY, update its frontmatter `description:`
 
 For each repo this session changed: does CHANGELOG.md have a line for what landed? Is any IDEAS.md or backlog entry now shipped and removable? Did the change make any README or doc claim false? Fix in the same closeout. "I'll fix the docs in a follow-up" is the P1 violation this stage exists to kill.
 
-## 4. Sweep the scratch
+## 4. Clean up what this session made, and say what it freed
 
-Temp files at repo roots or `$HOME` that this session created get deleted (if disposable) or moved to their real home (if deliverables). Never delete something you did not create this session without operator approval.
+Sessions and lanes on one box share one disk, and a full disk stops every one of them, so each session cleans up its own work. Do it in this order, and put what each step freed into the report (`df -h /` before and after is enough, plus Docker's own "reclaimed" figures):
 
-Branches and worktrees are not swept by hand. Run `~/OPS/.claude-config/bin/branch-gc --apply <repo>` on each repo this session touched and surface any report row it produced (a merged branch in a dirty worktree, the main checkout left on a merged branch). Worktrees go to a 7-day trash under `~/.local/state/ops/branch-gc-trash/` and come back with `branch-gc --restore <entry>`. A local branch goes only after its PR merged, or when the default branch already holds every commit it carried; `gh` must be signed in for the merged-PR evidence, and without it branch-gc reports and removes nothing. The PreCompact hook runs the same `--apply` for the repo holding the cwd, and the nightly sync runs it on every repo. Never delete a pushed branch or a worktree you did not create without the operator's word.
+1. Files this session created at repo roots or `$HOME` get deleted (if disposable) or moved to their real home (if deliverables). Never delete something you did not create this session without operator approval.
+2. Branches and worktrees are not swept by hand. Run `~/OPS/.claude-config/bin/branch-gc --apply <repo>` on each repo this session touched and surface any report row it produced (a merged branch in a dirty worktree, the main checkout left on a merged branch). Worktrees go to a 7-day trash under `~/.local/state/ops/branch-gc-trash/` and come back with `branch-gc --restore <entry>`. A local branch goes only after its PR merged, or when the default branch already holds every commit it carried; `gh` must be signed in for the merged-PR evidence, and without it branch-gc reports and removes nothing. The PreCompact hook runs the same `--apply` for the repo holding the cwd, and the nightly sync runs it on every repo. Never delete a pushed branch or a worktree you did not create without the operator's word.
+3. Docker: remove the containers, images and volumes this session built or started, by the names and ids its own commands used (`docker rm -f <container>`, `docker image rm <image>`, `docker volume rm <volume>`; `docker builder prune -f --filter until=1h` after a session's builds). Never `docker system prune` or a bare `docker image prune -a`: other sessions' images and containers live on the same daemon.
+4. `$TMPDIR` scratch: remove the directories and files this session made under `$TMPDIR` by their exact paths, never a glob. Leave Claude Code's own session directories there.
 
 ## 5. Reconcile pending items
 
@@ -62,6 +67,7 @@ Pending work lives in each repo's backlog file (`IDEAS.md`, per `CONTEXT/project
 - Delete any line this session's work or an operator statement completed or obsoleted (delete a line the moment it is done; a checked box is a graveyard).
 - Correct any line whose facts drifted (counts, gates, what is actually blocking).
 - Route new pending work to the home the repo's backlog convention names, keeping operator actions (things only the operator can do), agent follow-ups, and open decisions apart so each reader finds only what is theirs.
+- Close this session's open asks (the ask card in `SKILL.md`) that the operator answered or the work made moot, so a backlog never carries a finished question.
 
 ## 6. Update the operator's notes vault (optional)
 

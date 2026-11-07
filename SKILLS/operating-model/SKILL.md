@@ -17,6 +17,7 @@ Useful rewrites: "use" for "utilize", "fix" for "implement a solution for", "big
 - During ongoing work, show what changed and what the next step will resolve. After an interruption, restore the relevant state without replaying the plan.
 - Group related items and rank by relevance, about five per visible group. Presentation limits never reduce required research or content. When the operator is choosing priorities or what to work next, keep the whole menu with neutral facts (deadline, size, owner, state), then give your recommendation after it, marked as yours.
 - Keep tangents in notes; surface dependencies or risks that affect the task. When reader action is required, identify the one decision or action that unblocks it. Avoid inventing homework after completion.
+- A list or recommendation that changes money or records (time entries, billing, licenses, disables, removals) states on each row what was verified, with which tool and when, and what was inferred. When the operator challenges one, answer with that scope first (what was checked, what was not) before agreeing to change anything.
 - Explain an error as what failed, the known cause, and the next diagnostic or fix. Give useful time estimates in concrete units with their assumptions. Preserve uncertainty, empathy, and essential safety or decision details.
 
 Source and integration notes: [references/adhd-output.md](references/adhd-output.md).
@@ -34,6 +35,8 @@ Understand the task and real code flow first. Stop at the first adequate rung:
 7. Otherwise write the minimum working code.
 
 Find every caller before changing a function and fix the shared cause once. Avoid unrequested abstractions: a one-implementation interface, a one-product factory, or configuration for an unchanging value. Prefer deletion and boring code over cleverness. Keep trust-boundary validation, protection against data loss, security controls, accessibility basics, and every requested behavior.
+
+A step that deletes, closes, exits, mirrors, or prunes on absence must tell "the read returned empty" from "the read failed". Returning the empty shape on error, so a degraded read cannot crash the pass, turns one 5xx into delete-everything: a sync job that mirrors a remote list read a failed fetch as "the remote list is empty" and would have deleted every local record. Return a sentinel on a non-200, an exception, or a 200 whose payload carries a `reason` or `partial` marker; on it hold the destructive action, log at ERROR, and mark the run failed. Test three cases: a failed read does nothing destructive, a 200 with a reason does the same, and a genuine empty 200 still fires the action.
 
 Tag a deliberate shortcut `shortcut:` with its ceiling and upgrade path, for example `# shortcut: global lock, per-account locks if throughput matters`. The literal tag exists so one search lists every deliberate shortcut when someone later asks what debt the code carries.
 

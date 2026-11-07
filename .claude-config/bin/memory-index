@@ -19,9 +19,8 @@
 # write appended a line by hand. Cross-machine sync (additive `cp` + git)
 # clobbers a hand-maintained index because nothing keeps it equal to the
 # set of files actually present. Deriving it from frontmatter ends that
-# clobber class (the 2026-06-25 memory-index-generated lesson and the
-# 2026-05-13 memory-sync decision, both retired with the fleet protocol; read
-# them in git history).
+# clobber class (the memory-index-generated lesson and the memory-sync
+# decision, both retired with the fleet protocol; read them in git history).
 #
 # Profile-agnostic: this operates on whatever directory it's pointed at:
 # your primary ~/.claude profile, or a second profile if you run one via
@@ -30,8 +29,17 @@
 #
 # Frontmatter is parsed BY HAND (no PyYAML dependency: it isn't guaranteed
 # installed). Only the simple top-level `title:`/`description:`/`name:` keys
-# and the nested `metadata.type:` key are read; both quoted and unquoted
-# scalar values are supported.
+# and the nested `metadata.type:`, `metadata.modified:` and `metadata.pinned:`
+# keys are read; both quoted and unquoted scalar values are supported.
+#
+# The index label of a file is its `title:`, else its `name:` (Title Cased the
+# way the kebab fallback does, so an index regenerated after this fix is
+# byte-identical to the one the old fallback wrote and tracked MEMORY.md files
+# do not churn), else the kebab form of the file name. The pool entry format
+# the harness writes (the digest's "Write:" line) carries `name:` and no
+# `title:`, so before that fix every such entry read as "missing title" and
+# `--check` exited 2 on a large pool; only a file with neither key is a
+# problem now.
 #
 # Ordering (documented + stable): files are grouped by `metadata.type` in a
 # fixed precedence (project, feedback, reference, then any other type
@@ -42,22 +50,63 @@
 # Usage:
 #   memory-index <DIR>            # rewrite <DIR>/MEMORY.md in place
 #   memory-index --check <DIR>    # print generated index to stdout; write nothing
+#   memory-index --digest [--cwd DIR] [--ops DIR]
+#                                 # print the memory digest; write nothing
+#   memory-index --hint [--cwd DIR] [--ops DIR]
+#                                 # UserPromptSubmit hook JSON on stdin; print at most
+#                                 # three "Relevant memory:" lines for a strong match
+#   memory-index --find [--cwd DIR] [--ops DIR] [--limit N] <words...>
+#                                 # the same scorer by hand: top matches with scores
+#   memory-index --digest-fit <DIR>...
+#                                 # per pool: entries, described, by name only, not shown
 #   memory-index -h | --help
 #
 # Exit codes:
 #   0: success (index written, or --check printed)
 #   1: error (bad args, unreadable dir)
-#   2: at least one file could not contribute a line (missing title AND
-#       no derivable fallback). The index is still emitted/written for the
-#       files that are fine; the offenders are reported on stderr. Lets a
-#       caller detect "backfill needed" without losing good lines.
+#   2: at least one file could not contribute a line (neither title: nor
+#      name:, or no frontmatter). The index is still emitted/written for the
+#      files that are fine; the offenders are reported on stderr. Lets a
+#      caller detect "backfill needed" without losing good lines.
+#   --digest always exits 0: it prints the digest or its one-line failure
+#   notice. --digest-fit exits 1 when a pool could not be measured.
+#
+# A pool of more than POOL_CAP (60) entries is a WARN on stderr and nothing
+# else: the index is still written, the exit status does not change, and no
+# entry is ever removed. The digest can describe only about 40 entries in its
+# budget, so a larger pool loses descriptions at the tail; the warning names the
+# fix (the memory-prune skill) and leaves the decision with the pool's owner.
+#
+# Digest mode. hooks/memory-digest.sh prints this digest at SessionStart when
+# Claude Code's native auto-memory is off (the Stage-1 settings turn it off), so
+# the session still loads its pools; with the native load on, the hook is
+# silent and this mode is a look at what a pool would show.
+# It lives beside the index writer so the index and the digest read frontmatter
+# through one parser and cannot drift apart. It reads entry frontmatter, never
+# MEMORY.md, so a stale or missing index cannot hide an entry, and an entry
+# written mid-session shows up at the next compact. It never writes or creates
+# anything. The block carries a short header (the pool path and the write rule),
+# this directory's pool, and, when that pool is not the OPS root pool, the root
+# pool's cross-project entries (every type but project: the root's project
+# entries are workstream state of the OPS copy itself). Without that section a
+# thread rooted in a project repo never saw the root pool, which contradicts the
+# core's routing of generic gotchas there. Budget and order are documented at
+# DIGEST_CAP and digest_order below.
 
+import collections
+import json
+import math
 import os
 import re
+import socket
+import stat
+import subprocess
 import sys
 import tempfile
+import time
 
-USAGE = "usage: memory-index [--check] <DIR>"
+USAGE = ("usage: memory-index [--check] <DIR> | --digest [--cwd DIR] [--ops DIR] | "
+         "--hint [--cwd DIR] [--ops DIR] | --find [--cwd DIR] [--ops DIR] [--limit N] <words...>")
 
 # The index line separator (see the header): an em dash between spaces.
 INDEX_SEP = " \u2014 "
@@ -78,20 +127,27 @@ def kebab_to_title(name):
     return " ".join(w[:1].upper() + w[1:] for w in words if w)
 
 
-def parse_frontmatter(path):
+def parse_frontmatter(path, limit=None, errors="strict"):
     """Parse the leading `---`-delimited frontmatter block by hand.
 
-    Returns a dict with keys: title, description, name, type (any may be
-    None / absent). Does NOT depend on PyYAML. Handles:
-      - top-level `key: value` scalars (title, description, name)
-      - the nested `metadata:` map's `type:` child (two-space indent)
+    Returns a dict with keys: title, description, name, type, modified,
+    pinned (any may be None / absent; pinned is a bool). Does NOT depend on
+    PyYAML. Handles:
+      - top-level `key: value` scalars (title, description, name, modified)
+      - the nested `metadata:` map's `type:`, `modified:` and `pinned:`
+        children (two-space indent; Claude Code 2.1.306 nests its provenance
+        stamp there, older files carry a top-level `modified:`)
       - single- or double-quoted values (quotes stripped)
     Only the first frontmatter block is read; the file body is ignored.
+    The digest passes limit (characters read) and errors="replace" so one
+    huge or non-UTF-8 entry costs bounded work and never fails the block;
+    the index writer keeps its original whole-file strict read.
     """
-    out = {"title": None, "description": None, "name": None, "type": None}
+    out = {"title": None, "description": None, "name": None, "type": None,
+           "modified": None, "pinned": False}
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+        with open(path, "r", encoding="utf-8", errors=errors) as fh:
+            lines = (fh.read(limit) if limit else fh.read()).splitlines()
     except OSError:
         return out
 
@@ -111,7 +167,6 @@ def parse_frontmatter(path):
             continue
         # Indented line -> child of the most recent map key (we only care
         # about metadata.type, which is indented under `metadata:`).
-        indented = line[0] in (" ", "\t")
         m = re.match(r"^(\s*)([A-Za-z0-9_.-]+):\s*(.*)$", line)
         if not m:
             continue
@@ -127,10 +182,19 @@ def parse_frontmatter(path):
                 out["description"] = val or None
             elif key == "name":
                 out["name"] = val or None
+            elif key == "modified" and not out["modified"]:
+                out["modified"] = val or None
         else:
-            # Nested key. Only metadata.type is consumed.
+            # Nested key. Only metadata.type, .modified and .pinned are
+            # consumed; the nested stamp wins over a top-level one.
             if in_metadata and key == "type":
                 out["type"] = val or None
+            elif in_metadata and key == "modified":
+                out["modified"] = val or out["modified"]
+            elif in_metadata and key == "pinned":
+                # metadata.pinned: true marks one of the Operator's rulings or a
+                # hard gate; the digest always prints it with its description.
+                out["pinned"] = val.strip().lower() == "true"
             # A nested non-metadata block resets the flag only if we hit a
             # new top-level key, handled above. Stay in_metadata otherwise.
         # If we encounter a top-level key other than metadata, the indented
@@ -172,9 +236,9 @@ def build_lines(directory):
 
     lines: the ordered list of formatted index lines.
     problems: list of (filename, reason) for files that could not yield a
-              proper line (no title and only a kebab fallback, or no
-              description). These are still emitted (best-effort) but
-              flagged so a caller knows backfill is needed.
+              proper line (neither title: nor name:, or no description).
+              These are still emitted (best-effort) but flagged so a caller
+              knows backfill is needed.
     """
     entries = []
     problems = []
@@ -192,9 +256,12 @@ def build_lines(directory):
         desc = fm["description"]
         typ = fm["type"]
 
+        if not title and fm["name"]:
+            # The pool entry format carries name:, not title: (see the header).
+            title = kebab_to_title(fm["name"])
         if not title:
             title = kebab_to_title(fn[:-3])  # strip ".md"
-            problems.append((fn, "missing title: (used kebab fallback)"))
+            problems.append((fn, "missing title: and name: (used kebab fallback)"))
         if not desc:
             desc = ""
             problems.append((fn, "missing description:"))
@@ -222,13 +289,942 @@ def build_lines(directory):
     return lines, problems
 
 
+
+def count_pinned(directory):
+    """How many entries in directory carry metadata.pinned: true."""
+    n = 0
+    for f in os.listdir(directory):
+        if (f.endswith(".md") and f != "MEMORY.md"
+                and parse_frontmatter(os.path.join(directory, f), limit=FM_READ, errors="replace")["pinned"]):
+            n += 1
+    return n
+
+# --- digest mode ------------------------------------------------------------
+
+# Hard cap on the whole printed block, in UTF-16 code units. Claude Code caps a
+# hook's plain stdout at 10,000 characters measured as a JavaScript string
+# (UTF-16 code units, so a character outside the BMP counts twice); past the
+# cap the model gets only a file path and a 2,000-character preview, and no
+# setting raises it (code.claude.com/docs/en/hooks). 9,000
+# leaves a margin, and counting UTF-16 units instead of code points keeps the
+# cap true for any text an entry can carry. build_digest checks the assembled
+# block against it last and fails closed (one notice line) rather than print
+# anything longer.
+DIGEST_CAP = 9000
+# One entry line, "- <name>: <description>", is cut to this many units with
+# "..." so one long description cannot crowd out the others. Descriptions ran
+# a median of about 150 characters on a real pool, so long ones lose their
+# tail; the entry file keeps the full text.
+LINE_CAP = 160
+# Bounded work on any pool: at most DIGEST_MAX_FILES entry files are read,
+# each for its first FM_READ characters (the frontmatter is at the top);
+# files past the limit count as not shown. Each git probe has GIT_TIMEOUT.
+DIGEST_MAX_FILES = 2000
+FM_READ = 16384
+GIT_TIMEOUT = 2
+# memory-init's host-key rule (bin/memory-init "Host key"): the per-machine
+# memory-host file when one exists, else a lowercase hostname unless it is
+# generic, then m-<machine-id[:12]>. Duplicated here because memory-init is an
+# installer and not a library; memory-init stays the source of truth.
+# MEMORY_DIGEST_HOST (a test hook) wins over the file, as memory-init's
+# --hostname does.
+GENERIC_HOSTS = {"", "workspace", "localhost", "localhost.localdomain",
+                 "ubuntu", "debian", "kali", "raspberrypi"}
+
+_CTRL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
+_STAMP = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?")
+
+
+class DigestError(Exception):
+    """A digest that cannot be built whole; main prints one notice line."""
+
+
+def u16(s):
+    return len(s.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def cut_u16(s, cap):
+    """s cut to at most cap UTF-16 units, ending in "..." when it was cut."""
+    if u16(s) <= cap:
+        return s
+    out, n = [], 0
+    for ch in s:
+        w = 2 if ord(ch) > 0xFFFF else 1
+        if n + w > cap - 3:
+            break
+        out.append(ch)
+        n += w
+    return "".join(out).rstrip() + "..."
+
+
+def clean(s):
+    """One printable line: control and separator characters (and the lone
+    surrogates an undecodable file name maps to) become spaces, runs of
+    whitespace collapse. A description is a YAML scalar and should be one
+    line already; this keeps a stray newline from breaking the block."""
+    return " ".join(_CTRL.sub(" ", s or "").split())
+
+
+def recency(modified, mtime):
+    """Sort key, newest largest: the entry's modified stamp (date, optional
+    time; the zone is ignored, which can misorder entries by hours at most),
+    else its file mtime in UTC."""
+    m = _STAMP.match((modified or "").strip())
+    if m:
+        return tuple(int(x) if x else 0 for x in m.groups())
+    t = time.gmtime(mtime)
+    return (t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec)
+
+
+# The host key file rule: ONE rule, held by three readers (bin/memory-init,
+# this file, memory-init.ps1) and pinned by tests/memory-host-key-rule-test.sh,
+# which feeds them the same cases; change them together.
+#   - Absent means no override: nothing at the path, or ~/.config/ops is a
+#     file (ENOTDIR), or HOME is unset or empty (on Windows, USERPROFILE). Any
+#     other failure to look at or read it (an ancestor or the file without
+#     permission, a directory, a dangling symlink, a non-regular file) is a
+#     refusal, never a fallback.
+#   - The file is ASCII bytes only, at most 65 bytes in all: one key, then
+#     optionally one LF or one CRLF, nothing else. No BOM, no UTF-16, no padding
+#     or other whitespace (a space or tab included), no NUL, no second line.
+#   - The key is [A-Za-z0-9][A-Za-z0-9._-]{0,62}; ASCII uppercase is folded to
+#     lowercase after the check. The match is on bytes, so no Unicode rule
+#     (str.strip, utf-8-sig, case folding) can widen it.
+HOST_KEY_RE = re.compile(rb"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+HOST_FILE_MAX = 65
+
+
+def memory_host_file():
+    """The per-machine host-key override, or None when HOME is unset or empty
+    (there is then no override; no passwd-database guess). Written by
+    memory-init --set-host-key, outside the synced repo, so each machine keeps
+    its own, and per HOME: a root session needs its own file. USERPROFILE on
+    Windows, where memory-init.ps1 reads the same path. Why it exists: a
+    successor box, or a second login on one machine, can share the first box's
+    pools instead of keying a fresh, empty pool set from its own hostname."""
+    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME", "")
+    if not home:
+        return None
+    return os.path.join(home, ".config", "ops", "memory-host")
+
+
+def parse_host_key_file(raw):
+    """The key (lowercase str) a file's bytes hold, or raise ValueError naming
+    why they do not. raw is at most HOST_FILE_MAX + 1 bytes; one more byte than
+    the limit is enough to know the file is too big."""
+    if len(raw) > HOST_FILE_MAX:
+        raise ValueError(f"is more than {HOST_FILE_MAX} bytes")
+    if not raw:
+        raise ValueError("is empty")
+    if raw.endswith(b"\r\n"):
+        body = raw[:-2]
+    elif raw.endswith(b"\n"):
+        body = raw[:-1]
+    else:
+        body = raw
+    if not HOST_KEY_RE.fullmatch(body):
+        raise ValueError("does not hold exactly one key (1 to 63 of A-Z a-z 0-9 . _ - "
+                         "starting with a letter or digit; ASCII only, no BOM or spaces, "
+                         "one optional newline)")
+    return body.decode("ascii").lower()
+
+
+def file_host_key():
+    """The override's key, None when there is no override. A file that exists
+    but cannot give a valid key raises DigestError: the digest then prints its
+    one-line failure notice naming the file, never a pool for a different key (a
+    silent fallback would show this machine somebody else's memory, or none)."""
+    path = memory_host_file()
+    if path is None:
+        return None
+    fix = ("write one key such as example-host with memory-init --set-host-key, "
+           "or delete the file")
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        if os.path.islink(path):
+            raise DigestError(f"{path} is a symlink to nothing; {fix}") from None
+        return None
+    except OSError as e:
+        raise DigestError(f"cannot read {path}: {e.strerror or e}; {fix}") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise DigestError(f"{path} is not a regular file; {fix}")
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(HOST_FILE_MAX + 1)
+    except OSError as e:
+        raise DigestError(f"cannot read {path}: {e.strerror or e}; {fix}") from None
+    try:
+        return parse_host_key_file(raw)
+    except ValueError as e:
+        raise DigestError(f"{path} {e}; {fix}") from None
+
+
+def host_key():
+    forced = os.environ.get("MEMORY_DIGEST_HOST")
+    if forced:
+        return forced
+    filed = file_host_key()
+    if filed:
+        return filed
+    raw = re.sub(r"\s", "", socket.gethostname() or "").lower()
+    if raw not in GENERIC_HOSTS:
+        return raw
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id",
+              os.path.join(os.path.expanduser("~"), ".config", "ops", "machine-id")):
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                mid = re.sub(r"\s", "", fh.read(256))
+        except OSError:
+            continue
+        if mid:
+            return "m-" + mid[:12]
+    return None
+
+
+def claude_key(path):
+    """Claude Code's project-dir name for a path: every character that is not
+    an ASCII letter or digit becomes "-" (/home/user/.t3 -> -home-user--t3,
+    C:\\Users\\x -> C--Users-x). Claude Code may shorten a very long key; such
+    a path is not matched here and reads as having no pool."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def canonical_root(d):
+    """The directory Claude Code keys auto-memory on: the main checkout of the
+    git repository holding d (so worktrees and subdirectories share one pool,
+    as code.claude.com/docs/en/memory states), else d itself. Local git reads
+    only, each capped at GIT_TIMEOUT, never an index lock."""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        env.pop(k, None)
+
+    def git(*args):
+        try:
+            r = subprocess.run(["git", "-C", d] + list(args), capture_output=True,
+                               text=True, timeout=GIT_TIMEOUT, env=env,
+                               stdin=subprocess.DEVNULL, check=False)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    common = git("rev-parse", "--git-common-dir")
+    if not common:
+        return d
+    if not os.path.isabs(common):
+        common = os.path.join(d, common)
+    common = os.path.normpath(common)
+    if os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    # A bare repository or a separate git dir: the work tree is the key.
+    return os.path.normpath(git("rev-parse", "--show-toplevel") or d)
+
+
+def count_md(d):
+    try:
+        return sum(1 for f in os.listdir(d) if f.endswith(".md") and f != "MEMORY.md")
+    except OSError:
+        return 0
+
+
+def find_pool(root, cfg, store, host):
+    """(pool or None, where it would be). Candidates in order: Claude's per-
+    project memory dir (a symlink into the store after memory-init, which
+    also covers a pool adopted under an older host key), then the store path
+    <store>/<host><key>. The first with an entry wins, else the first that
+    exists. Nothing is ever created: a cwd without a pool stays without one."""
+    key = claude_key(root)
+    cands = [os.path.join(cfg, "projects", key, "memory")]
+    if host:
+        cands.append(os.path.join(store, host + key))
+    expected = os.path.join(store, (host or "<host>") + key)
+    found = [c for c in cands if os.path.isdir(c)]
+    for c in found:
+        if count_md(c):
+            return os.path.realpath(c), expected
+    return (os.path.realpath(found[0]) if found else None), expected
+
+
+def load_pool(pool, src):
+    """(entries, not_read). Entries are unsorted, each tagged with src ("this"
+    for the directory's own pool, "root" for the OPS root pool);
+    build_digest orders them across both pools. not_read counts the files past
+    DIGEST_MAX_FILES. Raises DigestError when the pool cannot be listed."""
+    try:
+        names = sorted(f for f in os.listdir(pool) if f.endswith(".md") and f != "MEMORY.md")
+    except OSError as e:
+        raise DigestError(f"cannot list {pool}: {e.strerror or e}") from None
+    entries = []
+    for fn in names[:DIGEST_MAX_FILES]:
+        path = os.path.join(pool, fn)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not os.path.isfile(path):
+            continue
+        fm = parse_frontmatter(path, limit=FM_READ, errors="replace")
+        entries.append({
+            "stem": _CTRL.sub("?", fn[:-3]),
+            "desc": clean(fm["description"]),
+            "type": (fm["type"] or "").strip().lower(),
+            "when": recency(fm["modified"], st.st_mtime),
+            "pinned": bool(fm["pinned"]),
+            "src": src,
+        })
+    return entries, max(0, len(names) - DIGEST_MAX_FILES)
+
+
+# --- words: the digest's relevance rule and the prompt hint share one tokenizer
+
+# Words that carry no topic. Checked on the raw word and on its plural-stripped
+# form. The hint scorer also ignores any word that sits in more than a fifth of
+# the candidate entries (see score_prompt), which catches this corpus's own
+# filler ("session", "memory") without listing it here.
+STOPWORDS = frozenset("""
+a about above after again all also am an and any are as at be because been before being below
+between both but by can cannot could did do does doing done down during each either else etc even
+ever few for from further get gets getting go going got had has have having he her here hers him
+his how i if in into is it its itself just let like make makes made may me might more most much
+must my need needs new no nor not now of off often ok okay old on once one only onto or other our
+ours out over own per please really same say see seem seems she should since so some still such
+take than that the their theirs them then there these they thing things think this those through
+to too under until up upon us use used uses using very via want wants was way we well were what
+whatever when where whether which while who whom whose why will with within without would yes yet
+you your yours yeah hey hi thanks thank sure right now today tomorrow yesterday first last next
+back look looks looking know knows try trying tried work works working lets
+""".split())  # noqa: SIM905 - keep the word table readable in compact rows
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def stem_word(w):
+    """A light plural strip, applied alike to prompts and entries: only matching
+    matters, not the stem being a word."""
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        return w[:-1]
+    return w
+
+
+def tokens(text):
+    """The content words of text in order, repeats kept: lowercase letters and
+    digits, plural-stripped, stop words, words under three characters and
+    numbers under five digits dropped (a ticket number is a topic, a year is
+    not)."""
+    out = []
+    for w in _WORD.findall((text or "").lower()):
+        if w.isdigit():
+            if len(w) < 5:
+                continue
+        elif len(w) < 3:
+            continue
+        if w in STOPWORDS:
+            continue
+        s = stem_word(w)
+        if s in STOPWORDS:
+            continue
+        out.append(s)
+    return out
+
+
+def entry_tokens(e):
+    """Fill e["ntoks"] (words of the entry's name) and e["dtoks"] (words of its
+    description), once."""
+    if "ntoks" not in e:
+        e["ntoks"] = set(tokens(e["stem"]))
+        e["dtoks"] = set(tokens(e["desc"]))
+
+
+# Path words that name no project: dropped from a directory's relevance words.
+# The account name of the home directory is dropped as well (home_words below):
+# it is on every path under HOME and names no project.
+PATH_STOP = frozenset((
+    "home", "ops", "projects", "project", "users", "user", "tmp", "git", "repo",
+    "worktrees", "worktree", "wt", "claude", "workspace", "src", "code", "opt", "root", "var",
+))
+
+
+def home_words():
+    """The words of the home directory's own name: /home/alice gives {"alice"}."""
+    try:
+        return set(tokens(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", os.path.basename(os.path.expanduser("~")))))
+    except Exception:  # noqa: BLE001 - a missing filter only keeps a word that names no project
+        return set()
+
+
+def cwd_tokens(root):
+    """The project words of a directory's repository root: its path split into
+    words (CamelCase too), minus path filler and the home account's name.
+    /home/alice/OPS/PROJECTS/ExampleOrg/Billing gives {"billing", "example",
+    "org"}."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", root or "")
+    skip = PATH_STOP | home_words()
+    return {t for t in tokens(spaced) if t not in skip}
+
+
+# --- digest order and budget -------------------------------------------------
+
+# Tier 0 is the pinned rulings (metadata.pinned: true), at most PIN_MAX of them
+# across both pools, always printed with their descriptions. Tier 1 is user
+# entries, then feedback entries; a pinned entry past PIN_MAX is demoted to the
+# head of this tier, so no ruling drops silently. Tier 2 is everything else.
+PIN_MAX = 20
+# A pool holds at most this many entries: past it the digest cannot describe what
+# the pool holds. main() warns above it and changes nothing else (the index is
+# still written, the exit status stays 0 or 2, no entry is removed).
+POOL_CAP = 60
+# Characters held back for the by-name-only tail when descriptions do not all
+# fit, so that a long run of described entries cannot squeeze the tail to
+# nothing. About 35 names.
+NAMES_RESERVE = 1100
+ROOT_TAG = "[root] "
+NAMES_THIS = "- by name only (this pool):"
+NAMES_ROOT = "- by name only (root pool):"
+TIER_TITLES = {
+    0: "Pinned (the Operator's rulings and hard gates; always described):",
+    1: "User and feedback entries (newest first):",
+    2: "Other entries (this directory's pool first, then the root pool by relevance; newest first):",
+}
+
+
+def relevance(e, ctoks):
+    """How well an entry fits the session's directory. An entry in the
+    directory's own pool fits by construction. A root-pool entry fits by the
+    number of the directory's project words (cwd_tokens) its name and
+    description share; no project words, or none shared, is 0."""
+    if e["src"] == "this":
+        return 1000
+    if not ctoks:
+        return 0
+    entry_tokens(e)
+    return len(ctoks & (e["ntoks"] | e["dtoks"]))
+
+
+def order_entries(entries, ctoks):
+    """The truncation order: what survives a full budget comes first, and every
+    entry gets its "tier" (0, 1 or 2, as above).
+      0. pinned entries, newest first, at most PIN_MAX;
+      1. user entries, then feedback entries, newest first (both pools);
+      2. the rest: this directory's pool, then root-pool entries that share the
+         directory's project words, then the other root entries, newest first
+         within each.
+    "Newest" is the entry's modified stamp, else its file mtime; ties by file
+    name. An entry past the description budget is still listed by name while the
+    budget lasts, and counted when it is not (see fit_order).
+    Why this order: a plain newest-first dump put weeks-old rulings last, so they
+    lost their descriptions first, and a pool of well over a hundred entries in a
+    long-lived project directory showed none at all."""
+    pins = 0
+    for e in entries:
+        e["rel"] = 0
+        if e["pinned"]:
+            e["tier"], e["sub"] = 0, 0
+        elif e["type"] == "user":
+            e["tier"], e["sub"] = 1, 1
+        elif e["type"] == "feedback":
+            e["tier"], e["sub"] = 1, 2
+        else:
+            e["tier"], e["sub"] = 2, 0
+            e["rel"] = relevance(e, ctoks)
+    entries.sort(key=lambda e: (e["stem"], e["src"]))
+    entries.sort(key=lambda e: e["when"], reverse=True)
+    for e in entries:
+        if e["tier"] == 0:
+            pins += 1
+            if pins > PIN_MAX:  # newest first, so the oldest pins are demoted
+                e["tier"], e["sub"] = 1, 0
+    entries.sort(key=lambda e: -e["rel"])
+    entries.sort(key=lambda e: (e["tier"], e["sub"]))
+    return entries
+
+
+def entry_line(e, mark_root):
+    tag = ROOT_TAG if (mark_root and e["src"] == "root") else ""
+    stem = e["stem"]
+    if e["tier"] == 0 and e["desc"]:
+        # A long filename must not turn an always-described ruling into a
+        # name-only line. Reserve up to half the line for the ruling itself.
+        room = LINE_CAP - u16(f"- {tag}: ") - min(u16(e["desc"]), LINE_CAP // 2)
+        stem = cut_u16(stem, room)
+    s = f"- {tag}{stem}: {e['desc']}" if e["desc"] else f"- {tag}{stem}"
+    return cut_u16(s, LINE_CAP)
+
+
+def name_lines(stems, prefix):
+    """Entries past the description budget, by name, wrapped near LINE_CAP."""
+    if not stems:
+        return []
+    lines, cur = [], prefix
+    for i, s in enumerate(stems):
+        s = cut_u16(s, LINE_CAP - len(prefix) - 2)
+        piece = s + ("," if i < len(stems) - 1 else "")
+        if cur not in (prefix, " ") and u16(cur) + 1 + u16(piece) > LINE_CAP:
+            lines.append(cur)
+            cur = " "
+        cur = (cur + piece) if cur == " " else (cur + " " + piece)
+    lines.append(cur)
+    return lines
+
+
+def cost(blocks):
+    """Characters the blocks add to the digest: each line and its newline, and
+    one blank line ahead of every block."""
+    return sum(1 + sum(u16(x) + 1 for x in b) for b in blocks)
+
+
+def render(order, k, j, mark_root):
+    """Blocks for the first k entries with descriptions (a title opens each
+    tier) and entries k..j by name, one name block per pool; the rest are out."""
+    blocks, tier, cur = [], None, None
+    for e in order[:k]:
+        if e["tier"] != tier:
+            tier, cur = e["tier"], [TIER_TITLES[e["tier"]]]
+            blocks.append(cur)
+        cur.append(entry_line(e, mark_root))
+    for src, prefix in (("this", NAMES_THIS), ("root", NAMES_ROOT)):
+        names = name_lines([e["stem"] for e in order[k:j] if e["src"] == src], prefix)
+        if names:
+            blocks.append(names)
+    return blocks
+
+
+def fit_order(order, room, mark_root):
+    """(k, j): the first k entries of order get descriptions and entries k..j
+    get names, the largest configuration whose rendering fits room. Pinned
+    entries (the head of order) are always described: k never falls below
+    their number. Descriptions are preferred to names (about five names cost
+    one description), but NAMES_RESERVE keeps room for a tail of names.
+    Every returned configuration was measured; cost grows with k and with j, so
+    each search is a plain bisection. Raises DigestError when the pinned
+    entries alone do not fit, which the PIN_MAX cap makes impossible short of a
+    pool path longer than a thousand characters."""
+    n = len(order)
+    if cost(render(order, n, n, mark_root)) <= room:
+        return n, n
+    kmin = sum(1 for e in order if e["tier"] == 0)
+    if cost(render(order, kmin, kmin, mark_root)) > room:
+        raise DigestError(f"the {kmin} pinned entries alone do not fit {room} characters")
+    reserve = min(NAMES_RESERVE, room // 6)
+    lo, hi = kmin, n - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if cost(render(order, mid, mid, mark_root)) <= room - reserve:
+            lo = mid
+        else:
+            hi = mid - 1
+    k = lo
+    lo, hi = k, n
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if cost(render(order, k, mid, mark_root)) <= room:
+            lo = mid
+        else:
+            hi = mid - 1
+    return k, lo
+
+
+def index_note(pool):
+    idx = os.path.join(pool, "MEMORY.md")
+    if not os.path.isfile(idx):
+        return "its MEMORY.md index is missing"
+    if not os.access(idx, os.R_OK):
+        return "its MEMORY.md index is unreadable"
+    return "full index MEMORY.md there"
+
+
+def resolve_ops(arg):
+    if arg:
+        return arg
+    if os.environ.get("OPS_DIR"):
+        return os.environ["OPS_DIR"]
+    return os.path.join(os.path.expanduser("~"), "OPS")
+
+
+def resolve_pools(cwd, ops, pool_dir=None, root_dir=None):
+    """(pool, expected, rpool, rexpected, at_root, root, indexer): this
+    directory's pool (None when there is none) and where it would be, the
+    OPS root pool likewise, whether they are one pool, the directory's
+    repository root, and the indexer's own path. pool_dir and root_dir pin the
+    two pools (the test hooks MEMORY_INDEX_DIR and MEMORY_DIGEST_ROOT_DIR, and
+    --digest-fit). Nothing is created."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    ops_root = canonical_root(ops)
+    store = os.path.join(ops_root, ".claude-memory")
+    host = host_key()
+    indexer = os.path.join(ops, ".claude-config", "bin", "memory-index")
+    root = canonical_root(cwd)
+
+    if pool_dir:
+        pool, expected = (os.path.realpath(pool_dir) if os.path.isdir(pool_dir) else None), pool_dir
+    else:
+        pool, expected = find_pool(root, cfg, store, host)
+    if root_dir:
+        rpool, rexpected = (os.path.realpath(root_dir) if os.path.isdir(root_dir) else None), root_dir
+    else:
+        rpool, rexpected = find_pool(ops_root, cfg, store, host)
+    at_root = (pool is not None and pool == rpool) or (
+        pool is None and os.path.normpath(root) == os.path.normpath(ops_root))
+    return pool, expected, rpool, rexpected, at_root, root, indexer
+
+
+def build_digest(cwd, ops, pool_dir=None, root_dir=None):
+    """(text, fit): the whole digest as one string, never longer than
+    DIGEST_CAP, and per pool (pool, total, described, named, not shown), this
+    directory's pool first. Raises DigestError (or anything unexpected)
+    instead of returning a part."""
+    pool, expected, rpool, rexpected, at_root, root, indexer = resolve_pools(
+        cwd, ops, pool_dir, root_dir)
+
+    a_entries, a_over = load_pool(pool, "this") if pool else ([], 0)
+    b_entries, b_total, b_over = [], 0, 0
+    if rpool and not at_root:
+        b_all, b_over = load_pool(rpool, "root")
+        b_total = len(b_all)
+        # The root pool's project entries are workstream state of the OPS copy
+        # itself, so they stay out of another project's digest; a pinned one is a
+        # ruling and stays.
+        b_entries = [e for e in b_all if e["type"] != "project" or e["pinned"]]
+
+    head = [("OPS memory digest: the harness prints these pools' entries "
+             "(descriptions first, names past the budget).")]
+    if pool and a_entries:
+        head.append(f"Pool for this directory: {pool} ({len(a_entries) + a_over} entries; "
+                    f"{index_note(pool)}). An entry is <pool>/<name>.md; read it before acting on it.")
+    else:
+        where = f"{pool} is empty" if pool else expected
+        head.append(f"No memory pool for this directory ({where}); do not create one. "
+                    "Project lessons go to CONTEXT/projects/<project>-lessons.md, "
+                    "generic gotchas to the OPS root pool.")
+    if b_entries:
+        head.append(f"OPS root pool, cross-project entries ({len(b_entries)} of "
+                    f"{b_total + b_over}; type project left out; [root] marks its lines): {rpool}")
+    head.append("Write: route first (core.md Memory). A pool entry is one fact per file "
+                "with frontmatter name, description (its line here), metadata.type (user, "
+                "feedback, project or reference) and metadata.modified (ISO time); "
+                "metadata.pinned: true only for the Operator's rulings and hard gates (at most "
+                f"{PIN_MAX} across both pools); then run {indexer} <pool dir>.")
+    head.append("Order: pinned first, then user and feedback entries, then the rest by "
+                "relevance to this directory; newest metadata.modified (else file time) "
+                "first within each. Past the budget, entries are listed by name only, "
+                "then counted.")
+    if not rpool:
+        head.append(f"No OPS root pool on this host yet ({rexpected}).")
+    head_text = "\n".join(head)
+
+    sections = []  # (label, pool, entries, overflow)
+    if a_entries or a_over:
+        sections.append(("this pool", pool, a_entries, a_over))
+    if b_entries or b_over:
+        sections.append(("root pool", rpool, b_entries, b_over))
+    order = order_entries(a_entries + b_entries, cwd_tokens(root))
+    mark_root = not at_root
+
+    def footer(rows):  # rows: (label, by name only, not shown, pool)
+        bits = [f"{label} {named} by name only, {gone} not shown" for label, named, gone, _p in rows]
+        idx = [f"{p}/MEMORY.md" for _l, _n, _g, p in rows]
+        return (f"Over the {DIGEST_CAP:,}-character digest budget: {'; '.join(bits)}. "
+                f"Full index: {', '.join(idx)}. Find an entry not shown: {indexer} --find "
+                "<words>. Prune at closeout so entries keep their descriptions.")
+
+    over_any = any(o for _l, _p, _e, o in sections)
+    k = j = len(order)
+    if over_any or cost(render(order, k, j, mark_root)) + u16(head_text) > DIGEST_CAP:
+        widest = footer([(label, len(e) + o, len(e) + o, p) for label, p, e, o in sections])
+        room = DIGEST_CAP - u16(head_text) - u16(widest) - 2
+        k, j = fit_order(order, room, mark_root)
+    blocks = render(order, k, j, mark_root)
+
+    rows, fit = [], []
+    for label, p, entries, over in sections:
+        src = "this" if label == "this pool" else "root"
+        d = sum(1 for e in order[:k] if e["src"] == src)
+        named = sum(1 for e in order[k:j] if e["src"] == src)
+        gone = sum(1 for e in order[j:] if e["src"] == src) + over
+        rows.append((label, named, gone, p))
+        fit.append((p, len(entries) + over, d, named, gone))
+    parts = [head_text]
+    for b in blocks:
+        parts += ["", "\n".join(b)]
+    if any(named or gone for _l, named, gone, _p in rows):
+        parts += ["", footer(rows)]
+    text = "\n".join(parts)
+    if u16(text) > DIGEST_CAP:
+        raise DigestError(f"assembled block is {u16(text)} characters, over {DIGEST_CAP}")
+    return text, fit
+
+
+def digest_main(cwd, ops):
+    """Print the digest, or one notice line naming the index, and return 0.
+    Output is UTF-8 bytes whatever the console code page, written once."""
+    ops = resolve_ops(ops)
+    cwd = cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        text, _fit = build_digest(cwd, ops, os.environ.get("MEMORY_INDEX_DIR"),
+                                  os.environ.get("MEMORY_DIGEST_ROOT_DIR"))
+    except Exception as e:  # noqa: BLE001 - report any hook failure without aborting startup
+        where = os.environ.get("MEMORY_INDEX_DIR") or os.path.join(ops, ".claude-memory")
+        text = cut_u16(clean(f"OPS memory digest failed ({type(e).__name__}: {e}); "
+                             f"the full indexes are the MEMORY.md files under {where} "
+                             "(this directory's pool and the root pool)."), 600)
+    sys.stdout.buffer.write((text + "\n").encode("utf-8", "replace"))
+    sys.stdout.flush()
+    return 0
+
+
+def digest_fit_main(pools):
+    """One line per pool, digested as a directory's own pool with no root
+    section: "<pool>\t<entries>\t<described>\t<by name only>\t<not shown>",
+    or "<pool>\terror\t<reason>". A gate or an inventory script can read it: the
+    digest is the budget a pool has to fit. Exit 0 unless a pool could not be
+    measured."""
+    rc = 0
+    for p in pools:
+        try:
+            # A requested pool disappearing during a scan is a failed
+            # measurement, not a successfully measured empty directory.
+            if not os.path.isdir(p):
+                raise DigestError(f"pool is not a directory: {p}")
+            _text, fit = build_digest(p, resolve_ops(None), p, p)
+            _pool, total, described, named, gone = fit[0] if fit else (p, 0, 0, 0, 0)
+            line = f"{p}\t{total}\t{described}\t{named}\t{gone}"
+        except Exception as e:  # noqa: BLE001 - report each failure and measure the remaining pools
+            rc = 1
+            line = f"{p}\terror\t{clean(f'{type(e).__name__}: {e}')}"
+        sys.stdout.write(line + "\n")
+    return rc
+
+
+# --- memory hint (UserPromptSubmit) and --find --------------------------------
+#
+# The digest cannot hold a pool, so the rulings that matter most are pinned and
+# the rest is found by what the prompt is about. hooks/memory-hint.sh runs
+# `--hint` on every prompt: a local keyword scorer over the entry names and
+# descriptions of this directory's pool and the root pool, no model call, no
+# network, at most three "Relevant memory:" lines and only for a strong match.
+# Why a scorer of its own and not a model call: a call per prompt is a paid
+# request on a short budget; memory lines must arrive on every prompt, offline,
+# in well under 300 ms.
+#
+# The score: for each prompt word that names at most a fifth of the candidate
+# entries, idf = ln(1 + entries / entries that hold the word) / ln(1 + entries)
+# (1.0 for a word only one entry holds, whatever the corpus size), summed over
+# the matched words, doubled for a word in the entry's name, times 1.2 for a
+# pinned entry. A match is strong when at least HINT_MIN_WORDS distinct words
+# match and the score reaches HINT_MIN_SCORE; only entries within HINT_REL of the
+# best score print. The bar was set on a few hundred real typed prompts against
+# two live pools of about 150 and 280 entries: about 11% of them print a hint,
+# and a hand read of the hits found the large majority on topic. The bar is a
+# topic, not a coincidence of common words.
+HINT_MIN_WORDS = 2
+HINT_MIN_SCORE = 4.0
+HINT_REL = 0.6
+HINT_MAX = 3
+HINT_LINE_CAP = 200
+HINT_PROMPT_CHARS = 3000
+HINT_MIN_PROMPT_WORDS = 3
+# Typed prompts run a median of about 25 content words; one of 150 or more is a
+# paste, a handoff or a brief, which matches everything a little.
+HINT_MAX_PROMPT_WORDS = 150
+
+_BLOCK = re.compile(
+    r"<(pasted_content|system-reminder|task-notification|local-command-caveat|local-command-stdout"
+    r"|command-name|command-message|command-args|assistant_citations)\b[^>]*>.*?(?:</\1\s*>|\Z)",
+    re.IGNORECASE | re.DOTALL)
+# T3's quote-reply: "[Assistant quote](t3-citation://...)" carries the quoted
+# assistant text and the user's inline comment, URL-encoded, in the link. It is
+# not the typed words to score and would add a hundred junk words.
+_QUOTE = re.compile(r"\[Assistant quote\]\(t3-citation://[^)\s]*\)", re.IGNORECASE)
+# What the harness sends in the user's name, as opposed to what they type: none of it
+# names a topic worth a hint, and a baton or a scheduled wake can run to
+# thousands of characters of memory-rich words. The test is on the opening of
+# the prompt, after pasted, reminder, notification and quote blocks are dropped.
+#   - a slash command (/compact, /clear, /plugin:skill);
+#   - the compaction summary ("This session is being continued ...") and a
+#     provider context handoff ("Context handoff ...");
+#   - a baton or resume message (compact-cycle.sh and the closeout skills write
+#     "## RESUME PROTOCOL ... NEXT ACTION", or the default "Continue the standing
+#     work ...");
+#   - a scheduled wake (T3 schedule_task prompts open "Scheduled ..." or "One-shot
+#     ..." and tell the thread to delete the task) and the fleet's "Automated
+#     fleet notice: ..." resume;
+#   - a delegated-task or workflow lane brief ("Delegated task node:...",
+#     "[Workflow harness ..."), a note another agent sent ("FYI from the OPS
+#     foreman ...", "From the Billing thread ..."), and an attachment-only
+#     message ("[User attached ...").
+_HARNESS_OPEN = re.compile(
+    r"^\s*(?:/[A-Za-z0-9]"
+    r"|this session is being continued|context handoff|continue the standing work"
+    r"|delegated task\b|\[?workflow harness|\[user attached"
+    r"|fyi from\b|follow-up from\b|from the [^.\n]{0,80}\b(?:foreman|thread)\b"
+    r"|scheduled\b|one-shot\b|one shot\b|automated fleet notice"
+    r"|#{1,3}\s*(?:resume|baton)\b|(?:resume|baton)\b)",
+    re.IGNORECASE)
+_HARNESS_ANY = re.compile(
+    r"delete_scheduled_task|\bscheduled task\b|resume protocol|\bnext action\s*:", re.IGNORECASE)
+
+
+def clean_prompt(text):
+    """The prompt as typed: pasted, reminder, notification, command and quote
+    blocks dropped, at most the first HINT_PROMPT_CHARS characters."""
+    return _QUOTE.sub(" ", _BLOCK.sub(" ", text or ""))[:HINT_PROMPT_CHARS].strip()
+
+
+def harness_send(text):
+    """True when text (already clean_prompt-ed) is a message the harness sent,
+    not one the user typed (see _HARNESS_OPEN)."""
+    return bool(_HARNESS_OPEN.match(text) or _HARNESS_ANY.search(text[:400]))
+
+
+def score_prompt(ptoks, cands):
+    """[(score, entry, matched words, words matched in the name)], best first,
+    for every candidate that shares a word with the prompt. Ties go to the
+    newer entry, then the name."""
+    n = len(cands)
+    if not n or not ptoks:
+        return []
+    df = collections.Counter()
+    for e in cands:
+        entry_tokens(e)
+        df.update(e["ntoks"] | e["dtoks"])
+    limit = max(8, n // 5)
+    live = {t for t in set(ptoks) if 0 < df[t] <= limit}
+    norm = math.log(1.0 + n)
+    idf = {t: math.log(1.0 + n / df[t]) / norm for t in live}
+    rows = []
+    for e in cands:
+        in_name = live & e["ntoks"]
+        matched = in_name | (live & e["dtoks"])
+        if not matched:
+            continue
+        sc = sum(idf[t] * (2.0 if t in in_name else 1.0) for t in matched)
+        if e["pinned"]:
+            sc *= 1.2
+        rows.append((sc, e, matched, in_name))
+    rows.sort(key=lambda r: r[1]["stem"])
+    rows.sort(key=lambda r: r[1]["when"], reverse=True)
+    rows.sort(key=lambda r: -r[0])
+    return rows
+
+
+def strong_matches(rows):
+    """The rows that print as hints: strong (HINT_MIN_WORDS, HINT_MIN_SCORE),
+    within HINT_REL of the best, at most HINT_MAX."""
+    ok = [r for r in rows if len(r[2]) >= HINT_MIN_WORDS and r[0] >= HINT_MIN_SCORE]
+    if not ok:
+        return []
+    return [r for r in ok if r[0] >= HINT_REL * ok[0][0]][:HINT_MAX]
+
+
+def candidates(cwd, ops):
+    """This directory's pool and the root pool's cross-project entries, as
+    the digest reads them, tagged by pool. A missing pool contributes nothing."""
+    pool, _e, rpool, _re, at_root, _root, _ix = resolve_pools(
+        cwd, ops, os.environ.get("MEMORY_INDEX_DIR"), os.environ.get("MEMORY_DIGEST_ROOT_DIR"))
+    cands = []
+    if pool:
+        cands += load_pool(pool, "this")[0]
+    if rpool and not at_root:
+        cands += [e for e in load_pool(rpool, "root")[0] if e["type"] != "project" or e["pinned"]]
+    return cands
+
+
+def hint_log(msg):
+    """One line to $MEMORY_HINT_LOG (set by hooks/memory-hint.sh) so a failing
+    hint is findable; never raises, never prints."""
+    path = os.environ.get("MEMORY_HINT_LOG")
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\t" + clean(msg)[:300] + "\n")
+    except OSError:
+        pass
+
+
+def hint_main(cwd, ops):
+    """Read the UserPromptSubmit payload on stdin and print at most HINT_MAX
+    "Relevant memory: <name>: <description>" lines. Prints nothing, and exits 0,
+    for a lane (agent_id), a message the harness sent, a prompt with too few
+    words, no candidates or no strong match. Any failure is logged and prints
+    nothing: a hint never blocks or breaks a prompt."""
+    try:
+        payload = json.loads(sys.stdin.buffer.read(2_000_000).decode("utf-8", "replace") or "{}")
+        if not isinstance(payload, dict) or payload.get("agent_id"):
+            return 0
+        text = clean_prompt(payload.get("prompt") if isinstance(payload.get("prompt"), str) else "")
+        if not text or harness_send(text):
+            return 0
+        ptoks = tokens(text)
+        if not HINT_MIN_PROMPT_WORDS <= len(ptoks) <= HINT_MAX_PROMPT_WORDS:
+            return 0
+        ops = resolve_ops(ops)
+        cwd = cwd or os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
+        picks = strong_matches(score_prompt(ptoks, candidates(cwd, ops)))
+        if picks:
+            lines = []
+            for _sc, e, _m, _n in picks:
+                s = f"Relevant memory: {e['stem']}: {e['desc']}" if e["desc"] else f"Relevant memory: {e['stem']}"
+                lines.append(cut_u16(s, HINT_LINE_CAP))
+            sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8", "replace"))
+            sys.stdout.flush()
+    except Exception as e:  # noqa: BLE001 - a hint must never fail a prompt; log and print nothing
+        hint_log(f"{type(e).__name__}: {e}")
+    return 0
+
+
+def find_main(cwd, ops, words, limit):
+    """The scorer by hand: `--find <words>` prints the best-matching entries of
+    this directory's pool and the root pool, "score<TAB>pool<TAB>name<TAB>
+    description", best first, with no strong-match bar (one shared word is
+    enough). The way to find an entry the digest did not describe."""
+    ops = resolve_ops(ops)
+    cwd = cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        rows = score_prompt(tokens(" ".join(words)), candidates(cwd, ops))
+    except Exception as e:  # noqa: BLE001 - report the failure, exit 1
+        sys.stderr.write(f"memory-index: --find failed ({type(e).__name__}: {e})\n")
+        return 1
+    for sc, e, _m, _n in rows[:limit]:
+        sys.stdout.write(f"{sc:.1f}\t{'root' if e['src'] == 'root' else 'this'}\t{e['stem']}\t{e['desc']}\n")
+    return 0
+
+
 def main(argv):
     check = False
     directory = None
+    if len(argv) > 2 and argv[1] == "--digest-fit":
+        return digest_fit_main(argv[2:])
+    if len(argv) > 1 and argv[1] in ("--digest", "--hint", "--find"):
+        mode = argv[1]
+        opts = {"--cwd": None, "--ops": None, "--limit": "5"}
+        rest, words = argv[2:], []
+        while rest:
+            if rest[0] in opts and len(rest) > 1:
+                opts[rest[0]] = rest[1]
+                rest = rest[2:]
+            elif mode == "--find" and not rest[0].startswith("--"):
+                words.append(rest[0])
+                rest = rest[1:]
+            else:
+                sys.stderr.write(f"memory-index: unexpected {mode[2:]} arg: {rest[0]}\n{USAGE}\n")
+                return 1
+        if mode == "--digest":
+            return digest_main(opts["--cwd"], opts["--ops"])
+        if mode == "--hint":
+            return hint_main(opts["--cwd"], opts["--ops"])
+        if not words or not opts["--limit"].isdigit():
+            sys.stderr.write(f"memory-index: --find needs words and a numeric --limit\n{USAGE}\n")
+            return 1
+        return find_main(opts["--cwd"], opts["--ops"], words, int(opts["--limit"]))
     for arg in argv[1:]:
         if arg in ("-h", "--help"):
             print(USAGE)
             print("  --check   print the generated index to stdout; write nothing")
+            print("  --digest  print the memory digest (--cwd, --ops); write nothing")
+            print("  --hint    UserPromptSubmit payload on stdin: print up to three relevant entries")
+            print("  --find    score the pools against <words>; print the best matches")
             return 0
         elif arg == "--check":
             check = True
@@ -255,7 +1251,7 @@ def main(argv):
         sys.stdout.write(content)
     else:
         target = os.path.join(directory, "MEMORY.md")
-        # Atomic write (WS-5 regen-race fix). Two SessionStart hooks from
+        # Atomic write (a regen-race fix). Two SessionStart hooks from
         # parallel sessions sharing this memory dir (e.g. both launched from
         # ~/OPS) can regenerate MEMORY.md concurrently. A plain
         # open(target, "w") truncates first, so a reader (or the other writer)
@@ -280,14 +1276,28 @@ def main(argv):
             f"[memory-index] wrote {len(lines)} line(s) -> {target}\n"
         )
 
+    pins = count_pinned(directory)
+    if pins > PIN_MAX:
+        sys.stderr.write(
+            f"[memory-index] WARN: {pins} pinned entries in {directory}; only the {PIN_MAX} newest "
+            "pins across both pools are always described, the rest are demoted to the "
+            "user and feedback tier\n"
+        )
     if problems:
         sys.stderr.write(
             f"[memory-index] {len(problems)} file(s) need backfill:\n"
         )
         for fn, reason in problems:
             sys.stderr.write(f"  - {fn}: {reason}\n")
-        return 2
-    return 0
+    if len(lines) > POOL_CAP:
+        # A WARN and nothing else (the pool is the owner's): the index above is
+        # already written, the exit status is untouched, and nothing is removed.
+        sys.stderr.write(
+            f"[memory-index] WARN: {len(lines)} entries in {directory}, over the {POOL_CAP}-entry "
+            "pool cap the digest is sized for; entries past its budget lose their descriptions. "
+            "Prune with the memory-prune skill when you choose to; nothing was removed\n"
+        )
+    return 2 if problems else 0
 
 
 if __name__ == "__main__":

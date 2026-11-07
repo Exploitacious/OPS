@@ -7,16 +7,21 @@ git-synced memory pools (`.claude-memory/`), handoff batons, and the projects
 it manages (`PROJECTS/`). In the Operator's private copy it holds their
 identity and work; in the public template it holds only generic mechanics.
 This file is about working in this repo. The rules that bind every session
-are in [CONTEXT/core.md](CONTEXT/core.md); nothing here restates them.
+(role, lane contract, landing, writing, memory) are in
+[CONTEXT/core.md](CONTEXT/core.md), and the main thread's (intake,
+delegation, review, merge, models, rhythm) in
+[CONTEXT/foreman.md](CONTEXT/foreman.md); nothing here restates them.
 
 ## Read first
 
 `CONTEXT/core.md` should already be in your startup context: `deploy.sh`
 links it into `~/.claude/rules/ops-core.md`. If it is not (no "# Core" in
 what you were given), read it now, then proceed, and tell the Operator to
-re-run `.claude-config/deploy.sh`. Everything else in `CONTEXT/` loads on
-demand through the core's "Where to look" table; do not read those files as a
-startup ritual.
+re-run `.claude-config/deploy.sh`. If you are the main thread and no
+`# Foreman doctrine` block arrived at startup (the foreman-context hook prints
+it for foreman sessions), read `CONTEXT/foreman.md` too; a spawned lane never
+reads it. Everything else in `CONTEXT/` loads on demand through the core's
+"Where to look" table; do not read those files as a startup ritual.
 
 First launch: if `CONTEXT/.bootstrapped` does not exist, this copy has never
 met its Operator. Do not start normal work: read `BOOTSTRAP.md` and run it;
@@ -33,8 +38,9 @@ current task allows.
   a throwaway `HOME` (DEPLOYMENT.md, "Testing a deploy under a throwaway
   HOME").
 - Tests: `.claude-config/bin/tests/*-test.{sh,py}`, `.claude-config/bin/*-selftest.*`,
-  and `.claude-config/hooks/*-selftest.sh`. Run the ones covering what you
-  changed. A suite that runs a tool that deletes or moves files starts with
+  `.claude-config/hooks/*-selftest.sh`, and `.claude-config/hooks/*-test.py`.
+  Run the ones covering what you changed. A suite that runs a tool that
+  deletes or moves files starts with
   the sandbox guard and runs only inside `.claude-config/bin/sandbox-run`
   (exit 97 elsewhere); the command line is in `.claude-config/bin/README.md`.
   Every shell script you touch passes `bash -n`; every workflow script parses
@@ -70,9 +76,18 @@ current task allows.
 - Personalization lives only in the files `harness-update` never syncs:
   `USER.md`, `voice.md`, `standing-orders.md`, the `work-tracking.md`,
   `team.md`, and `tools.md` slots, `.bootstrapped`, and `CONTEXT/projects/`.
-  The doctrine files (`core.md`, `how-i-work.md`, `model-roles.md`,
-  `project-kata.md`) stay generic, so a template sync can update them; an
-  Operator ruling goes to `standing-orders.md` instead of an edit there.
+  The doctrine files (`core.md`, `foreman.md`, `how-i-work.md`,
+  `model-roles.md`, `project-kata.md`) stay generic, so a template sync can
+  update them; an Operator ruling goes to `standing-orders.md` instead of an
+  edit there.
+- The template adds and offers; it never takes away what a copy's owner
+  chose (`CONTEXT/how-i-work.md`, "The template and a copy's owner"). A change
+  to deploy, `harness-update`, or a gate that would delete, cap, or block an
+  owner's content (a plugin, a memory pool, a retired skill, a hook, a pin, a
+  remote, a backup) ships as a warning or an offer, never a FAIL, a block, or
+  an automatic removal. Only an unsafe thing is overruled. One stated
+  exception: the drift gate FAILs on a banned or retired model id (checks 15
+  and 15b) and edits nothing.
 
 ## Invariants and bans
 
@@ -83,7 +98,9 @@ current task allows.
   `.claude-handoffs/`, `NOTES/`, `DELIVERABLES/`, or `PROJECTS/`: they hold
   the Operator's identity and work.
 - `CONTEXT/core.md` stays under 15,360 bytes (`verify-ops.sh` check 16): every
-  session and lane pays for it on every turn.
+  session and lane pays for it on every turn. `CONTEXT/foreman.md` stays under
+  8,192 bytes: the foreman-context hook prints a larger file as nothing, so
+  the main thread would fall back to reading it by hand.
 - No root `CLAUDE.md`. With one present, Claude Code reads it instead of this
   file and skips every `AGENTS.md` in the repos under `PROJECTS/`.
 

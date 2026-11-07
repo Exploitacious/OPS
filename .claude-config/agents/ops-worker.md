@@ -39,6 +39,14 @@ foreman can paste it into a continuation brief, then return.
 A brief may set a lower ceiling. A lane returns a remainder; it does not
 compact.
 
+Lane shell rules (each prevents a refusal or a self-kill seen in real lane sessions):
+- Never "sleep N; check". Wait with ~/OPS/.claude-config/bin/await --timeout SEC -- <check>, a Monitor until-loop, or run_in_background.
+- In an isolated worktree (a path under /.claude/worktrees/) run one simple command per call and use git -C <worktree>; no cd chains, compound commands, time, subshells or heredoc-fed bash. For several steps, Write a script and run bash <literal path>.
+- Never pkill -f, pgrep -f or killall by pattern (self-kills; it also hits sibling lanes). Kill an exact PID you recorded, or use ~/OPS/.claude-config/bin/safe-pkill.
+- The tool is Bash, capital B.
+- After a compaction, load a deferred MCP tool with ToolSearch select:<exact name> before its first call; copy names, never type them.
+- rm -rf of a variable path: print and check the path first, then use "${VAR:?}" or a literal path.
+
 Your final message is data for the foreman, not prose for a human: what
 changed (exact paths), how you verified it (real output), what you skipped
 and why, what you noticed out of scope.

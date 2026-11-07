@@ -17,11 +17,28 @@
 # Usage:
 #   .\memory-init.ps1                           # walk all encoded cwds (default)
 #   .\memory-init.ps1 -OnlyHome                 # only the HOME cwd
-#   .\memory-init.ps1 -HostnameOverride foo     # override host key
+#   .\memory-init.ps1 -HostnameOverride foo     # override host key, this run only
+#   .\memory-init.ps1 -SetHostKey example-host  # persist the host key: writes
+#                                               # $HOME\.config\ops\memory-host,
+#                                               # which memory-init and memory-index
+#                                               # read; then runs with that key.
+#                                               # Undo: delete the file
 #   .\memory-init.ps1 -DryRun                   # show what would happen
 #   .\memory-init.ps1 -AutoCommit               # stage+commit each target; push only
 #                                               # to an origin Test-OriginPrivate
 #                                               # verifies private (see below)
+#
+# Which cwds get a pool: never a scratch or temp cwd, never a project whose
+# memory dir holds nothing (Test-ScratchEncoded, Test-SourceEmpty below; the bash
+# memory-init has the same two rules). One bash run on a box with many throwaway
+# sessions made 35 empty pools in 7 seconds without them.
+#
+# Host key order: -HostnameOverride, else the memory-host file, else COMPUTERNAME.
+# A key is 1 to 63 of A-Z a-z 0-9 . _ - starting with a letter or digit
+# (uppercase is lowercased); the file holds one key and an optional newline, ASCII
+# only, at most 65 bytes; anything else is refused, never ignored. Same rule and
+# same file as the bash memory-init (see its "Host key" comment). The file is per
+# user profile: another account on the box needs its own.
 #
 # Exit codes:
 #   0 -- success (already initialized OR initialized just now)
@@ -31,6 +48,7 @@
 [CmdletBinding()]
 param(
     [string]$HostnameOverride = "",
+    [string]$SetHostKey = "",
     [switch]$DryRun,
     [switch]$AutoCommit,
     [switch]$OnlyHome
@@ -186,10 +204,118 @@ $MemoryRoot = Join-Path $Ops ".claude-memory"
 # Every profile wires into the same shared store.
 $ClaudeCfg  = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
 
-# Host key: lowercase, no whitespace. COMPUTERNAME is a real hostname on
-# Windows (never generic), so no machine-id fallback is needed here.
-$Host_ = if ($HostnameOverride) { $HostnameOverride } else { $env:COMPUTERNAME }
-$Host_ = ($Host_ -replace '\s', '').ToLower()
+# Host key. COMPUTERNAME is a real hostname on Windows (never generic), so no
+# machine-id fallback is needed here. Order: -HostnameOverride, else the
+# per-machine memory-host file (the same $HOME\.config\ops\memory-host that
+# bin/memory-index reads, USERPROFILE on Windows), else COMPUTERNAME. The file
+# exists so a successor box shares its predecessor's pools.
+# THE RULE is the bash memory-init's, held by three readers (bin/memory-init,
+# bin/memory-index, this script) and pinned by tests/memory-host-key-rule-test.sh,
+# which feeds them the same cases:
+#   - Absent means no override: nothing at the path, or a parent that is a file,
+#     or no USERPROFILE. Any other failure to look at or read it (no permission
+#     on an ancestor or the file, a directory, a dangling symlink) is a refusal.
+#   - The file is ASCII bytes only, at most 65 bytes in all: one key, then
+#     optionally one LF or one CRLF, nothing else (no BOM, no UTF-16, no padding
+#     or other whitespace, no NUL, no second line).
+#   - The key is [A-Za-z0-9][A-Za-z0-9._-]{0,62}; ASCII uppercase is lowercased
+#     AFTER the check, so no Unicode case folding (the Kelvin sign) can pass.
+# The regex is anchored with \A and \z, never $, which .NET lets match before a
+# final newline, and matched with -cmatch so IgnoreCase cannot widen a range.
+$HostKeyRe      = '\A[A-Za-z0-9][A-Za-z0-9._-]{0,62}\z'
+$HostFileMax    = 65
+$MemoryHostFile = $null
+if ($env:USERPROFILE) { $MemoryHostFile = Join-Path (Join-Path (Join-Path $env:USERPROFILE ".config") "ops") "memory-host" }
+
+# Returns the key, ASCII-lowercased, or dies naming $What. An empty, path-like or
+# spaced value is a mistake to surface, never one to fall back from. No trimming.
+function Test-HostKey([string]$Value, [string]$What) {
+    if ([string]::IsNullOrEmpty($Value)) { Die "$What is empty; a host key is letters, digits, '.', '_' or '-' (for example example-host)" }
+    if ($Value -cnotmatch $HostKeyRe) {
+        Die "$What is not a valid host key: 1 to 63 of A-Z a-z 0-9 . _ - starting with a letter or digit, ASCII only, no spaces or slashes"
+    }
+    return $Value.ToLowerInvariant()
+}
+
+# The file rule on raw bytes. Returns $null when there is no override file, the
+# key when there is one, and THROWS on any other state (callers turn that into Die,
+# or into an empty key where only the current value is wanted). The bytes become a string
+# one-to-one through Latin-1, so a multi-byte character is several non-ASCII
+# characters and fails the ASCII-only match.
+function Get-HostKeyFromFile([string]$Path) {
+    $item = $null
+    try { $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return $null }
+    catch { throw "cannot look at $Path ($($_.Exception.Message)); fix its permissions or delete it" }
+    if ($item -is [System.IO.DirectoryInfo]) { throw "$Path is a directory; fix or delete it" }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Path is a symlink to nothing or not a regular file; fix or delete it" }
+    $buf = New-Object byte[] ($HostFileMax + 1)
+    $total = 0
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        while ($total -lt $buf.Length) {
+            $n = $fs.Read($buf, $total, $buf.Length - $total)
+            if ($n -le 0) { break }
+            $total += $n
+        }
+    } catch { throw "cannot read $Path ($($_.Exception.Message)); fix its permissions or delete it" }
+    finally { if ($fs) { $fs.Dispose() } }
+    if ($total -eq 0) { throw "the host key file $Path is empty; write one key such as example-host with -SetHostKey, or delete the file" }
+    if ($total -gt $HostFileMax) { throw "the host key file $Path is over $HostFileMax bytes; write one key with -SetHostKey, or delete the file" }
+    $text = [System.Text.Encoding]::GetEncoding(28591).GetString($buf, 0, $total)
+    if ($text.EndsWith("`r`n", [System.StringComparison]::Ordinal)) { $text = $text.Substring(0, $text.Length - 2) }
+    elseif ($text.EndsWith("`n", [System.StringComparison]::Ordinal)) { $text = $text.Substring(0, $text.Length - 1) }
+    if ($text -cnotmatch $HostKeyRe) {
+        throw "the host key file $Path does not hold exactly one key (1 to 63 of A-Z a-z 0-9 . _ - starting with a letter or digit; ASCII only, no BOM or spaces, one optional newline); write one with -SetHostKey, or delete the file"
+    }
+    return $text.ToLowerInvariant()
+}
+
+if ($PSBoundParameters.ContainsKey('SetHostKey')) {
+    if ($PSBoundParameters.ContainsKey('HostnameOverride')) { Die "-SetHostKey and -HostnameOverride together are ambiguous: pick one" }
+    if (-not $MemoryHostFile) { Die "no USERPROFILE, so there is nowhere to write the host key file" }
+    $SetHostKey = Test-HostKey $SetHostKey "-SetHostKey value"
+    $curKey = ""
+    # What the file says now, for the log and the no-op; an invalid file reads as
+    # empty here, so -SetHostKey repairs it (Get-HostKeyFromFile throws on one).
+    if ((Test-Path -LiteralPath $MemoryHostFile -PathType Leaf)) {
+        try { $curKey = Get-HostKeyFromFile $MemoryHostFile } catch { $curKey = "" }
+    }
+    if ($curKey -eq $SetHostKey) {
+        Log "host key file $MemoryHostFile already says '$SetHostKey'"
+    } elseif ($DryRun) {
+        Dry "would write host key '$SetHostKey' to $MemoryHostFile"
+    } else {
+        # Move-Item into a directory would move the new file inside it and report success.
+        if (Test-Path -LiteralPath $MemoryHostFile -PathType Container) { Die "$MemoryHostFile is a directory; fix or delete it" }
+        $dir = Split-Path -Parent $MemoryHostFile
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $tmp = "$MemoryHostFile.tmp"
+        # UTF-8 without a BOM, one line: the Python and bash readers take it as is.
+        [System.IO.File]::WriteAllText($tmp, "$SetHostKey`n", (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $MemoryHostFile -Force
+        Log "host key file $MemoryHostFile set to '$SetHostKey'"
+    }
+}
+
+if ($PSBoundParameters.ContainsKey('HostnameOverride')) {
+    $Host_ = Test-HostKey $HostnameOverride "-HostnameOverride value"
+} elseif ($PSBoundParameters.ContainsKey('SetHostKey') -and $DryRun) {
+    # A dry run wrote nothing, so the file does not say it yet: use the value.
+    $Host_ = $SetHostKey
+} else {
+    $fileKey = $null
+    if ($MemoryHostFile) {
+        try { $fileKey = Get-HostKeyFromFile $MemoryHostFile } catch { Die "$($_.Exception.Message)" }
+    }
+    if ($fileKey) {
+        $Host_ = $fileKey
+        Log "host key '$Host_' from $MemoryHostFile"
+    } else {
+        $Host_ = ($env:COMPUTERNAME -replace '\s', '').ToLower()
+    }
+}
 if (-not $Host_) { Die "could not determine host key" }
 
 # Claude Code encodes a cwd by replacing \ / : with -. The HOME cwd's encoded
@@ -212,6 +338,34 @@ function Test-TargetIgnored($targetRel) {
         $null = git check-ignore -q "$targetRel/MEMORY.md" 2>$null
         return ($LASTEXITCODE -eq 0)
     } finally { Pop-Location }
+}
+
+# --- Which encoded cwds get a pool --------------------------------------------
+# Test-ScratchEncoded KEY: $true for a key that names a scratch or temp cwd, the
+# bash memory-init's skip list (hooks/session-briefing.sh has the same one):
+# -tmp* (a cwd under /tmp, as in WSL), the Windows temp dir (AppData\Local\Temp),
+# the T3 Code "No project" scratch dirs under $HOME\.t3\scratch (the dot of .t3 is
+# a dash in Claude's key, or stays a dot in an older build's), Claude's own temp
+# dir (any key holding claude-tmp) and any t3code-claude-title key. HOME's own
+# key is exempt: HOME is a real cwd even when a test puts it under a temp dir.
+function Test-ScratchEncoded([string]$Encoded) {
+    if ($Encoded -eq $HomeEncoded) { return $false }
+    # -like is case-insensitive, which is right for Windows paths.
+    foreach ($pattern in @('-tmp*', '*-AppData-Local-Temp*', '*claude-tmp*', '*t3code-claude-title*',
+                           "$HomeEncoded--t3-scratch-*", "$HomeEncoded-.t3-scratch-*")) {
+        if ($Encoded -like $pattern) { return $true }
+    }
+    return $false
+}
+
+# Test-SourceEmpty PATH: $true when a memory dir holds nothing, or only the
+# generated MEMORY.md index. Migrating it would make an empty pool and a link to
+# it for a project that has no memory. Any other file, a dotfile included, makes
+# it non-empty.
+function Test-SourceEmpty([string]$Path) {
+    $other = Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'MEMORY.md' }
+    return (-not $other)
 }
 
 # --- init_one_encoded: process a single encoded cwd subdir -------------------
@@ -237,7 +391,9 @@ function Init-OneEncoded {
 
     # Treat both SymbolicLink and Junction as already-linked reparse points --
     # a junction-fallback run must not be mis-classified as a real directory.
-    $sourceItem = if (Test-Path $source) { Get-Item $source -Force } else { $null }
+    # -LiteralPath with -ErrorAction: a link to a missing pool is still an item here
+    # (Test-Path follows the link and says no), so a dangling link can be recreated.
+    $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
     $isReparse  = $sourceItem -and ($sourceItem.LinkType -in @('SymbolicLink', 'Junction'))
 
     if ($isReparse) {
@@ -245,6 +401,7 @@ function Init-OneEncoded {
         $existing = $sourceItem.Target
         if ($existing -is [array]) { $existing = $existing[0] }
         $existingResolved = (Resolve-Path -LiteralPath $existing -ErrorAction SilentlyContinue).Path
+        if (-not $existingResolved) { $existingResolved = $existing }   # a dangling link: compare the raw target
         $targetResolved   = if (Test-Path $target) { (Resolve-Path -LiteralPath $target).Path } else { $target }
         if ($existingResolved -eq $targetResolved) {
             Log "[$Encoded] already initialized"
@@ -283,7 +440,13 @@ function Init-OneEncoded {
         }
     }
     elseif ($sourceItem -and $sourceItem.PSIsContainer) {
-        # Case 2: real directory -- migrate (create-link-first, safe).
+        # Case 2: real directory -- migrate (create-link-first, safe), unless it
+        # holds nothing (HOME keeps its pool either way: case 3 makes an empty
+        # one for it on purpose).
+        if (($Encoded -ne $HomeEncoded) -and (Test-SourceEmpty $source)) {
+            Log "[$Encoded] source is an empty memory dir -- skipping (no pool is made for it)"
+            return
+        }
         Log "[$Encoded] source is real directory -- migrating"
         if ($DryRun) {
             Dry "[$Encoded] would migrate $source -> $target and link"
@@ -347,7 +510,12 @@ function Init-OneEncoded {
 
     # --- keep the pool in git (see memory-init: git does not track an empty
     # pool, so it vanished and left the memory link dangling) ----------------
-    if (-not $DryRun -and (Test-Path -LiteralPath $source)) {
+    # A dangling link counts: Get-Item sees the link where Test-Path follows it.
+    $linkItem = Get-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
+    if ($DryRun -and $linkItem -and $linkItem.LinkType -in @('SymbolicLink', 'Junction') -and -not (Test-Path -LiteralPath $target)) {
+        Dry "[$Encoded] would recreate the missing pool $targetRel"
+    }
+    if (-not $DryRun -and $linkItem) {
         if (-not (Test-Path -LiteralPath $target)) {
             New-Item -ItemType Directory -Force -Path $target | Out-Null
             Log "[$Encoded] pool directory was missing -- recreated"
@@ -410,6 +578,7 @@ function Init-OneEncoded {
 # --- Build the list of encoded subdirs to process ----------------------------
 $encodedList = New-Object System.Collections.Generic.List[string]
 $encodedList.Add($HomeEncoded)
+$scratchSkipped = 0
 
 if (-not $OnlyHome) {
     $projectsDir = Join-Path $ClaudeCfg "projects"
@@ -418,11 +587,15 @@ if (-not $OnlyHome) {
             $enc = $_.Name
             if ($enc -eq $HomeEncoded) { return }
             $mem = Join-Path $_.FullName "memory"
-            if (Test-Path $mem) { $encodedList.Add($enc) }   # real dir OR link
+            if ((Test-Path $mem) -or (Get-Item -LiteralPath $mem -Force -ErrorAction SilentlyContinue)) {   # real dir OR link (a dangling one too)
+                if (Test-ScratchEncoded $enc) { $script:scratchSkipped++; return }
+                $encodedList.Add($enc)
+            }
         }
     }
 }
 
+if ($scratchSkipped -gt 0) { Log "skipped $scratchSkipped scratch or temp cwd(s): no pool is made for them" }
 Log "processing $($encodedList.Count) encoded subdir(s): $($encodedList -join ', ')"
 Write-Host ""
 

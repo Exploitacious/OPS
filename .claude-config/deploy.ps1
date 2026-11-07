@@ -20,7 +20,7 @@
          on every copy (one with no origin remote commits locally)
       8. Mount the shared skills: clone the public skill source under
          PROJECTS/ when absent, then run bin/skills-vendor.sh sync in Git Bash
-      9. Retire the caveman + ponytail Claude Code plugins (uninstall if present)
+      9. Check for the caveman + ponytail Claude Code plugins (report and offer, never remove)
      10. Pin CLAUDE_CODE_GIT_BASH_PATH + run the security-guard self-test
 
     -NoSystem skips the scheduled task (a system-wide registration), for test
@@ -612,9 +612,9 @@ exit $?
     }
 }
 
-# --- Claude Code plugins: retire caveman + ponytail ---
+# --- Claude Code plugins: caveman + ponytail check ---
 Write-Host ""
-Write-Status "Retiring caveman + ponytail Claude Code plugins..." "Yellow"
+Write-Status "Checking for the caveman + ponytail Claude Code plugins..." "Yellow"
 
 # Resolve the claude CLI. A bare deploy.ps1 re-run may reach here before a PATH
 # refresh, so probe known install locations too (mirrors deploy.sh find_claude).
@@ -633,17 +633,21 @@ function Resolve-ClaudeCli {
     return $null
 }
 
-# This block used to INSTALL caveman, unpinned, from its third-party
-# marketplace head, right after Stage 1 had uninstalled it; Stage 1 retires
-# both plugins because their modes are now part of the harness's own operating
-# rules. The CLI edits settings.json when removing a declared plugin or
-# marketplace. Leave those declarations to Stage 1: CLI writes also follow
-# its symlink into another checkout. Never delete plugin dirs by hand.
+# The caveman + ponytail plugins. An earlier OPS deploy INSTALLED caveman,
+# unpinned, from its third-party marketplace head; their modes are now part of
+# the harness's own operating rules, so OPS no longer installs either one.
+# Whether a copy keeps one is its owner's call (CONTEXT/how-i-work.md, "The
+# template and a copy's owner"), so this step only reads the CLI inventories and
+# settings.json, says what it found, and prints the command that would remove
+# it. It never uninstalls a plugin or removes a marketplace. A plugin declared in
+# settings.json is pointed at Stage 1: the CLI's removal would rewrite that file
+# through its symlink into another checkout. Mirrors deploy.sh
+# notice_retired_plugins.
 # The calls run with ErrorActionPreference Continue: the CLI writes to stderr
 # when a plugin is already absent, and Windows PowerShell 5.1 turns redirected
 # native stderr into a terminating error under "Stop".
 $claudeExe = Resolve-ClaudeCli
-function Invoke-PluginRetirement {
+function Invoke-RetiredPluginNotice {
     param([string]$Cli)
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -659,7 +663,7 @@ function Invoke-PluginRetirement {
                     if ($null -ne $settings.$key -and $settings.$key -isnot [pscustomobject]) { throw 'Expected plugin declarations' }
                 }
             }
-            catch { Write-Warn "Cannot read plugin declarations in $settingsPath; retirement skipped."; return }
+            catch { Write-Warn "Cannot read plugin declarations in $settingsPath; the caveman/ponytail check was skipped."; return }
         }
         $pluginsOut = & $Cli plugin list --json 2>$null
         $pluginsRc = $LASTEXITCODE
@@ -671,27 +675,22 @@ function Invoke-PluginRetirement {
             $plugins = @($pluginsOut -join "`n" | ConvertFrom-Json -ErrorAction Stop)
             $markets = @($marketsOut -join "`n" | ConvertFrom-Json -ErrorAction Stop)
         }
-        catch { Write-Warn 'Cannot list plugin inventories; retirement skipped. Run: claude plugin list --json'; return }
+        catch { Write-Warn 'Cannot list plugin inventories; the caveman/ponytail check was skipped. Run: claude plugin list --json'; return }
         foreach ($plg in @('caveman', 'ponytail')) {
             $id = "${plg}@${plg}"
             if (($null -ne $settings.enabledPlugins -and $settings.enabledPlugins.PSObject.Properties[$id]) -or
                 ($null -ne $settings.extraKnownMarketplaces -and $settings.extraKnownMarketplaces.PSObject.Properties[$plg])) {
-                Write-Warn "Retired plugin $plg is declared in $settingsPath; removal would edit Stage-1 settings. Update Stage 1, then re-run deploy."
+                Write-Warn "Plugin $plg is declared in $settingsPath, which Stage 1 owns. OPS no longer ships it; to drop it, change Stage 1. Nothing was changed."
                 continue
             }
             if (@($plugins | Where-Object { $_.id -eq $id -and $_.scope -ne 'user' }).Count -gt 0) {
-                Write-Warn "Retired plugin $plg remains in a project or local scope; left unchanged to protect project settings."
+                Write-Warn "Plugin $plg is installed in a project or local scope, which is that project's choice. Nothing was changed."
             }
             if (@($plugins | Where-Object { $_.id -eq $id -and $_.scope -eq 'user' }).Count -gt 0) {
-                & $Cli plugin uninstall $id --scope user 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) { Write-Warn "Retired plugin $plg could not be removed (rc=$LASTEXITCODE); inspect: claude plugin list --json"; continue }
-                Write-Good "Removed retired plugin: $plg"
+                Write-Warn "Plugin $plg is installed. OPS no longer installs it (its mode is part of the harness rules); keep it if you use it, or remove it: claude plugin uninstall $id --scope user. Nothing was changed."
             }
-            # Unscoped removal can edit settings in the caller's project.
             if (@($markets | Where-Object { $_.name -eq $plg }).Count -gt 0) {
-                & $Cli plugin marketplace remove $plg --scope user 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) { Write-Good "Removed retired plugin marketplace: $plg" }
-                else { Write-Warn "Retired marketplace $plg remains (rc=$LASTEXITCODE); inspect its declaration before removing it: claude plugin marketplace list --json" }
+                Write-Warn "Plugin marketplace $plg is configured; if nothing uses it, remove it: claude plugin marketplace remove $plg --scope user. Nothing was changed."
             }
         }
     }
@@ -700,10 +699,10 @@ function Invoke-PluginRetirement {
     }
 }
 if ($claudeExe) {
-    Invoke-PluginRetirement -Cli $claudeExe
+    Invoke-RetiredPluginNotice -Cli $claudeExe
 }
 else {
-    Write-Warn "Claude CLI not found in PATH or standard install locations. Skipping plugin retirement."
+    Write-Warn "Claude CLI not found in PATH or standard install locations. Skipping the plugin check."
     Write-Warn "Install Claude Code first: https://claude.ai/download"
 }
 
@@ -747,7 +746,15 @@ Write-Status "Verifying security guards enforce..." "Yellow"
 $SelfTest = Join-Path $ConfigDir "hooks\guard-selftest.sh"
 if ($BashExe -and (Test-Path $SelfTest)) {
     $selfUnix = (& $BashExe -lc "cygpath -u '$SelfTest'" 2>$null).Trim()
-    $guardOut = & $BashExe -lc "'$selfUnix'" 2>&1
+    # The output is captured until the self-test ends, and in Git Bash every probe
+    # starts several processes, so a long probe set ran for minutes with nothing on
+    # screen and the deploy looked hung. Say it is running first. A self-test that
+    # offers --quick (the core block and allow probes per guard) gets it here; the
+    # full set runs in CI and by hand. One without the flag runs whole, as before.
+    $quickArg = ''
+    if (Select-String -Path $SelfTest -SimpleMatch -Quiet -Pattern '--quick') { $quickArg = ' --quick' }
+    Write-Action "Running the guard probes (Git Bash can take a minute)..."
+    $guardOut = & $BashExe -lc "'$selfUnix'$quickArg" 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Good "Security guards enforce (git-guard + secrets-guard block probes)."
     }

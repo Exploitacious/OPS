@@ -3,10 +3,12 @@
 # (14 session pin, 15 Opus 5 ban, 15b retired ids and Haiku), the
 # SessionStart matcher check (18), the boot checks (1b root instructions, 5
 # citations, 16 the always-loaded core, 17 retired hooks, 21 and 21b the
-# identity layer), the identity-exclusion check (23), the sandbox guards (24)
-# and dangling memory links (25) pass the shipped tree
+# identity layer), the identity-exclusion check (23), the sandbox guards (24),
+# dangling memory links (25), the memory digest fit and pool cap (6, 6b), and
+# the skill index and size checks (9, 9b), and the secrets scan exits (8) pass the shipped tree
 # against current Stage-1-shaped settings, and fail on each class they exist to
-# catch.
+# catch. It also pins the shipped .gitattributes rule that merges pool
+# MEMORY.md indexes with the union driver.
 #
 # Sources verify-ops.sh (its main runs only when executed) and drives single
 # checks against fixture trees under a throwaway HOME made by mktemp. It never
@@ -334,6 +336,22 @@ chk "shipped doctrine: citations in range (1..15)" "$([ "$FAILS" = 0 ] && printf
 printf 'see P16\n' >> "$OPS/CONTEXT/core.md"
 run check_citations
 chk "citation to P16 -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
+new_case citations-project-number
+mkdir -p "$OPS/CONTEXT"
+cp "$SRC_OPS/CONTEXT/how-i-work.md" "$SRC_OPS/CONTEXT/core.md" "$OPS/CONTEXT/"
+printf 'Billed to project P20260101.0001; see P2.\n' > "$OPS/CONTEXT/work-tracking.md"
+run check_citations
+chk "a PSA project number is not a principle -> OK" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+printf 'Also P16. applies, after P20260101.0001.\n' >> "$OPS/CONTEXT/work-tracking.md"
+run check_citations
+chk "out-of-range P16 beside a project number -> FAIL naming P16 only" \
+  "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'P16' && ! printf '%s' "$OUT" | grep -q 'P20260101'; echo $?)"
+mkdir -p "$HOME/elsewhere/linked-skill"
+printf 'see P99\n' > "$HOME/elsewhere/linked-skill/SKILL.md"
+sed -i '/P16/d' "$OPS/CONTEXT/work-tracking.md"
+ln -s "$HOME/elsewhere/linked-skill" "$OPS/SKILLS/linked-skill"
+run check_citations
+chk "a symlinked skill another repo owns is not cited here -> OK" "$([ "$FAILS" = 0 ]; echo $?)"
 new_case retired-hook
 run check_retired_hooks
 chk "Stage-1-shaped settings: no retired hook -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
@@ -439,6 +457,219 @@ git -C "$OPS" add -f SKILLS/synced/org-skill/SKILL.md
 git -C "$OPS" -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture
 run check_skills_index
 chk "committed synced dir -> WARN with the untrack command" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'rm -r --cached --quiet SKILLS/synced'; echo $?)"
+# A symlinked SKILLS entry is a skill another repo owns and indexes; a real
+# directory the README does not name still WARNs.
+new_case skills-index-link
+mkdir -p "$HOME/elsewhere/other-skill"
+printf -- '---\nname: other-skill\n---\n' > "$HOME/elsewhere/other-skill/SKILL.md"
+ln -s "$HOME/elsewhere/other-skill" "$OPS/SKILLS/linked-other-skill"
+run check_skills_index
+chk "symlinked skill entry -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
+mkdir -p "$OPS/SKILLS/unindexed-local-skill"
+run check_skills_index
+chk "real unindexed skill dir -> WARN naming it" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'unindexed-local-skill'; echo $?)"
+
+# 27. Memory pool entry cap (6b): WARN only, never FAIL (a pool is the
+# Operator's content). The shipped memory-index counts the entries, so the cap
+# and the --check exit codes come from the real indexer, never a stub, except
+# where a broken indexer is the case under test.
+mk_pool() {  # pool_name n_entries
+  local d="$OPS/.claude-memory/$1" i
+  mkdir -p "$d"
+  for ((i = 1; i <= $2; i++)); do
+    printf -- '---\nname: e%03d\ndescription: entry %d\nmetadata:\n  type: reference\n---\nbody\n' "$i" "$i" > "$d/e$(printf '%03d' "$i").md"
+  done
+}
+cap_case() {
+  new_case "$1"
+  mkdir -p "$OPS/.claude-config/bin" "$OPS/.claude-memory"
+  cp "$SRC_OPS/.claude-config/bin/memory-index" "$OPS/.claude-config/bin/memory-index"
+}
+cap_case cap-none
+run check_memory_pool_cap
+chk "no pools -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && printf '%s' "$OUT" | grep -q 'no memory pools to cap'; echo $?)"
+cap_case cap-at
+mk_pool host-a-home-op-OPS 60; mk_pool host-a-home-op-OPS-PROJECTS-ExampleOrg-app 3
+run check_memory_pool_cap
+chk "a pool at exactly 60 entries -> OK naming the cap and pool count" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && printf '%s' "$OUT" | grep -qF 'within the 60-entry cap (2 pools)'; echo $?)"
+cap_case cap-over
+mk_pool host-a-home-op-OPS 61
+run check_memory_pool_cap
+chk "a pool at 61 entries -> WARN naming pool and count, no FAIL" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qF 'host-a-home-op-OPS(61)'; echo $?)"
+mk_pool host-b-home-op-OPS 65
+run check_memory_pool_cap
+chk "two pools over the cap -> one WARN naming both" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qF 'host-a-home-op-OPS(61)' && printf '%s' "$OUT" | grep -qF 'host-b-home-op-OPS(65)'; echo $?)"
+cap_case cap-backfill
+mk_pool host-a-home-op-OPS 3
+printf 'no frontmatter\n' > "$OPS/.claude-memory/host-a-home-op-OPS/bad.md"
+run check_memory_pool_cap
+chk "an entry needing a backfill is not a cap finding -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+cap_case cap-broken
+mk_pool host-a-home-op-OPS 3
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n' > "$OPS/.claude-config/bin/memory-index"
+run check_memory_pool_cap
+chk "an indexer that cannot read a pool -> FAIL, never a pass" \
+  "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -qF 'host-a-home-op-OPS(exit 1)'; echo $?)"
+rm -f "$OPS/.claude-config/bin/memory-index"
+run check_memory_pool_cap
+chk "memory-index missing -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'memory-index missing'; echo $?)"
+
+# 28. Memory digest fit (6). A stub memory-index with --digest-fit prints the
+# fit line each fixture pool carries in fit.txt; one without it keeps the native
+# MEMORY.md size check. The shipped indexer on a small pool passes either way.
+fit_stub() {  # writes a --digest-fit stub that exits with $1
+  cat > "$OPS/.claude-config/bin/memory-index" <<PY
+#!/usr/bin/env python3
+import os, sys
+DIGEST_CAP = 9000
+if len(sys.argv) > 2 and sys.argv[1] == "--digest-fit":
+    for p in sys.argv[2:]:
+        f = os.path.join(p, "fit.txt")
+        if os.path.exists(f):
+            print(p + "\t" + open(f).read().strip())
+    sys.exit($1)
+sys.exit(1)
+PY
+}
+fit_case() {
+  new_case "$1"
+  mkdir -p "$OPS/.claude-config/bin" "$OPS/.claude-memory/pool-a" "$OPS/.claude-memory/pool-b"
+}
+fit_case fit-ok
+fit_stub 0
+printf '12\t12\t0\t0\n' > "$OPS/.claude-memory/pool-a/fit.txt"
+printf '3\t3\t0\t0\n' > "$OPS/.claude-memory/pool-b/fit.txt"
+run check_memory_indexes
+chk "every pool fits the digest -> OK naming the budget" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && printf '%s' "$OUT" | grep -qF '9000-character digest'; echo $?)"
+printf '80\t50\t25\t5\n' > "$OPS/.claude-memory/pool-a/fit.txt"
+run check_memory_indexes
+chk "a pool past the digest budget -> WARN naming it, no FAIL" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qF 'pool-a(25 by name only, 5 not shown, of 80)'; echo $?)"
+printf 'error\tOSError: unreadable\n' > "$OPS/.claude-memory/pool-a/fit.txt"
+fit_stub 1
+run check_memory_indexes
+chk "a pool the indexer cannot measure -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'pool-a(OSError'; echo $?)"
+printf '80\t50\t25\t5\n' > "$OPS/.claude-memory/pool-a/fit.txt"
+rm -f "$OPS/.claude-memory/pool-b/fit.txt"
+run check_memory_indexes
+chk "a run that measures 1 of 2 pools -> FAIL, even with an over-budget row" \
+  "$([ "$FAILS" = 1 ] && [ "$WARNS" = 0 ] && printf '%s' "$OUT" | grep -qF '(1/2 pools measured)'; echo $?)"
+printf '3\t2\t2\t0\n' > "$OPS/.claude-memory/pool-b/fit.txt"
+fit_stub 0
+run check_memory_indexes
+chk "a fit line whose counts do not add up -> FAIL" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'unreadable fit line'; echo $?)"
+fit_case fit-native
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$OPS/.claude-config/bin/memory-index"
+head -c 25000 /dev/zero | tr '\0' 'x' > "$OPS/.claude-memory/pool-a/MEMORY.md"
+run check_memory_indexes
+chk "no --digest-fit: MEMORY.md over 24KB -> WARN (the native-load check)" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'over 24KB'; echo $?)"
+cap_case fit-shipped
+mk_pool host-a-home-op-OPS 3
+memory_checks() { check_memory_indexes; check_memory_pool_cap; }
+run memory_checks
+chk "the shipped memory-index on a small pool -> no FAIL, no WARN" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+
+# 29. Skill size (9b): 16,384 bytes and 1,500 characters a line, both
+# inclusive; WARN only. Mounted, synced and symlinked skills are skipped, and the
+# shipped skills pass.
+mk_skill() {  # name bytes [longest_line_chars]
+  local d="$OPS/SKILLS/$1"; mkdir -p "$d"
+  python3 - "$d/SKILL.md" "$2" "${3:-60}" <<'PY'
+import sys
+path, size, line = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+out = "---\nname: x\n---\n"
+while len(out.encode()) + line + 1 <= size:
+    out += "a" * line + "\n"
+out += "b" * (size - len(out.encode()))
+open(path, "w").write(out)
+PY
+}
+size_case() { new_case "$1"; rm -rf "${OPS:?}/SKILLS"; mkdir -p "$OPS/SKILLS"; : > "$OPS/SKILLS/VENDORED.tsv"; }
+new_case size-shipped
+run check_skill_size
+chk "shipped skills within 16 KB and 1,500 characters a line -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+size_case size-small; mk_skill small 800
+run check_skill_size
+chk "a small skill -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+size_case size-edge; mk_skill edge 16384
+run check_skill_size
+chk "exactly 16,384 bytes -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+size_case size-big; mk_skill big 16385
+run check_skill_size
+chk "16,385 bytes -> WARN naming skill and size, no FAIL" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qF 'big (16385 bytes)'; echo $?)"
+size_case size-wide-edge; mk_skill wide 3000 1500
+run check_skill_size
+chk "a 1,500-character line -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+size_case size-wide; mk_skill wide 3000 1501
+run check_skill_size
+chk "a 1,501-character line -> WARN naming the line and its length" \
+  "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qE 'wide \(line [0-9]+ is 1501 characters\)'; echo $?)"
+size_case size-skipped
+mk_skill mountedx 40000; printf 'mountedx\tsrc/skills/mountedx\n' > "$OPS/SKILLS/VENDORED.tsv"
+mk_skill synced 40000
+mk_skill linked 40000; mv "$OPS/SKILLS/linked" "$HOME/linked-target"; ln -s "$HOME/linked-target" "$OPS/SKILLS/linked"
+run check_skill_size
+chk "mounted, synced and symlinked skills are skipped -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+rm -rf "${OPS:?}/SKILLS"
+run check_skill_size
+chk "no SKILLS dir -> FAIL, not a pass" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'could not run'; echo $?)"
+
+# 30. The shipped .gitattributes merges pool MEMORY.md indexes with the union
+# driver. Two machines that share a pool (an Operator who gives both the same
+# host key) each regenerate its index; without union, an entry each added
+# between the same two lines stops the daily sync's pull --rebase on a conflict.
+# The fixture replays that rebase.
+new_case gitattributes
+cp "$SRC_OPS/.gitattributes" "$OPS/.gitattributes"
+mkdir -p "$OPS/.claude-memory/host-a-home-op-OPS"
+g() { git -C "$OPS" -c user.name=selftest -c user.email=selftest@example.invalid "$@"; }
+g init -q -b main
+chk "pool MEMORY.md has merge=union" \
+  "$(git -C "$OPS" check-attr merge -- .claude-memory/host-a-home-op-OPS/MEMORY.md | grep -q ': merge: union$'; echo $?)"
+printf -- '- [A](a.md)\n- [C](c.md)\n' > "$OPS/.claude-memory/host-a-home-op-OPS/MEMORY.md"
+g add -A; g commit -q -m base
+g checkout -q -b other
+printf -- '- [A](a.md)\n- [B1](b1.md)\n- [C](c.md)\n' > "$OPS/.claude-memory/host-a-home-op-OPS/MEMORY.md"
+g commit -q -am other
+g checkout -q main
+printf -- '- [A](a.md)\n- [B2](b2.md)\n- [C](c.md)\n' > "$OPS/.claude-memory/host-a-home-op-OPS/MEMORY.md"
+g commit -q -am main
+g checkout -q other
+g rebase -q main >/dev/null 2>&1; rc=$?
+chk "a rebase of two index edits between the same lines applies clean" \
+  "$([ "$rc" = 0 ] && grep -qF 'b1.md' "$OPS/.claude-memory/host-a-home-op-OPS/MEMORY.md" && grep -qF 'b2.md' "$OPS/.claude-memory/host-a-home-op-OPS/MEMORY.md" && ! grep -q '^<<<<<<<' "$OPS/.claude-memory/host-a-home-op-OPS/MEMORY.md"; echo $?)"
+
+# 31. Secrets scan (8). secrets-scan.sh exits 1 on a hit and 2 when grep could
+# not scan a line; the check reports the two apart and keeps the scanner's
+# stderr, so an unreadable line is never called a found secret with no detail.
+scan_stub() {  # writes a secrets-scan.sh stub: stdout $1, stderr $2, exit $3
+  mkdir -p "$OPS/.claude-config/bin"
+  printf '#!/usr/bin/env bash\nprintf "%%s" "%s"\nprintf "%%s" "%s" >&2\nexit %s\n' "$1" "$2" "$3" \
+    > "$OPS/.claude-config/bin/secrets-scan.sh"
+  chmod +x "$OPS/.claude-config/bin/secrets-scan.sh"
+}
+new_case secrets-scan
+scan_stub "" "" 0
+run check_secrets
+chk "secrets scan clean -> OK" "$([ "$FAILS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+scan_stub "pool/a.md:3: aws-key" "" 1
+run check_secrets
+chk "secrets scan hit (exit 1) -> FAIL naming the hit" \
+  "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'literal secrets detected' && printf '%s' "$OUT" | grep -qF 'pool/a.md:3: aws-key'; echo $?)"
+scan_stub "" "secrets-scan: pool/b.md:9: grep failed on aws-key (exit 2); line not scanned" 2
+run check_secrets
+chk "secrets scan could not read a line (exit 2) -> FAIL with its reason, not a hit" \
+  "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'could not read some lines' && printf '%s' "$OUT" | grep -qF 'pool/b.md:9' && ! printf '%s' "$OUT" | grep -q 'literal secrets detected'; echo $?)"
+scan_stub "" "usage: secrets-scan.sh" 64
+run check_secrets
+chk "secrets scan did not run (exit 64) -> FAIL naming the exit" \
+  "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -qF 'did not run (exit 64)'; echo $?)"
 
 if [ "$fails" -eq 0 ]; then
   echo "verify-ops-selftest: all cases pass"

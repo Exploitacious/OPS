@@ -99,6 +99,30 @@ if [[ -n "$GIT_ROOT" ]]; then
   [[ -z "$GIT_DIFFSTAT" ]] && GIT_DIFFSTAT="(no working-tree changes)"
 fi
 
+# Deferred tools called since the previous compaction. A compaction drops every
+# deferred tool's schema while the summary still names the tool, so the resumed
+# session calls it from memory and the call is rejected (5.9% of such calls in one
+# measured set of sessions, against 0.05% once the tool was re-selected). The list
+# goes into the snapshot, which post-compact-resume.sh prints, so the resumed
+# session is told exactly which tools to re-select. It is computed HERE, before the
+# compaction, because the transcript is complete now and Claude Code has written
+# nothing new yet; post-compact-resume.sh prefers Claude Code's own record
+# (compactMetadata.preCompactDiscoveredTools) when it can read it and falls back to
+# this section. Best-effort: no transcript, no interpreter or no tools prints nothing.
+DEFERRED_TOOLS=""
+_hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "$PAYLOAD" ]] && declare -F hook_python >/dev/null; then
+  _dt_tp="$(printf '%s' "$PAYLOAD" | hook_field transcript_path 2>/dev/null)" || _dt_tp=""
+  if [[ -n "$_dt_tp" && -f "$_dt_tp" && -r "$_hook_dir/mcp-reselect.py" ]] && _dt_py="$(hook_python 2>/dev/null)"; then
+    _dt_to="$(hook_timeout 2>/dev/null)" || _dt_to=""
+    if [[ -n "$_dt_to" ]]; then
+      DEFERRED_TOOLS="$("$_dt_to" 5 "$_dt_py" "$_hook_dir/mcp-reselect.py" used "$_dt_tp" 2>/dev/null | head -60)"
+    else
+      DEFERRED_TOOLS="$("$_dt_py" "$_hook_dir/mcp-reselect.py" used "$_dt_tp" 2>/dev/null | head -60)"
+    fi
+  fi
+fi
+
 # Write the snapshot.
 {
   echo "# Pre-compact snapshot: $NOW"
@@ -137,6 +161,14 @@ fi
   printf '%s\n' "$GIT_DIFFSTAT"
   echo '```'
   echo ""
+  if [[ -n "$DEFERRED_TOOLS" ]]; then
+    echo "## Deferred tools used before this compaction"
+    echo ""
+    echo "Their schemas do not survive the compaction: re-select each with ToolSearch before its first call."
+    echo ""
+    printf '%s\n' "$DEFERRED_TOOLS" | sed 's/^/- /'
+    echo ""
+  fi
   echo "## Post-compact reading order"
   echo ""
   echo "1. This snapshot (you are here)."
@@ -220,13 +252,13 @@ fi
 # CURRENT $HOME) with a github.com origin: a test harness that points HOME at a
 # fixture must never reach a real repo with a fixture trash and no T3 state.
 # Everything that can remove anything is branch-gc's own fail-closed checks;
-# worktrees go to its 7-day trash. A payload carrying agent_id is a sub-agent
-# lane's compaction, not the session's, so it is skipped: a lane that compacts
-# every few minutes must not start a sweep each time. Known limit: some Claude
-# Code builds send a lane's PreCompact without agent_id (with the parent's
-# session id and cwd), so such a compaction still starts a run; branch-gc's own
-# skip window (BRANCH_GC_SKIP_SECONDS, 600 s on unchanged refs) then turns the
-# repeats into a cheap no-op.
+# worktrees go to its trash, which the nightly sync purges. A payload carrying
+# agent_id is a sub-agent lane's compaction, not the session's, so it is skipped:
+# a lane that compacts every few minutes must not start a sweep each time. Known
+# limit: some Claude Code builds send a lane's PreCompact without agent_id (with
+# the parent's session id and cwd), so such a compaction still starts a run;
+# branch-gc's own skip window (BRANCH_GC_SKIP_SECONDS, 600 s on unchanged refs)
+# then turns the repeats into a cheap no-op.
 #
 # The timeout. A kill can land inside a quarantine (the worktree moved, its
 # manifest not yet written) or inside a deletion, so the worker passes branch-gc

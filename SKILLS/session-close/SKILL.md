@@ -1,6 +1,6 @@
 ---
 name: session-close
-description: "Use when the Operator says close/shut down/end this session for good, or close out for the day. Reconciliation and teardown, not pre-compact-synthesis or session-handoff."
+description: "Use when the Operator says close, shut down, or end this session for good, or close out for the day. Runs the session's full cleanup, reconciles its time, answers what do you need from me through the ask card, then tears it down. Not pre-compact-synthesis (pause) or session-handoff (move)."
 ---
 
 # Close a session, permanently and cleanly
@@ -14,6 +14,8 @@ Permanently end a finished session: document it, reconcile it, archive it, tear 
 | Close | The session's purpose is done: document, archive, tear down | this skill |
 
 Close is for a finished purpose, not a finished day. If real work is still in-flight, say so and offer handoff or compact instead. A close with open threads is a future archaeology dig.
+
+The close is the session cleaning up after itself, with everything it knows. The session knows which repos it touched, which branches and worktrees it made, which memories it wrote and which facts it made stale, so nothing else can do this as well. The aim is trust: the next session starts in a clean workspace and never trips over stale or contradictory context. Two rules keep it predictable. No new scope during the close: a fix that turns up mid-close and takes more than a few minutes goes to the repo's follow-ups or a new session. And another live session's work stays theirs: a checkout, worktree, cache, scratch area or doc that another session is working on is not cleaned, moved or edited from here; tell the operator what you found and what would make it right, and name it in the receipt.
 
 A session never closes itself. Run this skill only after the operator's explicit word to close in this conversation. A finished purpose, an empty task list, or a completed handoff is the cue to say the work is done and offer the endings (close, archive, keep it open), then wait. Autonomy to compact at a rest stop is not authority to close: a close writes to external systems and ends the session you are speaking from, so it is the operator's call.
 
@@ -29,17 +31,21 @@ Run the full hygiene checklist from `pre-compact-synthesis`, everything except i
 
 - Git: every touched repo committed and pushed (the OPS copy only when `origin-private-check` verifies its origin private; the git-guard hook blocks it otherwise); working trees clean, or deliberately dirty with the operator's knowledge. Name what you leave.
 - Docs match reality: README, CHANGELOG, and lessons files updated for what this session shipped, in the same pass, not "later".
-- Memory: durable lessons, decisions, and feedback written to the memory pool, one fact per file, indexed. Then evict what this close terminates: per `pre-compact-synthesis` closeout hygiene, "Flush the memory cache", fold a closing project's entries to that project's home (its own docs tree by PR when the repo has one the team reads, else `CONTEXT/projects/<project>-lessons.md`) and delete them, index lines too, no stubs.
+- Branches and worktrees: `closeout-hygiene.md` step 4 holds the commands. Run `branch-gc --apply <repo>` once per touched repo and act on its report rows, remove this session's scratch worktrees that branch-gc keeps and you can prove are disposable, and put any main checkout this session moved back on its default branch, unless another live session is working in it (then name it in the receipt).
+- Memory: durable lessons, decisions, and feedback written to the memory pool, one fact per file, indexed. Disposition this session's flush-queue lines and entries, and edit any entry this session proved wrong or superseded (correct it, never delete it). Then evict what this close terminates: per `pre-compact-synthesis` closeout hygiene, "Flush the memory cache", fold a closing project's entries to that project's home (its own docs tree by PR when the repo has one the team reads, else `CONTEXT/projects/<project>-lessons.md`) and delete them under that step's deletion rule, index lines too, no stubs.
 - Tasks: the session's task list is resolved, completed or re-homed with the operator's sign-off. Nothing silently abandoned.
 - Pending items: reconcile them in every repo this session touched per `pre-compact-synthesis/closeout-hygiene.md` step 5: delete what the work completed, correct what drifted, route what is new.
 - Notes vault (optional, only when the operator keeps one): the rollup and inbox sweep in `closeout-hygiene.md` step 6.
+- Docker and scratch (`closeout-hygiene.md` step 4): remove the containers, images and volumes this session built or started by the names and ids its own commands used (never `docker system prune`, which reaches other sessions' work on the same daemon), and remove its own `$TMPDIR` files by exact path.
+- What was freed: run `df -h /` before the first cleanup step and after the last, and note Docker's reclaimed figures; the receipt carries the difference.
+- Lint, only when this session changed `.claude-config/` or `SKILLS/`: `~/OPS/.claude-config/bin/verify-ops.sh --quiet`. Fix FAILs on this session's files; list the others in one line.
 - Leftovers: if a genuinely open thread survives all of the above, write a handoff baton (`session-handoff` WRITE). A clean close usually needs none.
 
 ### 2. WIP and work-tracking reconciliation (the gate)
 
 Make the tickets, time, and boards reflect what this session did, before the session is gone. Read `CONTEXT/work-tracking.md` for the operator's time, ticketing, and board tools plus their fixed args. If that file is absent, still reconcile: draft the entry text and remind the operator to log it, per its "If nothing here is configured" block. Write nothing to an external system without their OK.
 
-A. Assemble the work picture; do not ask the operator to remember it. The session's activity is on disk. Reconstruct it scoped to what THIS session touched, because a box can run concurrent sessions and crons that commit on their own and would attribute to the wrong item. See `mechanics.md` for the scoped work-picture command and the leftover-stamp backstop. Commits are candidates, not attributions: the highest-confidence signal is the uncommitted working tree plus the work-log narrative, so lead with those and use commits only to corroborate. Compute minutes from the transcript per the standard in `work-tracking.md`, never guess or round.
+A. Assemble the work picture; do not ask the operator to remember it. The session's activity is on disk. Reconstruct it scoped to what THIS session touched, because a box can run concurrent sessions and crons that commit on their own and would attribute to the wrong item. See `mechanics.md` for the scoped work-picture command and the leftover-stamp backstop. Commits are candidates, not attributions: the highest-confidence signal is the uncommitted working tree plus the work-log narrative, so lead with those and use commits only to corroborate. Compute minutes from the transcript per the standard in `work-tracking.md`, never guess or round. Lanes, workflow agents and review passes this session ran are part of its block, not extra time.
 
 B. Resolve each touched work area to a candidate item. Consult the repo-to-item map named in `work-tracking.md` for a hint, then confirm it is the right OPEN item. A repo is not 1:1 with an item; phase-scoped work spawns new ones. Confirm, never auto-pick. Check what is already logged today so a day captured elsewhere is not double-logged.
 
@@ -74,7 +80,9 @@ A session with no registry row (started by hand, run as a T3 Code thread, or a t
 
 ### 4. Deliver the closeout receipt
 
-Report BEFORE teardown; step 5 can end this session mid-breath and nothing printed after it arrives anywhere. The receipt names what was committed and pushed (repos plus short SHAs), what memory and lessons were written, what docs changed, the WIP and work-tracking outcome (hours logged with item numbers, cards advanced, tasks updated, or what was declined and why), any baton written, and the revive command if archived.
+Report BEFORE teardown; step 5 can end this session mid-breath and nothing printed after it arrives anywhere. The receipt is about six lines and names what was committed and pushed (repos plus short SHAs), what was removed (branches, worktrees, Docker objects, scratch) and the disk space that freed, what memory and lessons were written, what docs changed, the WIP and work-tracking outcome (hours logged with item numbers copied from the read-back, cards advanced, tasks updated, or what was declined and why), any baton written, and the revive command if archived.
+
+Anything still waiting on the operator goes through the ask card, the one definition in `pre-compact-synthesis/SKILL.md` ("The ask card"): at most three asks, each with your recommendation and what happens if they say nothing (hold, for an outward send, money, a delete or prod); everything else a one-line decided or handling item; names instead of IDs, SHAs and version strings; every claim marked VERIFIED, INFERRED or LANE. A close with nothing waiting says "nothing waiting on you".
 
 ### 5. Last act: teardown (final tool call of the session)
 

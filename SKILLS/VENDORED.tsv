@@ -22,6 +22,15 @@
 #
 # This ships only the PUBLIC default source (Exploitacious/agent-skills, MIT).
 # Add rows for an org or private source of your own below, one per skill.
+#
+# Versions: this file has no version column. A mount follows the checked-out
+# commit of its source clone, and deploy never pulls an existing clone, so you
+# move to a newer release on purpose (SKILLS/README.md, "Skill sources").
+#
+# Every mounted skill costs its description in each session's skill listing
+# (SKILLS/README.md, "The skill listing budget"). To stop mounting one, delete its
+# row and its SKILLS/<name>/ mirror folder: sync writes mirrors and never removes
+# one. The template ships all nine rows below, and keeping them is the default.
 
 # Source repo: Exploitacious/agent-skills (public, MIT): the portable set.
 delegation-sizing	Exploitacious/agent-skills/skills/delegation-sizing

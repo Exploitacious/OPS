@@ -111,7 +111,7 @@ for t in .claude-config/bin/tests/*-test.sh .claude-config/bin/tests/*-test.py; 
         || { echo "FAILED: $t"; fails=$((fails + 1)); } ;;
   esac
 done
-for t in .claude-config/bin/*-selftest.* .claude-config/hooks/*-selftest.sh; do
+for t in .claude-config/bin/*-selftest.* .claude-config/hooks/*-selftest.sh .claude-config/hooks/*-test.py; do
   case "$t" in *.py) run=(python3 -B) ;; *) run=(bash) ;; esac
   .claude-config/bin/sandbox-run --no-bind --no-net --ro-bind "$PWD" -- "${run[@]}" "$t" \
     || { echo "FAILED: $t"; fails=$((fails + 1)); }
@@ -193,6 +193,13 @@ deleter on `/` and `$HOME` and wiped most of a home directory. A throwaway
   else, and never set it for the whole session.
 - Conventional Commits (`<type>(<scope>): <imperative summary>`, subject
   ≤ 72 chars). Body explains *why* when it isn't obvious.
+- The template adds and offers; it never takes away what a copy's owner
+  chose (`CONTEXT/how-i-work.md`, "The template and a copy's owner"). A change
+  to deploy, `harness-update`, or a gate that would delete, cap, or block an
+  owner's content (a plugin, a memory pool, a hook, a pin, a remote) ships as
+  a warning or an offer, never a FAIL, a block, or an automatic removal. The
+  one stated exception is the drift gate's FAIL on a banned or retired model
+  id, which edits nothing; that section says why.
 - One mechanic per PR beats a best-of-both-worlds mega-merge. Big merges
   hide leaks and stall review; a stack of small PRs flows.
 - Doc updates ride in the same PR as the change they describe

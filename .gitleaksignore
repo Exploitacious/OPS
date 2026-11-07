@@ -1,0 +1,9 @@
+# gitleaks findings that are known test fixtures, one fingerprint per line
+# (commit:path:rule:line, as gitleaks prints it). CI's secrets job reads this
+# file. Add a line only for a fixture already in history that a later commit
+# fixed; never for a real credential, which is rotated instead.
+#
+# guard-selftest.sh once wrote two fake private-key header lines a few lines
+# apart, which gitleaks read as one key block. The file builds the header at
+# run time now; this commit keeps the old text in history.
+eecbe3701528dbcc7952a14ddc571d4971e3504b:.claude-config/hooks/guard-selftest.sh:private-key:89

@@ -103,6 +103,7 @@ own.*
 | `sample-app/` | Example application: API + web UI | *(your stack)* | *(your target)* |
 | `sample-infra/` | Example infrastructure: IaC provisioning the hosts the app runs on | *(your IaC)* | *(your cloud)* |
 | `sample-data/` | Example data layer: DB schema + sync workers the app reads | *(your DB)* | *(your host)* |
+| `ticket-workspace/` | *(optional)* Team ticket workspace: one folder per ticket or project that has no dedicated repo, grouped by client (`<Client>/<Number>-<slug>/`), with an `INDEX.md` ledger; notes, scripts, and deliverables for the team's tickets live here | Markdown, small scripts | Private Git only |
 
 ### How these repos relate
 
@@ -112,6 +113,14 @@ a session knows which repo a change belongs in. For the example:
 `sample-data` owns the schema `sample-app` reads. Keep infrastructure
 diffs in `sample-infra`, application diffs in `sample-app`, and
 cross-cutting changes in paired PRs that reference each other.
+
+`ticket-workspace` is for work that belongs to no repo. When a ticket's
+work belongs to an existing repo, do it in that repo on its own branch and
+leave a pointer to the repo in the ticket folder. Launch sessions for ticket
+work from the workspace root so its memory and batons stay out of the
+cross-project pool. Keep it in a private repo, and name it whatever your team
+uses (`Tickets/` is common): `verify-ops.sh` check 10 warns on any repo
+directory this file does not name, so the name you pick must appear here.
 
 ### Cluster conventions
 
@@ -143,6 +152,7 @@ so ambiguous requests route correctly.
 | "web", "UI", "frontend" | `ExampleOrg/sample-app` (client) |
 | "terraform", "provisioning", "DNS", "host" | `ExampleOrg/sample-infra` |
 | "schema", "migration", "sync worker", "entity data" | `ExampleOrg/sample-data` |
+| "ticket", "ticket number", "one-off client work", "where do ticket notes go" | `ExampleOrg/ticket-workspace/<Client>/<Number>-<slug>/`; work that belongs to an existing repo goes there instead |
 | "dotfiles", "shell setup" | external dotfiles repo (see below) |
 
 ---
