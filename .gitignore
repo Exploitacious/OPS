@@ -37,6 +37,9 @@ SKILLS/.vendor.*/
 # deploy.sh links ~/.claude/skills to SKILLS/. Those skills belong to the org and refresh at
 # every session start; the daily backup's `git add -A` would commit them into this repo.
 SKILLS/synced/
+# The same sync deletes a skill it no longer lists by moving it into .trash/ beside it, and
+# ~/.claude/skills follows the link into this repo, so that trash would be committed too.
+SKILLS/.trash/
 
 # --- PROJECTS: repo subdirs (2nd-level) are their own repos (ignored).
 # Cluster folders (1st-level: ExampleOrg/, AnotherOrg/, etc.)

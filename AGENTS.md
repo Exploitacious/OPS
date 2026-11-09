@@ -111,7 +111,7 @@ current task allows.
 | What exists, the folder tree | `README.md` |
 | Deploy (Stage 1 and 2), migration, T3 Code hosts | `DEPLOYMENT.md` |
 | First launch | `BOOTSTRAP.md` |
-| Template sync from upstream | the `harness-update` skill |
+| Template sync from upstream | the `harness-update` skill (slash-only: the Operator types `/harness-update`) |
 | Scripts, tests, and the gate | `.claude-config/bin/README.md` |
 | Porting rules, the CI gate, local test commands | `CONTRIBUTING.md`, `.github/workflows/gate.yml` |
 | Licenses of adapted third-party work | `SKILLS/THIRD_PARTY_NOTICES.md` |

@@ -143,8 +143,11 @@ Constraints, Improvement Kata, and the Phoenix Project lens
 
 **Round E: Output defaults.** Confirm or override the default document
 format (`.docx` / `.md` / other), the conversation register (casual or
-formal), and whether a rendered visual page for complex data is offered by
-default. Record overrides as standing orders.
+formal), and the visual page for data and reports: in a T3 Code thread it is
+shown inline by default without asking (`t3-html-render`), and elsewhere it is
+offered first (`how-i-work.md` § Reporting to the Operator). Offer: `Keep the
+default` · `Only when I ask` · `Always offer first`. Record overrides as
+standing orders.
 
 **Round F: Permission mode (always asked; never skipped or defaulted
 silently).** Before the question, tell the Operator plainly what the Stage-1

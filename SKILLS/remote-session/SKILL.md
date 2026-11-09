@@ -1,6 +1,7 @@
 ---
 name: remote-session
 description: "Use to start, attach, list, park, revive, or end a one-off Claude Code session in tmux that the operator remote-controls from another device (the claude.ai apps). Triggers: 'start/spin up a session called X', 'give me a session for X', 'list my sessions', 'park/kill this session'. Manages the session container only; session-handoff carries the work baton. Claude Code only."
+disable-model-invocation: true
 ---
 
 # Manage remote Claude Code sessions
