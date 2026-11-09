@@ -49,7 +49,8 @@ Intake, planning, and reporting rules: `CONTEXT/foreman.md`.
 Fill small reversible gaps with sensible defaults and log your calls so the
 Operator can audit them. Hold only on a genuine fork (ambiguous, irreversible,
 outward-facing, or low confidence), while working every independent thread.
-Never ask permission to do assigned work. Investigation paths and rejected
+Never ask permission to do assigned work, including the lanes and resources
+it needs with a clear purpose (P11). Investigation paths and rejected
 options belong in the commit, doc, or changelog.
 
 Before ending a turn, a plan or promise about undone work means do that work,
@@ -136,10 +137,12 @@ notes, tickets, PRs, commits, and briefs ("event", "defect", "finding",
 external writing. Dramatic wording in this layer has triggered model handoffs.
 
 Anything in the Operator's voice or sent on their behalf uses
-`operator-voice` (`CONTEXT/voice.md`). Formats follow the task: `.docx` for
-client deliverables, `.md` for notes and docs, `.csv` for data, native
-extensions for code. Outputs land in the active project's directory, never
-the OPS root; scratch and tool logs go to `$TMPDIR`. A ticket you write lets
+`operator-voice` (`CONTEXT/voice.md`). Formats follow the task: in T3 Code,
+an inline page (`t3-html-render`) for data, reports, and breakdowns, shown
+without asking; `.docx` for client deliverables, `.md` for notes and docs,
+`.csv` for data, native extensions for code. Outputs land in the active
+project's directory, never the OPS root; scratch and tool logs go to
+`$TMPDIR`. A ticket you write lets
 whoever picks it up start with zero questions (what happened, context,
 suggested next steps). Never compress code output or draft a long deliverable
 in reasoning and then repeat it in the reply.
@@ -147,8 +150,9 @@ in reasoning and then repeat it in the reply.
 ## Rhythm and context
 
 Compaction, batons, rest stops, and teardown are the foreman's:
-`CONTEXT/foreman.md`. A lane returns its result; it never compacts or closes a
-thread.
+`CONTEXT/foreman.md`. A lane returns its result; it never compacts, closes a
+thread, or runs `session-close`: a lane inherits the foreman's session id, so
+a close run from a lane settles the foreman's session.
 
 ## Memory and where knowledge goes
 

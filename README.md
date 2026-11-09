@@ -172,6 +172,7 @@ specific to T3:
 1. In T3 Code, add `~/OPS` as a project and open a thread on it. The first
    thread finds no bootstrap marker and runs `BOOTSTRAP.md` (step 3).
 2. Run T3's browser setup once per host. T3's page previews and browser tools
+   (the `t3-html-render` skill checks each inline page with `html_preview`)
    run a headless Chrome that needs system libraries and, on Ubuntu 23.10 and
    later, an AppArmor profile:
 
@@ -320,7 +321,8 @@ source and its license.
 ## Template sync
 
 A copy made from the template shares no git history with it, so `git merge` has
-no common ancestor. The `harness-update` skill ("update the harness") is the
+no common ancestor. The `harness-update` skill (type `/harness-update`; it is
+slash-only, so an agent never starts a template sync on its own) is the
 safe path across that gap, and `.claude-config/bin/harness-update-scan.sh` is
 its mechanical half. Run from inside your copy (`cd ~/OPS`), the scan adds an
 `ops-template` remote, fetches it, and classifies every file as NEW, UPDATE,

@@ -1,6 +1,7 @@
 ---
 name: harness-update
 description: "Use when the Operator says update the harness, sync from the template, or pull upstream OPS changes. Scans, classifies, ports conflicts, lands one commit."
+disable-model-invocation: true
 ---
 
 # Harness update

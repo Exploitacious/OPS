@@ -45,14 +45,30 @@ When preparing a rollup:
   (deadline, size, owner, state) so the Operator still chooses, then give
   your recommendation after it, marked as yours. Analysis is exploration
   until the Operator rules it an action item.
+- Ask at most two or three questions in a decision report, in plain prose
+  rather than a decision table. Every other decision is yours: take a
+  sensible default and log it in one line so the Operator can veto it
+  ([core: Intake](core.md#intake-then-autonomy)). Why: a long decision table
+  is hard to read and act on, and it hands back calls the agent was trusted
+  to make.
+- When the next move is the Operator's, the reply carries the whole
+  procedure inline: numbered steps with the exact names, values, click
+  paths, and a direct link, plus any message text ready to paste. Never a
+  pointer to a file they must open to learn what to do.
 - Give Operator action items the smallest first step, a named finish line,
   and a date. Dated concrete moves get done; diffuse reminders drift. Track
   the loops they leave open.
 - Follow tangents, hold dropped threads, and resurface them at the rest stop
   with what mattered and what is next.
-- Offer a rendered visual page for structured audits, research findings, or
-  comparisons, and wait for a yes. Once authorized for a workstream, continue
-  that format without asking again.
+- In a T3 Code thread, data, reports, research findings, and comparisons
+  are shown as an inline page by default, without asking first
+  (`t3-html-render`): one page on the turns where a picture reads faster
+  than prose, never on every turn. Link the saved page so the Operator can
+  download or share it; open a browser preview or a local server only when
+  asked. Why: a format the reader wants by default should not wait behind a
+  question. Outside T3, where no inline page exists, offer a rendered page
+  and wait for a yes; once authorized for a workstream, continue that
+  format without asking again.
 - "Send me a file" on a headless box invokes `grabit`, not in-chat delivery.
 - File praise for a judgment call too, so the successful pattern survives.
 
@@ -217,6 +233,13 @@ repo, lessons file, or the Operator's queue.
   Enforce conventions with a lint when fixing a class of drift. A cited
   reference must resolve on a fresh checkout; gitignored-but-cited material
   needs an explicit checkout or dependency route.
+- A deploy is done when it is verified live. After any deploy to any
+  system, read the change back and exercise the changed path before calling
+  it done. A third-party update you take counts too: an image pull or an
+  automatic upgrade is a deploy. Why: an automatic upgrade of a production
+  workflow service once dropped one input field and silently stopped its
+  output for more than a day, because nothing exercised the path after the
+  update.
 - Before a research lane, audit prior findings, cite what is settled, and run
   only the open delta. Prefer collected data; justify any new external pull
   against existing coverage.
@@ -333,6 +356,21 @@ longer `timeout` (2 hours at most). Pass an explicit `timeout` on every
 background wait, watch loop, or gate run that can outlast 30 minutes. T3's
 headless browser needs a one-time setup on each host
 ([DEPLOYMENT.md](../DEPLOYMENT.md), "T3 Code hosts").
+
+Keep a timer under about 115 minutes, inside that 2-hour cap: a call
+re-armed past it is stopped. A wake further out, or one that must fire while
+no turn is active, goes through the T3 MCP `schedule_task`, a persistent
+job in T3's own scheduler (`CronCreate` lives only as long as the session).
+Its schedule is a structured object, never JSON text:
+`{type:'fixed_time', timeOfDay:'10:00', weekdays:[0]}` (0 is Sunday) or
+`{type:'interval', everyMs}` (one minute minimum); the tool's schema lists
+any other trigger types your T3 version offers. `nextRunAt` comes back in
+UTC, so convert it to the Operator's time zone when you report it. A
+`fixed_time` task repeats, so a one-off wake's prompt calls
+`delete_scheduled_task` on its own task after it runs. Verified on a T3
+thread: a two-minute interval task bound to the thread fired seconds after
+its `nextRunAt`, posted its prompt into the thread as a new turn while no
+turn was active, and deleted itself as its prompt told it to.
 
 ## Remote kill and launch
 
@@ -513,7 +551,15 @@ errors.
 bounded work out of the long-lived main context; its economic value depends
 on the active tiers in [model-roles.md](model-roles.md). A session-scoped
 "do not delegate" line does not override the posture; check its provenance
-before treating it as the Operator's intent. In Claude Code, thorough reads
+before treating it as the Operator's intent. Spawn lanes and use subagents
+and other resources freely when the work has a clear purpose, without asking
+first. A purpose the assignment names is inside it; spend with no purpose is
+the "spend or scope far beyond the assignment" case in
+[core: Intake](core.md#intake-then-autonomy), which still goes to the
+Operator, and "one capable lane beats three"
+([foreman: Orchestration](foreman.md#orchestration)) stays the cost rule.
+Why: a lane the work needs is part of the assigned work, and asking first
+stalls work the Operator already handed over. In Claude Code, thorough reads
 use the `ops-*` lanes or `general-purpose`; reserve the built-in `Explore`
 for one-shot symbol lookups, because its excerpt reads have produced
 fabricated counts.

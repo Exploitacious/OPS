@@ -4,6 +4,59 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-09: inline pages in T3, slash-only sync skills, and a reporting and model-roles pack
+
+Features already in daily use in the harness OPS is ported from, brought to the template so
+a T3 Code copy works the same way out of the box.
+
+### Skills
+
+- **`t3-html-render` is new.** In a T3 Code thread it builds one self-contained HTML page
+  for data, a report, findings, a comparison or a plan, checks it with `html_preview` at
+  728 px dark and 390 px light (zero console errors), and shows it inline with
+  `html_render`, then links the saved file. It carries `assets/starter.html`, a worked
+  `assets/example-report.html` on synthetic data, and `references/palette.md`, whose
+  series colors pass a colorblind-safety validator on T3's light and dark surfaces (T3's
+  own chart variables do not).
+- **`harness-update` and `remote-session` are slash-only** (`disable-model-invocation:
+  true`). Both run only when the Operator asks, so their descriptions no longer take room
+  in the skill listing; type `/harness-update` or `/remote-session`. Measured on the
+  template's own skills, the listing goes from 17 entries and 3,575 characters of name and
+  description to 16 entries and 3,366, with `t3-html-render` added. Delete the line in a copy to give the model those
+  skills back. `SKILLS/README.md`, `README.md` and `AGENTS.md` say so.
+- **`SKILLS/.trash/` is gitignored.** Claude Code's skill sync moves a skill it drops into
+  that folder, and `~/.claude/skills` follows the link into the repo, so the daily
+  backup's `git add -A` would have committed it. `verify-ops-selftest.sh` now checks the
+  shipped `.gitignore` covers it.
+
+### Doctrine
+
+- **In T3, a page by default** (`CONTEXT/how-i-work.md`, Reporting to the Operator;
+  `core.md` Writing). Data, reports, research findings and comparisons are shown as an
+  inline page without asking first, on the turns where a picture reads faster than prose.
+  It replaces "offer a page and wait for a yes", which held a format the reader wants by
+  default behind a question; outside T3, where no inline page exists, the offer stays.
+  BOOTSTRAP Round E offers the choice.
+- **Reporting.** At most two or three questions in a decision report, in prose rather
+  than a decision table; the agent takes and logs the other calls. When the next move is
+  the Operator's, the reply carries the whole procedure inline, never a pointer to a file.
+- **Verify after any deploy** (Quality standards): read the change back and exercise the
+  changed path; a third-party update you take is a deploy too.
+- **Lanes and resources are used freely with a clear purpose** (P11, `core.md` Intake).
+  Spend with no purpose still goes to the Operator, and "one capable lane beats three"
+  stays the cost rule.
+- **Lanes never run `session-close`** (`core.md` Rhythm): a lane inherits the foreman's
+  session id, so a close run from a lane settles the foreman's session.
+- **T3 wake-ups** (Hosted inside T3 Code): timers stay under about 115 minutes; a wake
+  further out, or one that must fire with no turn active, goes through T3's
+  `schedule_task`, with the structured schedule shapes, UTC `nextRunAt`, and a one-off
+  task deleting itself.
+- **`model-roles.md`.** Opus 5.5's price and the API behavior that touches the harness;
+  Sonnet 5.5's catalog figures and its overturn condition; Haiku 5.5's 100K price step,
+  where it runs and where it never does, how Stage-1 holds the 100K ceiling and what
+  would break it; Fable's cost in plain figures; and the T3 Code picker settings
+  (`customModels`, `hiddenModels`).
+
 ## 2026-11-07: foreman doctrine split out, lane-aware boots, a memory loader, stricter guards, and a deploy that offers instead of removing
 
 Every lane paid on every turn for core rules that bound only the main thread, lanes kept

@@ -8,7 +8,8 @@
 # the skill index and size checks (9, 9b), and the secrets scan exits (8) pass the shipped tree
 # against current Stage-1-shaped settings, and fail on each class they exist to
 # catch. It also pins the shipped .gitattributes rule that merges pool
-# MEMORY.md indexes with the union driver.
+# MEMORY.md indexes with the union driver, and the shipped .gitignore rules
+# that keep SKILLS/synced and SKILLS/.trash out of the repo.
 #
 # Sources verify-ops.sh (its main runs only when executed) and drives single
 # checks against fixture trees under a throwaway HOME made by mktemp. It never
@@ -441,18 +442,22 @@ run check_memory_links
 chk "dangling memory link -> WARN naming memory-init" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q -- '-gone' && printf '%s' "$OUT" | grep -q 'memory-init'; echo $?)"
 
 # 26. SKILLS/synced (Claude Code's claude.ai skill sync) is gitignored and not an OPS skill: the
-# index check skips it, and a copy already committed WARNs with the untrack command.
+# index check skips it, and a copy already committed WARNs with the untrack command. The same
+# sync moves a skill it drops into SKILLS/.trash/, which is gitignored too, so the daily
+# backup's `git add -A` never commits it.
 new_case skills-synced
-mkdir -p "$OPS/SKILLS/synced/org-skill"
+mkdir -p "$OPS/SKILLS/synced/org-skill" "$OPS/SKILLS/.trash/old-org-skill"
 printf -- '---\nname: org-skill\n---\n' > "$OPS/SKILLS/synced/org-skill/SKILL.md"
+printf -- '---\nname: old-org-skill\n---\n' > "$OPS/SKILLS/.trash/old-org-skill/SKILL.md"
 cp "$SRC_OPS/.gitignore" "$OPS/.gitignore"
 # The index check is a substring match and the shipped README says "un-synced"; reword it so
 # only the skip, not that word, can keep the synced dir out of the index.
 sed -i 's/synced/sync-ed/g' "$OPS/SKILLS/README.md"
 git -C "$OPS" init -q
 run check_skills_index
-chk "untracked synced dir -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
+chk "untracked synced and .trash dirs -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
 chk "the shipped .gitignore ignores SKILLS/synced" "$(git -C "$OPS" check-ignore -q SKILLS/synced/org-skill/SKILL.md; echo $?)"
+chk "the shipped .gitignore ignores SKILLS/.trash" "$(git -C "$OPS" check-ignore -q SKILLS/.trash/old-org-skill/SKILL.md; echo $?)"
 git -C "$OPS" add -f SKILLS/synced/org-skill/SKILL.md
 git -C "$OPS" -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture
 run check_skills_index
