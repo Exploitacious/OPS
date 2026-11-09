@@ -148,6 +148,7 @@ td .cv{display:inline-flex;align-items:center;gap:4px}
  .rk{grid-template-columns:minmax(0,1fr) 70px 30px;gap:8px}
  .mx{grid-template-columns:minmax(0,1fr) repeat(3,36px);column-gap:6px}
  .lane-h .ds{display:none}
+ th,td{padding:8px 6px}
 }
 @media (prefers-reduced-motion:reduce){.viz *{transition:none!important;animation:none!important}}
 </style></head>
@@ -226,7 +227,7 @@ td .cv{display:inline-flex;align-items:center;gap:4px}
   <div role="tabpanel" id="p1" aria-labelledby="t1"></div>
   <div role="tabpanel" id="p2" aria-labelledby="t2" hidden>
    <ul class="fal">
-    <li><b>If ExampleOrg accepts a full day of downtime for a whole site,</b> Option B wins on cost and simplicity. Today the site managers say four hours is the limit before manual fallback strains staffing.</li>
+    <li><b>If ExampleOrg accepts a full day of downtime for a whole site,</b> Option B wins on cost and simplicity. Today the full-site ransomware recovery target is 12 hours.</li>
     <li><b>If site bandwidth rises to 1 Gbps at most sites,</b> Option B's restore times drop under target in four of five scenarios. Two carriers have quoted this for 2027.</li>
     <li><b>If ExampleOrg hires an in-house systems administrator,</b> Option C's labor cost mostly disappears and it becomes the cheapest design by a wide margin.</li>
     <li><b>If appliance pricing at the year 4 refresh rises more than 40%,</b> Option A's premium over B passes $75K. Re-run the model before signing a five-year term.</li>
@@ -246,9 +247,9 @@ td .cv{display:inline-flex;align-items:center;gap:4px}
   <div role="tabpanel" id="p4" aria-labelledby="t4" hidden>
    <div class="method">
     <p><b>Interviews.</b> Three department heads (operations, sales, finance) on how long each system can be down before work stops, which set the five recovery targets.</p>
-    <p><b>Timed restores.</b> Each option restored the same 2.1 TB file server, a 400 GB SQL VM, and a full simulated site in a lab tenant, six runs each. The chart shows medians.</p>
+    <p><b>Timed restores.</b> Each option restored the same 800 GB file server, a 400 GB SQL VM, and a full simulated site in a lab tenant, six runs each. The chart shows medians.</p>
     <p><b>Cost model.</b> Vendor quotes held for 12 months, a year 4 hardware refresh estimated at quoted price plus 10%, and labor at a blended $95 per engineer hour from two comparable organizations.</p>
-    <p><b>Scoring.</b> Each criterion normalized to 0 to 10 across the three options; the default weighting treats all five equally.</p>
+    <p><b>Scoring.</b> Each criterion rated on a 0 to 10 scale across the three options; the default weighting treats all five equally.</p>
     <p><b>Every figure on this page is invented to demonstrate the format.</b> ExampleOrg is a fictional company.</p>
    </div>
   </div>
@@ -292,7 +293,8 @@ function renderCost(){
  const x=i=>m.l+iw*i/5,y=v=>m.t+ih*(1-v/250);
  box.textContent='';
  const svg=el('svg',{width:W,height:H,viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Cumulative five-year cost by option. Values are in the data tables tab.'},box);
- if(firstCost){svg.classList.add('intro');firstCost=false;}
+ // The intro starts with hidden marks; skipping its animation alone would leave them hidden.
+ if(firstCost){if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches)svg.classList.add('intro');firstCost=false;}
  for(let v=0;v<=250;v+=50){el('line',{x1:m.l,x2:m.l+iw,y1:y(v),y2:y(v),class:v?'grid':'base'},svg);el('text',{x:m.l-8,y:y(v)+4,'text-anchor':'end',class:'tick'},svg,v?`$${v}K`:'$0');}
  ['Start','Year 1','Year 2','Year 3','Year 4','Year 5'].forEach((s,i)=>el('text',{x:x(i),y:H-8,'text-anchor':i?'middle':'start',class:'tick'},svg,narrow&&i?'Yr '+i:s));
  const cross=el('line',{x1:0,x2:0,y1:m.t,y2:m.t+ih,class:'cross'},svg);cross.style.opacity=0;
@@ -321,7 +323,7 @@ function updateCost(){
   R.labs[e.k].g.style.transform=`translate(${cx+10}px,${e.py+4}px)`;R.labs[e.k].v.textContent=fmtK(e.v);});
  $('#costNote').innerHTML=costMode==='labor'
   ?'<b>Engineer time flips the ranking.</b> Option C looks cheapest on a quote, but at about 260 hands-on hours a year it passes Option A during year 2 and finishes $30K above it.'
-  :'<b>On platform cost alone, Option C is cheapest</b> and Option A is the most expensive, driven by appliance hardware in year 1 and a refresh in year 5. Switch labor on to see the full picture.';
+  :'<b>On platform cost alone, Option C is cheapest</b> and Option A is the most expensive, driven by appliance hardware in year 1 and a refresh in year 4. Switch labor on to see the full picture.';
 }
 $$('#costSeg button').forEach(b=>b.addEventListener('click',()=>{costMode=b.dataset.m;$$('#costSeg button').forEach(x=>x.setAttribute('aria-pressed',x===b));updateCost();}));
 
@@ -403,8 +405,8 @@ function renderGantt(){
 
 /* findings */
 const BARS=n=>`<svg viewBox="0 0 14 12" aria-hidden="true">${[0,1,2].map(i=>`<rect x="${i*5}" y="${8-i*4}" width="3.5" height="${4+i*4}" rx="1" class="${i<n?'':'off'}"/>`).join('')}</svg>`;
-const FIND=[{c:3,l:'High',t:'Restore speed decides it.',p:'Point-of-sale and order systems tolerate about four hours down before manual fallback strains staff. Only Option A restores a full site inside that window.',s:'3 department-head interviews, 2 tabletop exercises'},
- {c:3,l:'High',t:'Direct-to-cloud restores are bandwidth-bound.',p:'Sites average 200 Mbps. Pulling a 2.1 TB file server back takes about nine hours whatever the vendor promises.',s:'6 timed lab restores per option'},
+const FIND=[{c:3,l:'High',t:'Recovery targets decide it.',p:'Only Option A meets all five recovery targets. Option B misses three local recovery targets; Option C misses the 24-hour site-loss target.',s:'3 department-head interviews, 2 tabletop exercises'},
+ {c:3,l:'High',t:'Direct-to-cloud restores are bandwidth-bound.',p:'Sites average 200 Mbps. Pulling an 800 GB file server back takes about nine hours even at full link speed.',s:'6 timed lab restores per option'},
  {c:2,l:'Medium',t:'Self-hosting cost is mostly labor.',p:'The 260 hours a year comes from two comparable organizations. Actuals could plausibly run 180 to 340 hours.',s:'Time records from 2 comparable organizations'},
  {c:2,l:'Medium',t:'Regional disaster risk sets the replica region.',p:'A replica in a distant region restored a full simulated site in 14 hours. A nearby region would share the same storms and outages.',s:'1 cloud failover test'},
  {c:1,l:'Low',t:'The year 4 refresh price is a guess.',p:'Appliance quotes hold for 12 months; the refresh is modeled at today\'s price plus 10%.',s:'Vendor quote, analyst estimate'}];

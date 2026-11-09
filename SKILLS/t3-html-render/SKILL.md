@@ -32,7 +32,7 @@ Keep plain text when the answer is a sentence, a status line, a yes or no, a sho
 
 1. Run `html_preview` at width 728 in dark, then at width 390 in light. The console must show zero errors. Log a check for anything an intro animation hides from the screenshot, such as path lengths or row counts, because the screenshot is taken right after load.
 2. Look at both screenshots for clipped labels, collisions, and overflow, and fix them before rendering.
-3. Call `html_render` with `height` set to the 728 px `contentHeight`, raised toward the 2000 px maximum when the page can grow after load. The frame fits the page and `height` only caps it; past the cap the page scrolls inside its frame.
+3. Call `html_render` with `height` set to the 728 px `contentHeight`, clamped to 80 through 2000 px so it fits the tool's accepted range. Raise it toward 2000 px when the page can grow after load. The frame fits the page and `height` only caps it; past the cap the page scrolls inside its frame.
 
 ## Reply after it
 

@@ -4,6 +4,8 @@ Single source for the harness model tiers. This file is canonical. [Core: Models
 
 This is policy, not a per-operator config. The model *ids* below are the ones the Stage-1 `settings.json` (linuxploitacious) pins today. If your plan carries different tiers, see "Settings, pins, and the shared Stage-1 file" below before you change anything: that file is shared, and editing it in place has side effects.
 
+Catalog facts checked 2026-11-09 against Anthropic's [model overview](https://platform.claude.com/docs/en/models/overview), [pricing](https://platform.claude.com/docs/en/about-claude/pricing), and [Opus 5.5 API changes](https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5). These are API list rates and defaults; subscription usage and Claude Code defaults can differ. Recheck these sources before a price or API behavior drives a new decision.
+
 ## Tiers
 
 | Role | Model | Id | How it is reached |
@@ -35,7 +37,7 @@ Opus 5.5, Sonnet 5.5, and Fable 5.1 run with a 1M-token window; the 4.6-era ids 
 
 ## Sonnet 5.5, the workhorse
 
-Sonnet 5.5 is the default lane for builds, fixes, docs, research, recon, migrations, mechanical work, and refutation. It has a 1M window and 128K max output and lists at $2 / $10 per MTok. Claude Code learned the `claude-sonnet-5-5` id in 2.1.284; an older build runs it as an unknown model with a 200K window, so update Claude Code on a host before relying on the pin. Like Opus 5.5, its effort default is `medium`, so the `xhigh` pin stays explicit.
+Sonnet 5.5 is the default lane for builds, fixes, docs, research, recon, migrations, mechanical work, and refutation. It has a 1M window and 128K max output and lists at $2 / $10 per MTok. Claude Code learned the `claude-sonnet-5-5` id in 2.1.284; an older build runs it as an unknown model with a 200K window, so update Claude Code on a host before relying on the pin. Its effort default on the [Claude API](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) is `high` (Claude Code defaults to `medium`), so the `xhigh` pin stays explicit.
 
 Overturn condition (P14). The constraint is the shared usage window, and this default bets that Sonnet 5.5 holds quality on ordinary lane work at half Opus 5.5's list price. Two readings would falsify it: churn, meaning Sonnet 5.5 lanes write more cache per output token than Opus 5.5 lanes on comparable work (the reading that got Opus 5 banned); and rework, meaning lanes the foreman must respawn on Opus 5.5 after verification fails, against all Sonnet 5.5 lanes of the same week. Read churn with `.claude-config/bin/transcript-usage.py --since <ISO time> ~/.claude/projects` (lane rows: `ccr` against `out`, with the `models` column naming the model); rework is the foreman's own count of respawns, since no tool records it. A reasonable line: churn above Opus 5.5's, or more than one lane in four respawned on Opus. If either holds, bring the Operator the figures with a recommendation. New input that reopens the question: a cheaper model that clears the same bar, or a price change on any tier.
 

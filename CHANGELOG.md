@@ -18,6 +18,9 @@ a T3 Code copy works the same way out of the box.
   `assets/example-report.html` on synthetic data, and `references/palette.md`, whose
   series colors pass a colorblind-safety validator on T3's light and dark surfaces (T3's
   own chart variables do not).
+  The example keeps its cost chart visible with reduced motion, fits data tables at
+  360 px, and keeps its recovery and cost explanations consistent with its data.
+  Render instructions cap tall pages at the accepted height before calling the tool.
 - **`harness-update` and `remote-session` are slash-only** (`disable-model-invocation:
   true`). Both run only when the Operator asks, so their descriptions no longer take room
   in the skill listing; type `/harness-update` or `/remote-session`. Measured on the
@@ -49,13 +52,15 @@ a T3 Code copy works the same way out of the box.
   session id, so a close run from a lane settles the foreman's session.
 - **T3 wake-ups** (Hosted inside T3 Code): timers stay under about 115 minutes; a wake
   further out, or one that must fire with no turn active, goes through T3's
-  `schedule_task`, with the structured schedule shapes, UTC `nextRunAt`, and a one-off
-  task deleting itself.
+  `schedule_task`, with structured schedule shapes, UTC `nextRunAt`, and native
+  one-off triggers when available (a repeating-task fallback deletes itself).
 - **`model-roles.md`.** Opus 5.5's price and the API behavior that touches the harness;
   Sonnet 5.5's catalog figures and its overturn condition; Haiku 5.5's 100K price step,
   where it runs and where it never does, how Stage-1 holds the 100K ceiling and what
   would break it; Fable's cost in plain figures; and the T3 Code picker settings
   (`customModels`, `hiddenModels`).
+  Catalog facts carry dated primary sources; Sonnet's API effort default is `high`,
+  while Claude Code's is `medium`.
 
 ## 2026-11-07: foreman doctrine split out, lane-aware boots, a memory loader, stricter guards, and a deploy that offers instead of removing
 

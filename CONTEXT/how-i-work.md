@@ -365,8 +365,10 @@ Its schedule is a structured object, never JSON text:
 `{type:'fixed_time', timeOfDay:'10:00', weekdays:[0]}` (0 is Sunday) or
 `{type:'interval', everyMs}` (one minute minimum); the tool's schema lists
 any other trigger types your T3 version offers. `nextRunAt` comes back in
-UTC, so convert it to the Operator's time zone when you report it. A
-`fixed_time` task repeats, so a one-off wake's prompt calls
+UTC, so convert it to the Operator's time zone when you report it. For a
+one-off wake, prefer `{type:'once', runAt:'<ISO timestamp with offset>'}`
+when the tool's schema offers it. On older versions, `fixed_time` and
+`interval` tasks repeat, so a one-off wake's prompt must call
 `delete_scheduled_task` on its own task after it runs. Verified on a T3
 thread: a two-minute interval task bound to the thread fired seconds after
 its `nextRunAt`, posted its prompt into the thread as a new turn while no
