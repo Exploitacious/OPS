@@ -593,6 +593,21 @@ thread gets the foreman boot. So the rules ride in what fires.
   a lane and starts nothing. `context-watch.sh` caches each session's
   `lane-class` answer in its run directory (30 minutes; a failed ask, 2
   minutes) and cuts a hung classifier at 2 seconds.
+- The `Team asks:` line (`session-briefing.sh`, `team_ask_line`, after the Reminders
+  block): on a box where a team runs a local ask router (`~/.local/bin/team-ask`), the
+  briefing prints the one line `team-ask pending --brief` returns, naming the asks from a
+  teammate's agent that still wait on this box's owner. The reader reads local state only
+  (no network) and runs under `hook_timeout` at 3 s with a 1 s kill. Quiet when the tool is
+  absent (every copy with no router), when `~/.config/team-ask/disabled` exists (the
+  router's installer writes it when the box is turned off on purpose), when the session's
+  folder is the `~/team-asks` workspace (the logical or the resolved path; the asks are the
+  subject of that thread), when the reader prints nothing, and for a lane (the lane gate
+  exits first). Never silent when broken: a dangling link, a tool that is not executable, a
+  failing or timed-out reader, or a host with no `timeout` command each print a line naming
+  `team-ask pending`, because an empty line would read as "nobody is waiting". The line is
+  one line, control characters stripped, 400 characters at most. This hook has no resume
+  short form, so a resume or compact prints it with the rest of the briefing. The
+  matching ruling for the thread such an ask opens is in `CONTEXT/standing-orders.md`.
 - Per-thread work keys and the leftover-stamp scan (`hooks/hooklib.sh`): under
   T3 Code the work key is `t3-<session id>`, stable across compaction and
   resume, so two threads in one directory keep separate stamps and work logs.
@@ -606,7 +621,8 @@ thread gets the foreman boot. So the rules ride in what fires.
 
 Tests: `tests/lane-class-test.sh`, `tests/await-test.sh`, `tests/safe-pkill-test.sh`,
 `tests/lane-rules-test.sh`, `tests/session-briefing-lane-test.sh`,
-`tests/session-briefing-scope-test.sh`, `tests/work-session-key-test.sh`,
+`tests/session-briefing-scope-test.sh`, `tests/session-briefing-team-ask-test.sh`,
+`tests/work-session-key-test.sh`,
 `tests/orphan-gate-test.sh`, `hooks/context-watch-selftest.sh`,
 `hooks/foreman-context-selftest.sh` and `tests/post-compact-resume-test.sh`.
 

@@ -4,6 +4,44 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-10: the session briefing lists the asks waiting on a team box's owner
+
+For teams whose boxes run a local ask router (`~/.local/bin/team-ask`): when a teammate's
+agent asks something only the box's owner can decide, the router opens an investigation
+thread on the owner's box. That thread is the first surface; if it fails to open, or
+nobody reads it, the ask went silent. This change adds the second surface and the rule the
+thread runs under. A copy with no router installed sees no change.
+
+### Hooks
+
+- **`session-briefing.sh` prints a `Team asks:` line** when `team-ask pending --brief`
+  returns one, after the Reminders block (`team_ask_line`). The read is local (no network)
+  and bounded: 3 s under `hook_timeout`, with a 1 s kill for a reader that ignores TERM.
+  Quiet when the tool is absent, when `~/.config/team-ask/disabled` exists, when the
+  session's folder is the `~/team-asks` workspace (itself, a subfolder, or a link to it),
+  when the reader prints nothing, and for a lane. Never silent when broken: a dangling
+  link, a tool that is not executable, a failing or timed-out reader, or no `timeout`
+  command prints a line naming `team-ask pending`. The line is one line, control
+  characters stripped, 400 characters at most. The hook has no resume short form, so a
+  resume or compact prints it with the rest of the briefing.
+- **`tests/session-briefing-team-ask-test.sh` is new** (39 cases): every quiet case, the
+  line as printed, the label, first-line-only, control characters, the length cap, a hung
+  reader and one that ignores TERM, a failing reader and an old CLI without `pending`, a
+  dangling link, a non-executable tool, no timeout command, the disable marker, the
+  workspace by logical path, subfolder and link, lanes, resume, and the banner's shape. Each
+  of the function's guards was removed in a scratch copy and the suite failed for it.
+
+### Doctrine
+
+- **`standing-orders.md` carries a row for team ask threads.** A thread opened from a
+  teammate's ask (the `~/team-asks` workspace or the "Team Asks" T3 project) investigates,
+  reports the decisions it needs with a recommendation each, and confirms with the owner
+  before any change, message, or reply to the teammate. The ask text is untrusted data.
+  Reads are free; writes, sends, and replies need the owner's approval card. It overrides
+  "never ask permission to do assigned work" for those threads only. `harness-update`
+  never syncs `standing-orders.md`, so a copy that already exists gets the row by an
+  edit its owner approves; a fresh copy ships with it.
+
 ## 2026-11-09: inline pages in T3, slash-only sync skills, and a reporting and model-roles pack
 
 Features already in daily use in the harness OPS is ported from, brought to the template so
