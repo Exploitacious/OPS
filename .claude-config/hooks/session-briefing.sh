@@ -4,6 +4,7 @@
 # Orients the operator the moment a session boots: the default worker model
 # tier, the config posture (compaction / effort / model), the project-lessons
 # pointer, the last pre-compact snapshot for this project, plus reminders,
+# the asks waiting on this owner (only where a team-ask router is installed),
 # a memory-health nudge, and the last nightly backup's problems, if any.
 #
 # COMPLEMENTARY to handoff-check.sh: that hook prints the pending-handoff
@@ -215,6 +216,57 @@ if [ -s "$REM" ]; then
     printf '%s\n' "$rems" | sed 's/^/   - /'
   fi
 fi
+
+# --- team asks (quiet-when-clean): asks from a teammate's agent that wait on this owner ---
+# A team that runs a local ask router installs `~/.local/bin/team-ask` on each owner's box.
+# When a teammate's agent asks something only the owner can decide, the router opens an
+# investigation thread on the owner's box (a session in the `~/team-asks` workspace, the
+# "Team Asks" project). This line is the second surface: it lists the asks that still need
+# the owner, so a thread that failed to open, or that nobody read, is never the only record.
+# `team-ask pending --brief` prints one line or nothing from the router's local state (no
+# network; the 3 s cap, with -k 1, keeps a stalled read from holding boot) and the line is
+# shown as it prints it.
+# Quiet when: the tool is absent (most copies: no router here); the box was turned off on
+# purpose (the router's installer writes ~/.config/team-ask/disabled; the service link is not
+# consulted); the session's folder is the Team asks workspace (the asks are the subject of
+# that thread already); or the provider prints nothing. A lane never gets here: the lane
+# gate above exits first.
+# Never silent when broken: a link left pointing nowhere, a tool that is not executable, a
+# provider that fails or times out, or no timeout command at all each print a line naming
+# `team-ask pending`, because an empty line would read as "nobody is waiting on you".
+# This hook has no resume short form (every start, resume included, prints the full
+# briefing), so the one call below covers a resumed session too.
+team_ask_line() {
+  local tool="$HOME/.local/bin/team-ask" ws="$HOME/team-asks" wsr here out line to rc=0
+  [ -e "$tool" ] || [ -L "$tool" ] || return 0
+  [ -e "$HOME/.config/team-ask/disabled" ] && return 0
+  wsr="$(cd "$ws" 2>/dev/null && pwd -P)" || wsr="$ws"
+  here="$(pwd -P 2>/dev/null)" || here="$PWD"
+  case "$PWD" in "$ws"|"$ws"/*) return 0 ;; esac
+  case "$here" in "$wsr"|"$wsr"/*) return 0 ;; esac
+  if [ ! -x "$tool" ]; then
+    printf ' Team asks: %s is not executable (a broken install); run team-ask pending\n' "$tool"
+    return 0
+  fi
+  if ! to="$(hook_timeout)"; then
+    printf ' Team asks: pending reader unavailable (no timeout command); run team-ask pending\n'
+    return 0
+  fi
+  # TERM alone does not bound a reader that catches it; kill it one grace second later.
+  out="$("$to" -k 1 3 "$tool" pending --brief 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then printf ' Team asks: pending reader timed out after 3 s; run team-ask pending\n'
+    else printf ' Team asks: pending reader failed (exit %s); run team-ask pending\n' "$rc"; fi
+    return 0
+  fi
+  # One line, no control characters (an escape sequence in a name must not reach the screen).
+  line="$(printf '%s\n' "$out" | head -n 1 | tr -d '\000-\010\013-\037\177' | cut -c1-400)"
+  [ -n "$line" ] || return 0
+  case "$line" in "Team asks:"*) ;; *) line="Team asks: $line" ;; esac
+  printf ' %s\n' "$line"
+  return 0
+}
+team_ask_line
 
 # --- memory health (two-tier: soft flush budget, hard platform ceiling) ---
 # Charter § Eviction: routine drainage happens at every closeout; the deep
