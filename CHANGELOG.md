@@ -4,6 +4,16 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-16: operator-voice says when it has no voice to use
+
+`operator-voice` fell back to plain prose when no voice was configured, but it named only
+an absent file, so a `CONTEXT/voice.md` still holding the template read as a configured
+voice, and a draft could look personal while being generic. It now treats the template
+(its opening says it has not been filled in) the same as an absent file, and says so in one
+line above the draft. A voice kept under another file name is mentioned in that line instead
+of being guessed at. Why: a usage review found the skill loaded often on boxes where the voice
+slot was the template or missing.
+
 ## 2026-11-10: the session briefing lists the asks waiting on a team box's owner
 
 For teams whose boxes run a local ask router (`~/.local/bin/team-ask`): when a teammate's
