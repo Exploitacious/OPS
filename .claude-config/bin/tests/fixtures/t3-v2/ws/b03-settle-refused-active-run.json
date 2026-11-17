@@ -1,0 +1,41 @@
+{
+ "operation": "settle-refused-active-run",
+ "proves": "thread.settle while a run is active (exact refusal text)",
+ "request": {
+  "_tag": "Request",
+  "id": "4",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "thread.settle",
+   "commandId": "90c19dd1-3583-451a-ac58-3f8d61d52a0f",
+   "threadId": "a4b43681-103d-40db-a31f-05109a2245c6"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "4",
+   "exit": {
+    "_tag": "Failure",
+    "cause": [
+     {
+      "_tag": "Fail",
+      "error": {
+       "_tag": "OrchestrationV2DispatchCommandError",
+       "commandId": "90c19dd1-3583-451a-ac58-3f8d61d52a0f",
+       "commandType": "thread.settle",
+       "message": "Thread a4b43681-103d-40db-a31f-05109a2245c6 is still running. Stop it before settling.",
+       "detail": "Thread a4b43681-103d-40db-a31f-05109a2245c6 is still running. Stop it before settling.",
+       "cause": {
+        "name": "OrchestratorDispatchError",
+        "message": "Failed to dispatch orchestration command thread.settle (90c19dd1-3583-451a-ac58-3f8d61d52a0f).",
+        "cause": "Thread a4b43681-103d-40db-a31f-05109a2245c6 is still running. Stop it before settling."
+       }
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

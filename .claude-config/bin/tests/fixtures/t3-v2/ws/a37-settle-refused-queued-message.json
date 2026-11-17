@@ -1,0 +1,41 @@
+{
+ "operation": "settle-refused-queued-message",
+ "proves": "thread.settle refused while a queued user message exists (exact text)",
+ "request": {
+  "_tag": "Request",
+  "id": "25",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "thread.settle",
+   "commandId": "4df4440c-f8e1-4f10-9fd9-c0389a815a02",
+   "threadId": "ab72082e-4e41-46de-83a1-bb30f11ff187"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "25",
+   "exit": {
+    "_tag": "Failure",
+    "cause": [
+     {
+      "_tag": "Fail",
+      "error": {
+       "_tag": "OrchestrationV2DispatchCommandError",
+       "commandId": "4df4440c-f8e1-4f10-9fd9-c0389a815a02",
+       "commandType": "thread.settle",
+       "message": "Thread ab72082e-4e41-46de-83a1-bb30f11ff187 has a queued message. Send it or remove it from the queue before settling.",
+       "detail": "Thread ab72082e-4e41-46de-83a1-bb30f11ff187 has a queued message. Send it or remove it from the queue before settling.",
+       "cause": {
+        "name": "OrchestratorDispatchError",
+        "message": "Failed to dispatch orchestration command thread.settle (4df4440c-f8e1-4f10-9fd9-c0389a815a02).",
+        "cause": "Thread ab72082e-4e41-46de-83a1-bb30f11ff187 has a queued message. Send it or remove it from the queue before settling."
+       }
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

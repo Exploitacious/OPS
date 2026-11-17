@@ -478,6 +478,76 @@ and never re-run a call that timed out; read back instead. Test:
 
 Which server, tool and arguments are configuration, in `$AWAIT_APPROVAL_CONFIG` or `~/.config/ops/await-approval.json` (an explicit path that is missing is an error; the default path may be absent). Each named kind sets `server` (an endpoint name for `--server`, or `null` for `OPS_MCP_URL`), `tool`, `args` (the string `"{id}"` becomes the id and `"{wait}"` the wait in whole seconds), an optional `record` (the answer key that holds the status record) and an optional `usable_field` (the answer key that says whether this caller may use an OPEN request); `default_kind` picks the kind when `--kind` is not given, and `key_connectors` names `mcpServers` entries of `~/.claude.json` whose literal `Bearer <key>` header is the last-resort key (a `${VAR}` reference is not a key; the key reaches the poll through its environment only, never argv or a file). With no file, the built-in kind `default` calls `approval_status` with `{"id": <id>, "wait_s": <seconds>}` on `OPS_MCP_URL`. The tool answers `status` PENDING, OPEN, CLOSED or EXPIRED, an optional `close_reason`, and holds the call until the request changes or about 40 s pass, so a click ends the wait at once; a poll that returns early with PENDING is paced to at least 3 s. Each poll is one run of `mcp-http-call.py`, so at most one session per waiter is live, and SIGTERM, SIGINT and SIGHUP reach the poll in flight so its session still closes. A transient failure (a 5xx, a 429, a dropped connection, an `isError` answer) is retried up to 5 times in a row; a refused key, an unknown endpoint or tool, a missing configuration and any in-band `error` answer stop at once, and the HTTP status is read where the client puts it, in the first `ERROR: ` line, never in the quoted response body. The line prints only the first 8 characters of the id, never an approve URL, and every key value and bearer token is scrubbed from server text. Tests: `tests/await-approval-test.py` (against a stub of the caller, 100+ cases including each signal, every exit code and the header and this section agreeing).
 
+## `t3-api.sh`, `compact-cycle.sh` and `lib/`: T3 Code self-compaction
+
+A T3 thread on a box with a harness token compacts itself; everything else stays
+manual. Linux only (both detach with `setsid`); they need `python3`, `curl`, T3
+Code 0.1.0 or later on the same box, and the token file `OPS_T3_TOKEN_FILE`
+(default `~/.config/ops/t3-harness.token`, the session account's own, mode 0600;
+the issue command and the unverified scope note are in `DEPLOYMENT.md`, "T3 Code
+hosts"). The token is read from the file, sent only in a request header, and
+never printed, logged or put on argv (`token` prints the path).
+
+`t3-api.sh` is the client for T3's orchestration API. It probes the server's
+protocol once per call (`/.well-known/t3/environment`: protocol 2 is T3 0.1.0,
+an absent key or a 404 is the older protocol 1) and speaks both. Reads go over
+HTTP: `snapshot`, `shell`, `thread <id>`, `active-turn <id>`, `thread-for-session
+<session id>` (T3's `statev2.sqlite`, read-only; an ambiguous mapping is refused),
+`compact-status <id> <message id>` (pending, completed, failed, or
+nothing-to-compact) and `server-busy`. On protocol 2 the answers are translated to
+the protocol-1 shape callers read, every V2 key kept beside it, and an HTML or
+non-JSON answer exits 6 instead of passing as data. Writes on protocol 2 are one
+`orchestration.dispatchCommand` over a WebSocket (`lib/t3_ws.py`): `send <id>
+<text>`, `compact <id>` (an exact `/compact`, printing the message id it minted),
+`stop <id>`, `settle <id>` (only when the thread is idle, its queued runs, pending
+requests and background work included; else exit 9), `settle-when-idle <id>
+[--timeout SEC]` (a detached waiter that logs to
+`$OPS_STATE_DIR/t3-settle-when-idle.log`, default `~/.local/state/ops`), and
+`queued-cancel <id> <message id>` (only a queued harness message the caller names).
+`archive` and `dispatch` are refused on protocol 2 (exit 7): the server has no
+idle guard on archive. The client's own guards refuse a text starting with `/`
+other than an exact `/compact`, an empty text, and a message to an archived or
+deleted thread (exit 10). A transport loss is retried once with the same command
+id, which the server deduplicates; a refusal (exit 11) or a decode defect (exit
+12) is never retried. `OPS_T3_DRY=1` prints a write instead of sending it.
+Settings: `OPS_T3_BASE` (server origin; default from T3's `server-runtime.json`),
+`OPS_T3_CALLER` and `OPS_T3_COMMAND_KEY` (command ids), `OPS_T3_HTTP_TIMEOUT`
+(30 s) and `OPS_T3_CONNECT_TIMEOUT` (5 s), `OPS_T3_POLL_SECONDS` (waiter poll,
+5 s). Exit codes: 0 ok, 2 usage, 3 no token, 4 transport or local read error, 5
+not found, 6 bad answer, 7 refused on protocol 2, 8 unsupported protocol, 9 not
+idle, 10 guard, 11 refused by the server, 12 server could not decode. The script
+header is the full reference (`t3-api.sh --help`).
+
+`compact-cycle.sh --target <thread id> [--baton FILE | --resume TEXT |
+--no-resume]` spawns a detached worker and returns at once; the caller ends its
+turn. The worker waits for the thread to go idle (`--idle-timeout`, default 300
+s; a busy thread is never sent `/compact`), sends `/compact`, and waits up to
+`--timeout` (900 s) for T3 to report THAT request's compaction completed (on
+protocol 2: the run of that message completed and carries a completed compaction
+item). Only then does it send the baton (default
+`~/.claude-compact-cycle/resume-<thread key>.txt`, renamed `*.sent-<stamp>`
+after), which queues behind any run the compaction woke. A thread with no
+conversation yet answers nothing-to-compact, and the baton still goes out. Any
+failure sends nothing more and keeps the baton; the log and status file under
+`~/.claude-compact-cycle/` (`CC_CYCLE_RUNDIR`) name the raw state it saw. Exit
+codes: 0 ok, 2 usage, 3 target missing (`ERR_TARGET`), 4 a cycle already runs
+for the target, 5 compaction or dispatch failed, 6 T3 API unusable
+(`ERR_T3API`: no token, unreachable, bad answer). Known limit: the target must be
+a top-level thread; a T3 delegated child thread (`thread:delegated-task:...`) is
+not in the shell's root threads, so the cycle stops with `ERR_TARGET`, and the
+context-watch hook never names the cycle to one.
+
+`hooks/context-watch.sh` names the cycle in its nags only when the session is a
+T3 thread on Linux and both scripts and a readable, non-empty token are present;
+while a fresh (under 30 min) baton for the thread exists it stays silent, since
+the agent ended its turn on purpose. Tests: `tests/t3-api-test.sh`,
+`tests/t3-api-v2-safety-test.py` and `tests/compact-cycle-t3-test.sh`, all against
+loopback stubs and the recorded frames in `tests/fixtures/t3-v2/`; each starts
+with the sandbox guard and refuses to run unless loopback is its only interface
+and 127.0.0.1:3773 (T3 Code's default port) refuses, so it can never reach a
+live server (`verify-ops.sh` lists them in `OPS_SANDBOX_SUITES`). The hook's
+route cases are in `hooks/context-watch-selftest.sh`.
+
 ## `wf-resume`: lanes of a workflow that never returned
 
 A usage-limit hold, a crash or a restart ends every running lane of a dynamic

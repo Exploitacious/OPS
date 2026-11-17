@@ -1,0 +1,24 @@
+{
+ "operation": "ws-gate-bad-bearer",
+ "proves": "/ws gate before any session state is touched: upgrade refused: HTTP/1.1 401 Unauthorized",
+ "response": {
+  "request_line": "GET /ws?orchestrationProtocol=2 HTTP/1.1",
+  "request_headers": {
+   "Host": "127.0.0.1:3790",
+   "Upgrade": "websocket",
+   "Connection": "Upgrade",
+   "Sec-WebSocket-Version": "13",
+   "Authorization": "Bearer <redacted>"
+  },
+  "status_line": "HTTP/1.1 401 Unauthorized",
+  "response_headers": {
+   "content-type": "application/json",
+   "content-length": "135",
+   "vary": "Accept-Encoding",
+   "access-control-allow-origin": "*",
+   "date": "Sat, 17 Oct 2026 17:32:53 GMT",
+   "connection": "keep-alive"
+  },
+  "body": "{\"_tag\":\"EnvironmentAuthInvalidError\",\"code\":\"auth_invalid\",\"reason\":\"invalid_credential\",\"traceId\":\"f25dbe5649db7ee6b1765d33bb885e97\"}"
+ }
+}

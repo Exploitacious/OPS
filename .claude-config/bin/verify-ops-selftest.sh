@@ -414,6 +414,9 @@ chk "mirror verifier not executable -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 new_case sandbox
 mkdir -p "$OPS/.claude-config/bin/tests"
 for f in sandbox-run sandbox-lint sandbox-guard.sh sandbox_guard.py; do cp -p "$SRC_OPS/.claude-config/bin/$f" "$OPS/.claude-config/bin/"; done
+# The listed suites must exist (sandbox-lint fails a listed path that does not), so the
+# fixture carries the shipped ones, guards included.
+for f in "${OPS_SANDBOX_SUITES[@]}"; do cp -p "$SRC_OPS/$f" "$OPS/$f"; done
 printf '#!/usr/bin/env bash\n%s\nbash "$HERE/../branch-gc" --dry-run\n' \
   '. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../sandbox-guard.sh" && sandbox_guard || exit 97' \
   > "$OPS/.claude-config/bin/tests/guarded-test.sh"

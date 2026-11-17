@@ -1,0 +1,24 @@
+{
+ "operation": "ws-gate-missing-protocol-param",
+ "proves": "/ws gate before any session state is touched: upgrade refused: HTTP/1.1 426 Upgrade Required",
+ "response": {
+  "request_line": "GET /ws HTTP/1.1",
+  "request_headers": {
+   "Host": "127.0.0.1:3790",
+   "Upgrade": "websocket",
+   "Connection": "Upgrade",
+   "Sec-WebSocket-Version": "13",
+   "Authorization": "Bearer <redacted>"
+  },
+  "status_line": "HTTP/1.1 426 Upgrade Required",
+  "response_headers": {
+   "content-type": "application/json",
+   "content-length": "157",
+   "vary": "Accept-Encoding",
+   "access-control-allow-origin": "*",
+   "date": "Sat, 17 Oct 2026 17:32:53 GMT",
+   "connection": "keep-alive"
+  },
+  "body": "{\"code\":\"orchestration_protocol_incompatible\",\"message\":\"Update this client to one that supports orchestration protocol 2.\",\"orchestrationProtocolVersion\":2}"
+ }
+}

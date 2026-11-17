@@ -1,0 +1,11 @@
+{
+ "capabilities": {},
+ "environmentId": "env-fixture",
+ "label": "fixture",
+ "orchestrationProtocolVersion": 2,
+ "platform": {
+  "arch": "x64",
+  "os": "linux"
+ },
+ "serverVersion": "0.1.0"
+}

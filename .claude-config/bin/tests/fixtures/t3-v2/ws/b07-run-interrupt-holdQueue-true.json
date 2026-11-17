@@ -1,0 +1,30 @@
+{
+ "operation": "run-interrupt-holdQueue-true",
+ "proves": "run.interrupt with holdQueue true (the UI Stop button) on the active run",
+ "request": {
+  "_tag": "Request",
+  "id": "8",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "run.interrupt",
+   "commandId": "44aeda2a-dc3d-4235-92b9-aec328b33e4b",
+   "threadId": "a4b43681-103d-40db-a31f-05109a2245c6",
+   "runId": "run:thread:a4b43681-103d-40db-a31f-05109a2245c6:ordinal:1",
+   "reason": "spike stop",
+   "holdQueue": true
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "8",
+   "exit": {
+    "_tag": "Success",
+    "value": {
+     "sequence": 1505
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,44 @@
+{
+ "operation": "dispatch-run-interrupt-bogus-run",
+ "proves": "run.interrupt with a runId that does not exist on an idle thread: error text",
+ "request": {
+  "_tag": "Request",
+  "id": "45",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "run.interrupt",
+   "commandId": "8e8f2861-03cb-4f9f-91d1-f4b37f18f21c",
+   "threadId": "f4d1d7b0-57d0-406a-b879-3eacee283aa2",
+   "runId": "run:nonexistent",
+   "reason": "spike",
+   "holdQueue": true
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "45",
+   "exit": {
+    "_tag": "Failure",
+    "cause": [
+     {
+      "_tag": "Fail",
+      "error": {
+       "_tag": "OrchestrationV2DispatchCommandError",
+       "commandId": "8e8f2861-03cb-4f9f-91d1-f4b37f18f21c",
+       "commandType": "run.interrupt",
+       "message": "Run run:nonexistent is not interruptible.",
+       "detail": "Run run:nonexistent is not interruptible.",
+       "cause": {
+        "name": "OrchestratorDispatchError",
+        "message": "Failed to dispatch orchestration command run.interrupt (8e8f2861-03cb-4f9f-91d1-f4b37f18f21c).",
+        "cause": "Run run:nonexistent is not interruptible."
+       }
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

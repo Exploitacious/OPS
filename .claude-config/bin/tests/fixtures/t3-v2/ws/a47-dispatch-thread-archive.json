@@ -1,0 +1,27 @@
+{
+ "operation": "dispatch-thread-archive",
+ "proves": "thread.archive returns {sequence}",
+ "request": {
+  "_tag": "Request",
+  "id": "39",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "thread.archive",
+   "commandId": "22dd408a-d3ad-4110-b889-ac8465f21b36",
+   "threadId": "f4d1d7b0-57d0-406a-b879-3eacee283aa2"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "39",
+   "exit": {
+    "_tag": "Success",
+    "value": {
+     "sequence": 826
+    }
+   }
+  }
+ ]
+}

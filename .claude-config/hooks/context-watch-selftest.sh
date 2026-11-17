@@ -38,6 +38,21 @@ STUB
 chmod +x "$WORK/lane-class-stub"
 export LANE_CLASS="$WORK/lane-class-stub"
 
+# Hermetic self-compact inputs. The route needs a readable harness token, so every case
+# starts with none (the host's own token must never turn a case into a self-compact one),
+# and t3-api.sh is a stub: it answers thread-for-session with T3_STUB_TID (exit
+# T3_STUB_RC, default 0) and logs one line per ask, and it never reaches a T3 server.
+export OPS_T3_TOKEN_FILE="$WORK/no-such-token" T3_STUB_LOG="$WORK/t3-api-calls"
+cat > "$WORK/t3-api-stub" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = thread-for-session ] || exit 2
+printf 'ask %s\n' "${2:-}" >> "$T3_STUB_LOG"
+[ -z "${T3_STUB_TID:-}" ] || printf '%s\n' "$T3_STUB_TID"
+exit "${T3_STUB_RC:-0}"
+STUB
+chmod +x "$WORK/t3-api-stub"
+export T3_API="$WORK/t3-api-stub"
+
 mk_transcript() { # $1=path $2=tokens
   python3 - "$1" "$2" <<'PYEOF'
 import json, sys
@@ -251,19 +266,102 @@ chk_plain "450K no boundary -> long session backstop"   'has run long'       "$(
 # A boundary readout, even above the ladder, is annotation and NEVER a block.
 chk_no_block "readout at a boundary emits no block payload" "$(run_b 900000 nb task)"
 
-# --- one compact route: synthesis, then the Operator's /compact ---------------
-# OPS has no self-compaction (the tmux typer is retired), so no nag may tell the
-# session to run a compactor or to self-compact, inside tmux or out.
-for m in stop posttool; do
-  out="$(printf '{"session_id":"rt-%s","transcript_path":"%s","stop_hook_active":false}' "$m" \
-    "$(mk_transcript "$WORK/rt-$m.jsonl" 930000; printf '%s' "$WORK/rt-$m.jsonl")" \
-    | TMUX=/tmp/fake-tmux-socket,1,0 bash "$DIR/context-watch.sh" "$m")"
-  case "$out" in
-    *compact-cycle*|*SELF-COMPACT*|*compactor*) printf '  FAIL  %s nag names a self-compact route: %.120s\n' "$m" "$out"; fails=$((fails + 1)) ;;
-    *"manual /compact is clear to fire"*) printf '  PASS  %s nag routes to the Operator'"'"'s /compact, even with TMUX set\n' "$m" ;;
-    *) printf '  FAIL  %s nag lacks the /compact route: %.120s\n' "$m" "$out"; fails=$((fails + 1)) ;;
+# --- the compact route: self-compact only where it can work ---------------------
+# A T3 Code session on Linux whose box has compact-cycle.sh, t3-api.sh and a readable,
+# non-empty harness token is told to self-compact on its own thread; every other session
+# (no token, not T3, tmux, Windows, a script missing, a T3 child thread) gets the
+# Operator's manual /compact and no compactor command, because a command that can only
+# exit 3 for want of a token would turn the nag into a loop. compact-cycle.sh is the real
+# one beside this hook unless a case points OPS_DIR at a fake checkout; t3-api.sh is the
+# stub above. Each case has its own session id (the throttle is per session).
+TOK="$WORK/t3-harness.token"; printf 'fixture-token-bytes\n' > "$TOK"; chmod 600 "$TOK"
+: > "$WORK/empty.token"
+TID="11111111-2222-3333-4444-555555555555"
+mkdir -p "$WORK/fakebin" "$WORK/winbin" "$WORK/no-cycle/.claude-config/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/fakebin/tmux"; chmod +x "$WORK/fakebin/tmux"
+printf '#!/usr/bin/env bash\necho MINGW64_NT-10.0-19045\n' > "$WORK/winbin/uname"; chmod +x "$WORK/winbin/uname"
+route_t3() { # $1=mode $2=tokens $3=sid [NAME=VALUE ...]: a T3 session (T3CODE_HOME set), no TMUX
+  local mode="$1" tokens="$2" sid="$3"; shift 3
+  local tp="$WORK/r-$sid.jsonl"
+  mk_boundary "$tp" "$tokens" none
+  printf '{"session_id":"%s","transcript_path":"%s","stop_hook_active":false}' "$sid" "$tp" \
+    | env -u TMUX -u T3CODE_THREAD_ID -u CLAUDE_CODE_SESSION_ID -u OPS_DIR T3CODE_HOME=/tmp/t3x "$@" \
+        bash "$DIR/context-watch.sh" "$mode"
+}
+chk_self() { # $1=label $2=output $3=thread id: the self-compact route for that thread, no token bytes
+  case "$2" in
+    *fixture-token-bytes*|*"manual /compact"*)
+      printf '  FAIL  %s (token bytes or the manual text in the route): %.160s\n' "$1" "$2"; fails=$((fails + 1)) ;;
+    *"compact-cycle.sh --backend t3 --target $3 --baton $CC_CYCLE_RUNDIR/resume-$3.txt"*"END YOUR TURN"*)
+      printf '  PASS  %s\n' "$1" ;;
+    *) printf '  FAIL  %s (no self-compact route for %s): %.160s\n' "$1" "$3" "${2:-<silence>}"; fails=$((fails + 1)) ;;
   esac
-done
+}
+chk_manual() { # $1=label $2=output: the Operator's /compact, and no compactor command
+  case "$2" in
+    *compact-cycle*|*SELF-COMPACT*|*compactor*|*t3-api*)
+      printf '  FAIL  %s names a compactor command: %.160s\n' "$1" "$2"; fails=$((fails + 1)) ;;
+    *"manual /compact is clear to fire"*) printf '  PASS  %s\n' "$1" ;;
+    *) printf '  FAIL  %s lacks the manual /compact route: %.160s\n' "$1" "${2:-<silence>}"; fails=$((fails + 1)) ;;
+  esac
+}
+stub_asks() { if [ -s "$T3_STUB_LOG" ]; then wc -l < "$T3_STUB_LOG" | tr -d ' '; else echo 0; fi; }
+
+# (1) Every condition met: each mode that prints a route names compact-cycle.sh for this thread.
+chk_self "route: T3 with a token self-compacts (stop, CRITICAL)" "$(route_t3 stop 930000 sc1 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")" "$TID"
+chk_self "route: T3 with a token self-compacts (posttool, URGENT)" "$(route_t3 posttool 880000 sc2 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")" "$TID"
+chk_self "route: T3 with a token self-compacts (readout, long session)" "$(route_t3 readout 450000 sc3 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")" "$TID"
+chk "route: the self-compact stop nag is still a block payload" '"decision": "block"' "$(route_t3 stop 930000 sc1b OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")"
+
+# (2) The same T3 session with no usable token: manual, and the thread is never looked up.
+: > "$T3_STUB_LOG"
+chk_manual "route: T3 without a token file stays manual (stop)" "$(route_t3 stop 930000 sc4 T3_STUB_TID="$TID")"
+chk_manual "route: T3 without a token file stays manual (posttool)" "$(route_t3 posttool 880000 sc5 T3_STUB_TID="$TID")"
+chk_manual "route: T3 without a token file stays manual (readout)" "$(route_t3 readout 450000 sc6 T3_STUB_TID="$TID")"
+chk_manual "route: an empty token file stays manual" "$(route_t3 stop 930000 sc7 OPS_T3_TOKEN_FILE="$WORK/empty.token" T3_STUB_TID="$TID")"
+n="$(stub_asks)"
+if [ "$n" = 0 ]; then printf '  PASS  route: without a usable token t3-api.sh is never asked\n'
+else printf '  FAIL  route: without a usable token t3-api.sh was asked %s time(s)\n' "$n"; fails=$((fails + 1)); fi
+
+# (3) Not a T3 session, token present: manual, outside tmux and inside it.
+chk_manual "route: outside T3 a token changes nothing (stop)" "$(OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID" run stop 930000 sc8)"
+chk_manual "route: outside T3 a token changes nothing (posttool)" "$(OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID" run posttool 880000 sc9)"
+chk_manual "route: a tmux pane inside T3 stays manual" \
+  "$(route_t3 stop 930000 sc10 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID" TMUX=/tmp/fake-tmux-socket,1,0 PATH="$WORK/fakebin:$PATH")"
+
+# (4) Windows (Git Bash reports MINGW): manual, even with T3 and a token.
+chk_manual "route: Windows stays manual" "$(route_t3 stop 930000 sc11 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID" PATH="$WORK/winbin:$PATH")"
+
+# (5) A script missing: no compact-cycle.sh in the checkout, or no t3-api.sh.
+chk_manual "route: no compact-cycle.sh in the checkout stays manual" \
+  "$(route_t3 stop 930000 sc12 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID" OPS_DIR="$WORK/no-cycle")"
+chk_manual "route: no t3-api.sh stays manual" \
+  "$(route_t3 stop 930000 sc13 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID" T3_API="$WORK/no-such-t3-api")"
+
+# (6) A T3 child thread (a delegated task) is not a compact-cycle.sh target: manual.
+chk_manual "route: a T3 delegated child thread stays manual" \
+  "$(route_t3 stop 930000 sc14 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="thread:delegated-task:fixture-child")"
+
+# (7) Unresolved thread (exit 5, no mapping): the route hands over the resolve step, never a
+# session-id target.
+out="$(route_t3 stop 930000 sc15 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_RC=5)"
+case "$out" in
+  *"thread-for-session sc15"*"--target <thread-id> --baton <that file>"*) printf '  PASS  route: an unresolved thread gets the resolve step\n' ;;
+  *) printf '  FAIL  route: an unresolved thread must get the resolve step: %.200s\n' "${out:-<silence>}"; fails=$((fails + 1)) ;;
+esac
+
+# (8) The in-flight interlock: a fresh baton for this thread silences every mode; a stale one
+# (over 30 minutes) does not, and without a token a baton silences nothing.
+BATON="$CC_CYCLE_RUNDIR/resume-$TID.txt"; printf 'resume text\n' > "$BATON"
+chk "interlock: a fresh baton silences the stop nag" EMPTY "$(route_t3 stop 930000 sc16 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")"
+chk "interlock: a fresh baton silences posttool" EMPTY "$(route_t3 posttool 880000 sc17 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")"
+chk_no_nag_state "interlock: a silenced stop writes no nag state" sc16
+chk_manual "interlock: without a token a baton silences nothing" "$(route_t3 stop 930000 sc18 T3_STUB_TID="$TID")"
+chk_self "interlock: a baton for another thread does not silence this one" \
+  "$(route_t3 stop 930000 sc19 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="22222222-2222-3333-4444-555555555555")" "22222222-2222-3333-4444-555555555555"
+touch -d '40 minutes ago' "$BATON"
+chk_self "interlock: a baton older than 30 minutes no longer silences" "$(route_t3 stop 930000 sc20 OPS_T3_TOKEN_FILE="$TOK" T3_STUB_TID="$TID")" "$TID"
+rm -f "$BATON"
 
 # --- sub-agent (lane) backstop ----------------------------------------------
 # A hook call carrying agent_id runs INSIDE a lane. The hook input's

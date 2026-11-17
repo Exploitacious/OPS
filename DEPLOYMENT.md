@@ -423,6 +423,48 @@ upgrade if the browser tools stop working.
 its own settings, not from the `claude()` shell function, so BOOTSTRAP Round F's
 terminal option does not reach T3 threads; the managed-settings option does.
 
+**Self-compaction needs a harness token.** A T3 thread on a box with a harness
+token compacts itself; everything else stays manual. `bin/compact-cycle.sh`
+waits for the thread to go idle, sends `/compact` through T3's orchestration
+API, sends the resume baton only after T3 confirms a completed compaction for
+that exact request, and talks to T3 through `bin/t3-api.sh` (with
+`bin/lib/t3_api_v2.py` and `bin/lib/t3_ws.py`). They need Linux (`setsid`),
+`python3`, `curl`, T3 Code 0.1.0 or later (orchestration protocol 2) on the
+same box, and the token file. Issue the token once per box, as the account that
+runs the sessions:
+
+```bash
+mkdir -p ~/.config/ops && chmod 700 ~/.config/ops
+( umask 077
+  t3 auth session issue --ttl 365d --label "$(hostname -s)-ops-harness" --token-only \
+    --scope orchestration:read --scope orchestration:operate \
+    > ~/.config/ops/t3-harness.token )
+ls -l ~/.config/ops/t3-harness.token   # expect -rw------- and your own account as owner
+```
+
+`t3` is the binary under `~/.t3/runtime/versions/<version>/t3` (the browser
+setup above shows how to pick the newest). The file lives at
+`~/.config/ops/t3-harness.token` (`OPS_T3_TOKEN_FILE` overrides), owned by that
+account, mode 0600. The token grants orchestration access to every thread on
+the box: never paste it into a chat, a log or a command line, and reissue it
+(same command) if it leaks or expires. The scripts read it from the file and
+send it only in a request header; it never appears in their argv, output or
+logs. Unverified: that these two scopes cover `thread.settle` (and so
+`t3-api.sh settle`) on a freshly issued token; no fresh-box acceptance run has
+been recorded yet. If the server refuses a request, the script prints its error,
+which names what is missing.
+
+Without the file, `t3-api.sh` exits 3 with one line
+(`t3-api: token file not found: <path>`) and sends nothing, and
+`compact-cycle.sh` stops with an `ERR_T3API` line (exit 6) before it spawns a
+worker. The context-watch hook offers the self-compact route only when the
+session is a T3 thread on Linux and both scripts and a readable, non-empty token
+file are present; otherwise its nags end with the Operator's `/compact` and name
+no compactor command. A T3 delegated child thread is not a target either:
+`compact-cycle.sh` targets top-level threads only (it stops with `ERR_TARGET`,
+exit 3, on a `thread:delegated-task:` id), so such a thread keeps the manual
+route. To turn self-compaction off on a box, remove the token file.
+
 ## Hooks and the drift gate (activated outside Stage 2)
 
 Three pieces of OPS machinery ship in the repo but are **not** wired by the
@@ -441,9 +483,10 @@ Stage 2 deploy scripts.
   `foreman-charter.sh` and `remote-session-register.sh` (both deleted;
   `verify-ops.sh` check 17 warns while an entry remains). The PreCompact hook
   also starts `branch-gc --apply` for the repo holding the cwd, detached. No
-  hook self-compacts: the retired `bin/compact-cycle.sh` typed `/compact` into
-  a tmux pane and could not tell a finished compaction from a failed one, so
-  the Operator fires `/compact` (T3 Code's composer, or the terminal).
+  hook compacts by itself. A T3 thread on a box with a harness token compacts
+  itself when the context-watch nag tells it to run `bin/compact-cycle.sh`
+  ("T3 Code hosts" above); everything else stays manual, and the Operator fires
+  `/compact` (T3 Code's composer, or the terminal).
 
 - **Destructive-tool tests run in a sandbox:** every suite that runs a tool
   that deletes or moves files (branch-gc, pre-compact, memory-init, deploy,
@@ -680,6 +723,7 @@ If a new piece of OPS setup needs to run on every host:
 - `.claude-config/hooks/`: SessionStart, pre-compact, and guard hooks (registered via the Stage-1 `settings.json`).
 - `.claude-config/systemd/`: the `ops-verify` timer and the optional `tmux-main` unit.
 - `.claude-config/bin/branch-gc`: merged-branch and worktree cleanup (nightly, pre-compaction, closeout).
+- `.claude-config/bin/compact-cycle.sh`, `t3-api.sh`, `lib/`: T3 self-compaction and the T3 orchestration client (Linux, harness token; "T3 Code hosts").
 - `.claude-config/bin/sandbox-run`: the sandbox destructive-tool tests run in.
 - `.claude-config/bin/verify-ops.sh`: the drift gate.
 - `.claude-config/bin/claude-root-wrapper.sh`: root permission mode and shared-host lock (Linux).

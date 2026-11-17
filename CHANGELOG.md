@@ -4,6 +4,57 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-17: a T3 thread on a box with a harness token compacts itself
+
+A T3 thread on a box with a harness token compacts itself; everything else stays manual.
+This reverses the 2026-10-19 line "No session self-compacts" for that one case. That entry
+retired a tmux typer that could not tell a finished compaction from a failed one; the new
+cycle asks T3 itself, through its orchestration API, whether the compaction it requested
+completed, and sends the resume baton only then. Why: a long autonomous T3 thread had to
+wait for the Operator to type `/compact` at every rest stop, and the API now carries the
+proof the old typer lacked.
+
+### Scripts
+
+- **`bin/t3-api.sh`**, with **`bin/lib/t3_api_v2.py`** and **`bin/lib/t3_ws.py`**: the
+  T3 orchestration client. It speaks T3 0.1.0's protocol 2 (writes are one
+  `dispatchCommand` over a WebSocket) and the older protocol 1, refuses an HTML or
+  non-JSON answer (exit 6), refuses `archive` and raw `dispatch` on protocol 2 (exit 7),
+  and settles a thread only when it is idle, queued runs, pending requests and
+  background work included (exit 9). Its guards refuse a slash text other than an exact
+  `/compact` and any message to an archived thread (exit 10). The token stays in its
+  file and a request header: never argv, output or logs.
+- **`bin/compact-cycle.sh`**: waits for the thread to go idle, sends `/compact`, waits
+  for T3 to report that exact request's compaction complete, then sends the baton
+  (queued behind any run the compaction woke). Any failure sends nothing more and
+  keeps the baton. Known limit: the target must be a top-level thread; a T3 delegated
+  child thread stops with `ERR_TARGET` (exit 3).
+
+### Hooks
+
+- **`context-watch.sh` names the cycle only where it can work**: a T3 session (not a
+  tmux pane) on Linux whose box has both scripts and a readable, non-empty token file
+  (`~/.config/ops/t3-harness.token`, `OPS_T3_TOKEN_FILE`). Its nags then say: synthesis,
+  write the baton, run `compact-cycle.sh` on this thread, end the turn; while a fresh
+  baton for the thread exists it stays silent. Everywhere else (no token, not T3,
+  Windows, a script missing, a delegated child thread) the route is unchanged, the
+  Operator's `/compact`, and no compactor command is named: a command that can only
+  exit 3 for want of a token would turn the nag into a loop.
+
+### Setup and tests
+
+- **The token is per box and not issued by deploy.** `DEPLOYMENT.md`, "T3 Code hosts",
+  has the issue command (scopes `orchestration:read` and `orchestration:operate`), the
+  path, owner and mode, and how to turn the route off (remove the file). Unverified:
+  that those two scopes cover `thread.settle` on a freshly issued token.
+- **Three suites, sandboxed and loopback only**: `t3-api-test.sh`,
+  `t3-api-v2-safety-test.py` and `compact-cycle-t3-test.sh` run against stubs and the
+  recorded frames in `bin/tests/fixtures/t3-v2/`. Each starts with the sandbox guard and
+  refuses to run unless loopback is its only interface and T3 Code's default port
+  refuses; `verify-ops.sh` check 24 now lists them in `OPS_SANDBOX_SUITES`, and its
+  self-test fixture carries them. `context-watch-selftest.sh` replaces the case that
+  failed any compactor nag with cases for each situation above.
+
 ## 2026-11-16: operator-voice says when it has no voice to use
 
 `operator-voice` fell back to plain prose when no voice was configured, but it named only

@@ -1,0 +1,40 @@
+{
+ "operation": "settle-rejected-commandid-retried",
+ "proves": "the refused settle commandId retried unchanged after the cause is gone: permanently rejected ('previously rejected'), so a semantic retry needs a fresh commandId",
+ "request": {
+  "_tag": "Request",
+  "id": "33",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "thread.settle",
+   "commandId": "4df4440c-f8e1-4f10-9fd9-c0389a815a02",
+   "threadId": "ab72082e-4e41-46de-83a1-bb30f11ff187"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "33",
+   "exit": {
+    "_tag": "Failure",
+    "cause": [
+     {
+      "_tag": "Fail",
+      "error": {
+       "_tag": "OrchestrationV2DispatchCommandError",
+       "commandId": "4df4440c-f8e1-4f10-9fd9-c0389a815a02",
+       "commandType": "thread.settle",
+       "message": "Command 4df4440c-f8e1-4f10-9fd9-c0389a815a02 was previously rejected: Failed to dispatch orchestration command thread.settle (4df4440c-f8e1-4f10-9fd9-c0389a815a02).",
+       "detail": "Command 4df4440c-f8e1-4f10-9fd9-c0389a815a02 was previously rejected: Failed to dispatch orchestration command thread.settle (4df4440c-f8e1-4f10-9fd9-c0389a815a02).",
+       "cause": {
+        "name": "OrchestratorCommandPreviouslyRejectedError",
+        "message": "Command 4df4440c-f8e1-4f10-9fd9-c0389a815a02 was previously rejected: Failed to dispatch orchestration command thread.settle (4df4440c-f8e1-4f10-9fd9-c0389a815a02)."
+       }
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

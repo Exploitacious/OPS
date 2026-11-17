@@ -1,0 +1,40 @@
+{
+ "operation": "settle-ok-after-cancel",
+ "proves": "thread.settle succeeds once nothing is queued and no run is active",
+ "request": {
+  "_tag": "Request",
+  "id": "31",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "thread.settle",
+   "commandId": "ed56e4a0-55aa-4ea5-ae2f-bc0fda6e9074",
+   "threadId": "95d69ed8-b816-4005-94b8-5fea14579bc3"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "31",
+   "exit": {
+    "_tag": "Success",
+    "value": {
+     "sequence": 797
+    }
+   }
+  }
+ ],
+ "shell_after": {
+  "status": "cancelled",
+  "activityRunStatus": null,
+  "activeRunId": null,
+  "latestRunId": "run:thread:95d69ed8-b816-4005-94b8-5fea14579bc3:ordinal:2",
+  "lastError": null,
+  "lastErrorClass": null,
+  "pendingRuntimeRequest": null,
+  "itemCount": 3,
+  "settledOverride": "settled",
+  "archivedAt": null
+ },
+ "settledAt": "2026-10-17T17:33:39.860Z"
+}

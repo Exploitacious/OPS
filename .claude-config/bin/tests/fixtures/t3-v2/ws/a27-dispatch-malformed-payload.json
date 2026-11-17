@@ -1,0 +1,30 @@
+{
+ "operation": "dispatch-malformed-payload",
+ "proves": "schema-decode failure (missing required fields): the Failure/Defect shape and text, which is NOT a stored rejection",
+ "request": {
+  "_tag": "Request",
+  "id": "13",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "message.dispatch",
+   "commandId": "eb862234-5949-40d5-a69f-c61af9c63b47",
+   "threadId": "d5df15ba-83d8-431a-9b59-312ee0bdf697"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "13",
+   "exit": {
+    "_tag": "Failure",
+    "cause": [
+     {
+      "_tag": "Die",
+      "defect": "Missing key\n  at [\"createdBy\"]"
+     }
+    ]
+   }
+  }
+ ]
+}

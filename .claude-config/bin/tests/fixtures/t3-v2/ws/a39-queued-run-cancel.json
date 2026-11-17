@@ -1,0 +1,34 @@
+{
+ "operation": "queued-run-cancel",
+ "proves": "queued-run.cancel removes the held queued run",
+ "request": {
+  "_tag": "Request",
+  "id": "30",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+   "type": "queued-run.cancel",
+   "commandId": "94c55d9e-f709-4a7b-8b84-0d5e659754ef",
+   "threadId": "95d69ed8-b816-4005-94b8-5fea14579bc3",
+   "runId": "run:thread:95d69ed8-b816-4005-94b8-5fea14579bc3:ordinal:2"
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "30",
+   "exit": {
+    "_tag": "Success",
+    "value": {
+     "sequence": 795
+    }
+   }
+  }
+ ],
+ "runs_after": [
+  {
+   "ordinal": 1,
+   "status": "failed"
+  }
+ ]
+}
