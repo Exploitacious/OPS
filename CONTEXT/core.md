@@ -4,8 +4,9 @@ The shared rules for every session and spawned lane working in this OPS
 harness: one file, always loaded. `.claude-config/deploy.sh` links it into
 `~/.claude/rules/ops-core.md`, so Claude Code loads it on every launch path.
 If you can read this, it is loaded: a global instruction to read
-`~/OPS/CONTEXT/core.md` as a fallback is already satisfied. Procedures live in
-skills; situational detail has one home in the table at the end. Paths are
+`~/OPS/CONTEXT/core.md` as a fallback is already satisfied. Skills hold facts
+about this copy's systems that an agent could not work out, not procedure
+(2026-11-17); situational detail has one home in the table at the end. Paths are
 relative to the OPS checkout (`~/OPS`). "The Operator" is the person this copy
 serves (`CONTEXT/USER.md`).
 
@@ -101,9 +102,13 @@ gets its why beside it in the same change; removing it must not recreate a
 forgotten regression. No swallowed exceptions, silent degradation, or deferred
 quality checks. If full quality is impossible, report the blocker. Tests of
 tools that delete or move files run in `sandbox-run`. Never trust your model
-over conflicting data; re-read the durable source. Mask secrets by value,
-never by field name; print at most the last four characters and never dump
-env.
+over conflicting data; re-read the durable source. Before a step that deletes,
+closes or prunes on absence, tell an empty read from a failed one; a failed
+read holds the action. Tag a deliberate shortcut `ponytail:` with its ceiling
+and upgrade path (`# ponytail: global lock, per-account locks if throughput
+matters`), so one search for the literal tag lists the debt (older copies used
+`shortcut:`; search both). Mask secrets by value, never by field name; print at
+most the last four characters and never dump env.
 
 Review and merge belong to the foreman: `CONTEXT/foreman.md`.
 
@@ -136,8 +141,14 @@ notes, tickets, PRs, commits, and briefs ("event", "defect", "finding",
 "fix"), not emergency or conflict vocabulary; internal codes stay out of
 external writing. Dramatic wording in this layer has triggered model handoffs.
 
-Anything in the Operator's voice or sent on their behalf uses
-`operator-voice` (`CONTEXT/voice.md`). Formats follow the task: in T3 Code,
+An id in a reply or note (ticket, document, device, PR) carries its name and a
+link, the record URL a tool returned, never a guessed one. A row that changes
+money or a client record says which of its values were read from the system,
+with which tool, and which were inferred. Anything longer than a chat reply
+gets the AI-tells catalog, `CONTEXT/ai-tells.md`. Writing as a person or on
+their behalf follows that person's own voice file; the Operator's is
+`CONTEXT/voice.md`. This writing style is the template's default; each copy's
+owner may change theirs. Formats follow the task: in T3 Code,
 an inline page (`t3-html-render`) for data, reports, and breakdowns, shown
 without asking; `.docx` for client deliverables, `.md` for notes and docs,
 `.csv` for data, native extensions for code. Outputs land in the active
@@ -165,10 +176,13 @@ and ticket numbers stay in your private OPS copy, never a public repo or the
 public OPS template. Launch sessions from the project's repo so its memory
 pool applies. Rulings go to `CONTEXT/standing-orders.md`, dated with a why,
 or the domain's lessons file; universal patterns go to a principle
-(`CONTEXT/how-i-work.md`) or a skill. Audits and runs record findings in a
-durable log or lessons file, not only chat. Memory holds pointers, never
-secrets. Keep each pool's `MEMORY.md` well under the 24.4KB size where it
-truncates. Ideas, context-file ownership, and pushback filing:
+(`CONTEXT/how-i-work.md`). Before proposing a skill, route the knowledge: a
+client fact to the documentation system, a repo fact to the repo, a behavior
+rule to doctrine, a mechanical step to a script or tool. Only what fits none
+of those becomes a skill, and `meta-skill-creator` says how. Audits and runs
+record findings in a durable log or lessons file, not only chat. Memory holds
+pointers, never secrets. Keep each pool's `MEMORY.md` well under the 24.4KB
+size where it truncates. Ideas, context-file ownership, and pushback filing:
 `CONTEXT/foreman.md`.
 
 ## Where to look
@@ -180,20 +194,23 @@ Operator to fetch data. Project repos live under `PROJECTS/<org>/<repo>`.
 | Question or task | Home to read |
 |---|---|
 | The Operator, their people, vendors, clients | `CONTEXT/USER.md`, `CONTEXT/team.md` |
-| Writing in the Operator's voice | `CONTEXT/voice.md` (`operator-voice`) |
+| Writing in the Operator's voice; editing out AI tells | `CONTEXT/voice.md`; `CONTEXT/ai-tells.md` |
 | P1-P15, situational rules, T3 Code hosting | `CONTEXT/how-i-work.md` |
 | The foreman's rules: intake, reporting, orchestration, review, merge, rhythm | `CONTEXT/foreman.md` |
 | The Operator's rulings | `CONTEXT/standing-orders.md` |
 | Model selection, bans, effort | `CONTEXT/model-roles.md` |
-| Which repo a task belongs to | `PROJECTS/projects-map.md` (`projects-map`) |
+| Which repo a task belongs to | `PROJECTS/projects-map.md` |
 | Work in a project | its `CONTEXT/projects/<project>-lessons.md` |
-| Repo shape, docs, scaffolding | `CONTEXT/project-kata.md` (`project-kata`) |
+| Repo shape, docs, scaffolding | `CONTEXT/project-kata.md` |
 | Time, tickets, boards; integrations | `CONTEXT/work-tracking.md`; `CONTEXT/tools.md` |
 | Context slots for portable skills | `CONTEXT/slots.md` |
-| Machines, deploy, hooks | `machines`; `DEPLOYMENT.md` |
-| The OPS repo itself | `AGENTS.md`, `README.md` (`harness-readme`) |
-| Delegation or review | the delegation skills; `CONTEXT/how-i-work.md` Review pickup |
+| Machines, deploy, hooks | `CONTEXT/machines.md` (when the Operator keeps one); `DEPLOYMENT.md` |
+| The OPS repo itself | `AGENTS.md`, `README.md` |
+| Delegation or review | `CONTEXT/foreman.md`; `CONTEXT/how-i-work.md` P8, P12, Review pickup |
 | Compact, handoff, close | `pre-compact-synthesis`, `session-handoff`, `session-close` |
 
-A surprising result from a skill or tool is evidence about the tool as well
-as the task: report the defect rather than silently working around it.
+The MCP tools and skills in this harness are self-built by the people who use
+them. A surprising tool result is a defect in that tool: file it with the
+tool's owner (what you sent, what came back, what you expected) and keep
+working; never quietly work around it, and in a ticket or incident thread
+never fix the tool there.

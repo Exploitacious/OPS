@@ -302,10 +302,12 @@ threads; the managed-settings option does.
 ### Closing move of Stage 1: the first domain partner
 
 Before you finish, offer to scaffold the Operator's first **domain-partner
-skill** with `meta-skill-creator`: a co-pilot skill built around their domain
-from Round A (the questions it always asks, the context it always loads, the
-outputs it always produces). This is how OPS becomes theirs. Offer it; build
-it on a yes, or note they can ask anytime. Then offer Stage 2.
+skill**: the facts about their domain from Round A that a capable agent with a
+fresh context could not know (their systems, their house standards, where
+their records live), routed first by the test in `CONTEXT/core.md` ("Memory
+and where knowledge goes"), so only what fits nowhere else becomes the skill.
+This is how OPS becomes theirs. Offer it; build it on a yes, or note they can
+ask anytime. Then offer Stage 2.
 
 ---
 

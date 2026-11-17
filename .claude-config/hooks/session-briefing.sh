@@ -269,8 +269,8 @@ team_ask_line() {
 team_ask_line
 
 # --- memory health (two-tier: soft flush budget, hard platform ceiling) ---
-# Charter § Eviction: routine drainage happens at every closeout; the deep
-# /memory-prune audit is for drift, not maintenance.
+# Charter § Eviction: routine drainage happens at every closeout, by the thread
+# that closes; a deeper prune is for drift, not maintenance.
 MEM="$CFG/projects/$ENCODED_CWD/memory/MEMORY.md"
 if [ -f "$MEM" ]; then
   sz="$(wc -c < "$MEM" 2>/dev/null | tr -d ' ')"

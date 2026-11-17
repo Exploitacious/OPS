@@ -112,8 +112,8 @@ jobs:
       - name: Check every JavaScript script
         # A workflow script is any .js whose first statement (after a #! line,
         # comments and blank lines) is `export const meta =`: the ones under
-        # .claude-config/workflows/ and skill-bundled ones such as
-        # SKILLS/memory-prune/audit_workflow.js. It is chosen by content, not
+        # .claude-config/workflows/ and any bundled with a skill under
+        # SKILLS/<name>/. It is chosen by content, not
         # path, because a path rule sends a skill's workflow to the module
         # check, which rejects its top-level `return`. The workflow runner
         # executes the body as an async function, with top-level `await` and

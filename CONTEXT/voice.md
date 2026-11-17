@@ -19,9 +19,14 @@ with an evidence-based profile in Stage 2.
 > drafting anything the Operator will send. Delete this banner once the file
 > is real.
 
-How the Operator writes, loaded through `operator-voice`. Who they are lives
-in `USER.md`; the shared writing rules live in [core.md](core.md#writing).
-This file supplies their registers, vocabulary, examples, and brand kit.
+How the Operator writes. Writing as the Operator or on their behalf follows
+this file ([core.md](core.md#writing)); another person's writing follows that
+person's own voice file. Who the Operator is lives in `USER.md`; the shared
+writing rules live in [core.md](core.md#writing), and the AI-tells catalog in
+[ai-tells.md](ai-tells.md). Those are the template's defaults: change any of
+them here for this copy. This file supplies their registers, vocabulary,
+examples, and brand kit. If it is absent or still the template, write plain
+professional prose and say once, above the draft, that it is generic.
 
 ## Tone
 

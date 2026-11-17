@@ -4,6 +4,71 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-17: skills hold facts, not procedure; twelve template skills retire
+
+The owner cut the skill set with one test: a skill holds only what a capable agent with
+a fresh context could not know (this copy's systems, house standards), never procedure.
+Rules moved into doctrine, repo facts into the docs beside the code, and steps into
+scripts. Why: most skills restated what a current model already does, and every
+description costs listing space a live skill needs.
+
+### Skills
+
+- **Removed from `SKILLS/`**: `grabit-screenshots`, `remote-session`, `projects-map`,
+  `harness-deploy`, `harness-readme`, `design-method`, `operating-model`, `stewardship`,
+  `machines`, `project-kata`, `memory-prune` and `operator-voice`. The context files
+  the thin ones pointed at stay, and the core's "Where to look" table names them
+  directly. `memory-prune`'s inventory and its test go with it; the thread that closes
+  prunes the memory it touched.
+- **`SKILLS/VENDORED.tsv` ships no rows.** Its nine rows mounted the public
+  `Exploitacious/agent-skills` set (`delegation-sizing`, `briefing-subagents`,
+  `worktree-isolation`, `verifying-delegated-output`, `dynamic-workflows`,
+  `meta-skill-creator`, `grill-me`, `tdd`, `diagnosing-bugs`). A shared skill lives in
+  exactly one repo, and a template copy of a same-named skill blocks the shared one.
+  The mount mechanism itself (`skills-vendor.sh`, the deploy clone step) is unchanged
+  here.
+- `pre-compact-synthesis`, `session-close`, `session-handoff`, `grabit`,
+  `t3-html-render` and `harness-update` stay for now. `grabit` now carries the receive
+  facts `grabit-screenshots` held.
+
+### Doctrine
+
+- **`CONTEXT/core.md`**: the header says skills hold facts, not procedure. New lines:
+  tell an empty read from a failed one before a step that deletes, closes or prunes on
+  absence; the `ponytail:` shortcut tag (older copies used `shortcut:`); every id
+  carries its name and a link; a row that changes money or a client record says which
+  values were read and which inferred; anything longer than a chat reply gets the
+  AI-tells catalog; writing as a person follows that person's own voice file; this
+  writing style is the template's default and each copy's owner may change theirs; the
+  skill-routing test (a client fact to the documentation system, a repo fact to the
+  repo, a behavior rule to doctrine, a mechanical step to a script or tool, and only
+  the rest becomes a skill); and the self-built-tools line, which replaces the
+  pointer to `stewardship`.
+- **`CONTEXT/ai-tells.md`** (new): the AI-tells catalog, kept whole as a doctrine
+  reference with its upstream MIT notice (it was `operating-model`'s
+  `references/patterns.md`).
+- **`CONTEXT/foreman.md`**: intake interviews a request in rounds until no decision is
+  open (replacing the `grill-me` pointer); the delegation skills' pointer goes to P8
+  and P12.
+- **`CONTEXT/how-i-work.md`**: the intake, delegation and brief lines lose their skill
+  pointers; P5 names the catalog; "Client documents that ask for decisions"
+  (decisions last), which `operator-voice` carried, is now a template default under
+  "Output and files".
+- **`CONTEXT/voice.md`** (template) says how it is used without a skill.
+
+### Docs and checks
+
+- `README.md`, `SKILLS/README.md`, `SKILLS/THIRD_PARTY_NOTICES.md` (now one source),
+  `BOOTSTRAP.md`, `DEPLOYMENT.md`, `CONTRIBUTING.md`, `.claude-memory/README.md`,
+  `.claude-config/bin/README.md`, `.claude-config/remote-sessions/README.md` (which
+  takes the facts the `remote-session` skill held) and the `harness-audit` workflow no
+  longer name the removed skills.
+- `verify-ops.sh` memory warnings and the `memory-index` pool-cap warning say "prune
+  the pool" instead of naming `memory-prune`. `ci-gate-test.py` checks a shipped
+  workflow script in place of the removed `audit_workflow.js`. `wf-resume-test.sh` drops
+  its case for a mounted `dynamic-workflows` prelude, which always skipped once nothing
+  mounts it.
+
 ## 2026-11-17: a T3 thread on a box with a harness token compacts itself
 
 A T3 thread on a box with a harness token compacts itself; everything else stays manual.

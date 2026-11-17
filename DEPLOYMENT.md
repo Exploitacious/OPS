@@ -511,7 +511,8 @@ Stage 2 deploy scripts.
   The weekly `ops-memory-gc` timer is retired with the fleet tool it ran. If
   you enabled it, disable it:
   `systemctl --user disable --now ops-memory-gc.timer` and remove its links
-  from `~/.config/systemd/user/`. The `memory-prune` skill is the memory audit.
+  from `~/.config/systemd/user/`. The thread that closes prunes the memory it
+  touched (`session-close`).
 
 **SessionStart matchers.** Keep the Stage-1 SessionStart hooks split by source,
 so a resume or compact does not re-pay the full boot: a `"startup|clear"` group

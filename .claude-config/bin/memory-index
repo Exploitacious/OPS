@@ -75,7 +75,7 @@
 # else: the index is still written, the exit status does not change, and no
 # entry is ever removed. The digest can describe only about 40 entries in its
 # budget, so a larger pool loses descriptions at the tail; the warning names the
-# fix (the memory-prune skill) and leaves the decision with the pool's owner.
+# fix (prune the pool) and leaves the decision with the pool's owner.
 #
 # Digest mode. hooks/memory-digest.sh prints this digest at SessionStart when
 # Claude Code's native auto-memory is off (the Stage-1 settings turn it off), so
@@ -1295,7 +1295,7 @@ def main(argv):
         sys.stderr.write(
             f"[memory-index] WARN: {len(lines)} entries in {directory}, over the {POOL_CAP}-entry "
             "pool cap the digest is sized for; entries past its budget lose their descriptions. "
-            "Prune with the memory-prune skill when you choose to; nothing was removed\n"
+            "Prune the pool (fold, merge or delete entries) when you choose to; nothing was removed\n"
         )
     return 2 if problems else 0
 

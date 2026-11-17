@@ -73,7 +73,7 @@ The scanner is self-contained by contract (it finds its root from the working di
 
    `verify-ops.sh` is this copy's drift gate (a renamed copy runs its renamed equivalent); `secrets-scan.sh` catches a credential riding in on a ported file. All green before step 7. A red gate is a stop, not a note.
 
-7. One commit, update the marker. Land a single Conventional Commit listing the features pulled, for example `chore(harness): sync upstream OPS (remote-session reboot-resume, secrets-scan hardening)`. In the same commit, write the marker's `last_synced` to the fetched sha (`git -C ~/OPS rev-parse ops-template/main`; the scan prints it too), creating `.claude-config/ops-upstream-ref` if this was the first sync. The marker makes the next sync a clean delta.
+7. One commit, update the marker. Land a single Conventional Commit listing the features pulled, for example `chore(harness): sync upstream OPS (session-close teardown, secrets-scan hardening)`. In the same commit, write the marker's `last_synced` to the fetched sha (`git -C ~/OPS rev-parse ops-template/main`; the scan prints it too), creating `.claude-config/ops-upstream-ref` if this was the first sync. The marker makes the next sync a clean delta.
 
 8. Ported conflicts earn a CHANGELOG entry. A CONFLICT you ported is a real change to this copy's behavior, so it belongs in the local `CHANGELOG.md` (`CONTEXT/project-kata.md` rule 5, docs match reality). Safe fast-forwards of NEW/UPDATE are the routine sync and need no line each; a hand-port does.
 

@@ -9,7 +9,7 @@ reasons behind these rules are in `CONTEXT/how-i-work.md`.
 
 ## Intake and reporting
 
-Grill requests with open decisions before planning (`grill-me` where mounted);
+Before planning, interview a request in rounds until no decision is open;
 look up facts yourself and recommend answers. The Operator's confirmation of
 the shared target is the go. A specific request gets a short plan and their go
 in one turn; an existing authorization stays made. Front-load decisions:
@@ -56,7 +56,7 @@ shortcuts named, and escalation granted. Lanes run as far as the work needs
 and return a precise remainder at their limit; they never compact themselves.
 Use the `ops-*` lanes (`ops-worker` builds, `ops-investigator` reads,
 `ops-auditor` refutes), not a narrower type chosen for apparent cost.
-Mechanics: the delegation skills; refutation brief and lane return: P12.
+Brief contents: P8; refutation brief, lane return and tiers: P12.
 
 Lane output is a set of claims: directly verify specifics you act on or report
 (line numbers, counts, "no findings"). That is the whole verification rule, not
@@ -126,8 +126,8 @@ the Operator's word.
 Route proactive ideas instead of filtering them: act when quick and clearly
 worth it, otherwise log `- [ ] YYYY-MM-DD idea (from: context)` in the scope's
 IDEAS file and continue. Skim ideas on entry; flush at closeout. Layout:
-`CONTEXT/project-kata.md`. `memory-prune` and the closeout skills own eviction
-and flushing.
+`CONTEXT/project-kata.md`. The closeout skills own eviction and flushing; the
+thread that closes prunes the memory it touched.
 
 The foreman owns the shape of the context files (`CONTEXT/`, `AGENTS.md`,
 `README.md`) and tells the Operator what to change; the Operator's rulings set

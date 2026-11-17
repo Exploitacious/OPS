@@ -75,11 +75,11 @@ are read on demand when their `description` matches the work at hand.
   session digest (`--digest`), the prompt hint (`--hint`), and a search by
   hand (`--find <words>`); `.claude-config/bin/README.md` has the details. A
   pool over 60 entries draws a warning and nothing else.
-- **`memory-prune` skill**: the periodic audit. It inventories the pools
-  (read-only), fans a classification pass over every entry, and returns a
-  keep / promote / move / discard action table, then executes it after you
-  sign off; deletes stay operator-gated. (The fleet-era `ac-memory-gc`
-  inventory and its weekly `ops-memory-gc` timer are retired.)
+- **Pruning**: the thread that closes prunes the memory it touched
+  (`session-close`, `pre-compact-synthesis`); deletes of content that has not
+  landed elsewhere stay operator-gated. The template retired its periodic
+  `memory-prune` audit skill on 2026-11-17. (The fleet-era `ac-memory-gc`
+  inventory and its weekly `ops-memory-gc` timer are retired too.)
 
 ## What goes here vs `CONTEXT/`
 
@@ -91,8 +91,8 @@ are read on demand when their `description` matches the work at hand.
   auto-managed.
 
 A memory entry that has hardened into durable identity or doctrine
-should be promoted OUT of here and INTO `CONTEXT/`: the `memory-prune`
-skill surfaces those promotion candidates.
+should be promoted OUT of here and INTO `CONTEXT/`: a closing thread
+surfaces those promotion candidates.
 
 ## How a session loads its pool
 

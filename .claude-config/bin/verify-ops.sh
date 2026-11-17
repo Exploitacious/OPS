@@ -135,7 +135,7 @@ check_citations() {
 # past which an entry keeps only its name, then drops out. memory-index
 # --digest-fit runs that same build once per pool, so a pool that WARNs here is
 # one whose entries lose their descriptions at boot. WARN, because the remedy is
-# a prune (the memory-prune skill) and the pool is the Operator's to prune. FAIL
+# a prune (fold, merge or delete entries) and the pool is the Operator's. FAIL
 # when the indexer cannot measure a pool: the digest fails the same way at boot,
 # and a green line would hide a broken memory load. A partial run can print an
 # over-budget row before it crashes, so every requested pool must be accounted
@@ -171,7 +171,7 @@ check_memory_indexes() {
   if [ -n "$errs" ] || [ "$rc" != 0 ]; then
     fail "memory digest fit could not be measured (exit $rc):${errs:- $(printf '%s' "$out" | tail -n 1)}"
   elif [ -n "$over" ]; then
-    warn "memory pool over the ${budget}-character digest budget (descriptions drop at boot; prune when you choose, with the memory-prune skill):$over"
+    warn "memory pool over the ${budget}-character digest budget (descriptions drop at boot; prune the pool when you choose):$over"
   else
     ok "every memory pool fits the ${budget}-character digest with its descriptions"
   fi
@@ -185,14 +185,14 @@ _memory_index_native_size() {
     sz="$(wc -c < "$idx")"
     [ "$sz" -gt 24576 ] && over="$over $(basename "$(dirname "$idx")")(${sz}B)"
   done < <(find "$OPS/.claude-memory" -maxdepth 2 -name MEMORY.md 2>/dev/null)
-  [ -z "$over" ] && ok "all memory indexes under 24KB" || warn "memory index over 24KB limit (entries truncate; run /memory-prune):$over"
+  [ -z "$over" ] && ok "all memory indexes under 24KB" || warn "memory index over 24KB limit (entries truncate; prune the pool):$over"
 }
 
 # 6b. Memory pool entry cap. A pool past POOL_CAP entries (memory-index; 60 when
 # it names none) holds more than the digest can describe, so the rest arrive by
 # name only or not at all. WARN only, never FAIL: a pool is the Operator's
-# content, and this gate never caps, prunes or blocks it; the memory-prune skill
-# offers the prune. memory-index --check prints the generated index, one line
+# content, and this gate never caps, prunes or blocks it; the warning offers
+# the prune. memory-index --check prints the generated index, one line
 # per entry, which is the count here; it exits 0 or 2 (an entry needs a name:
 # or title: backfill, not this check's finding), and its own cap is a stderr
 # WARN, never an exit code. Any other exit is a FAIL, as is a missing
@@ -215,7 +215,7 @@ check_memory_pool_cap() {
     esac
   done
   [ -z "$errs" ] || fail "memory pool entries could not be counted (memory-index --check failed):$errs"
-  [ -z "$over" ] || warn "memory pool over the ${cap}-entry cap (the digest names or drops the rest; prune when you choose, with the memory-prune skill):$over"
+  [ -z "$over" ] || warn "memory pool over the ${cap}-entry cap (the digest names or drops the rest; prune the pool when you choose):$over"
   if [ -z "$errs$over" ]; then
     if [ "$seen" -eq 0 ]; then ok "no memory pools to cap"; else ok "every memory pool is within the ${cap}-entry cap ($seen pools)"; fi
   fi
