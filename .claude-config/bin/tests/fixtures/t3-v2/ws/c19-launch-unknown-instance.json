@@ -1,0 +1,55 @@
+{
+ "operation": "launch-unknown-instance",
+ "proves": "launchThread with bogus: success value or the Failure shape, and the thread's state 3 s later (provider and workspace problems surface as a failed run, not as a launchThread failure)",
+ "request": {
+  "_tag": "Request",
+  "id": "21",
+  "tag": "orchestration.launchThread",
+  "payload": {
+   "commandId": "ef32fa25-d305-46b5-83b3-6d1aae552b50",
+   "creationSource": "server",
+   "projectId": "f6013397-d615-4f6e-9c2e-2c364958749e",
+   "title": "spike bogus c74a76de",
+   "generateTitle": false,
+   "modelSelection": {
+    "instanceId": "no-such-instance",
+    "model": "x"
+   },
+   "runtimeMode": "approval-required",
+   "interactionMode": "default",
+   "workspaceStrategy": {
+    "type": "root"
+   },
+   "initialMessage": {
+    "text": "STUB:OK hi",
+    "attachments": []
+   }
+  },
+  "headers": []
+ },
+ "response": [
+  {
+   "_tag": "Exit",
+   "requestId": "21",
+   "exit": {
+    "_tag": "Failure",
+    "cause": [
+     {
+      "_tag": "Fail",
+      "error": {
+       "_tag": "OrchestrationV2ThreadLaunchError",
+       "commandId": "ef32fa25-d305-46b5-83b3-6d1aae552b50",
+       "projectId": "f6013397-d615-4f6e-9c2e-2c364958749e",
+       "message": "Provider instance \"no-such-instance\" is disabled for project f6013397-d615-4f6e-9c2e-2c364958749e.",
+       "cause": {
+        "name": "ThreadManagementProviderInstanceDisabledError",
+        "message": "Provider instance \"no-such-instance\" is disabled for project f6013397-d615-4f6e-9c2e-2c364958749e."
+       }
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "threads_3s_later": []
+}

@@ -100,7 +100,9 @@ loses nothing the harness needs. The bans, effort, and retired ids are in
 A compact is a rest stop (P2). Foremen run `pre-compact-synthesis` at natural
 breaks (a closed task, a merged PR, a settled plan, a branch switch) and when
 the context-watch hook nudges (about 65% of the window), the Operator fires
-`/compact`, and the same work continues; every turn re-reads context.
+`/compact` (a T3 thread on a box with a harness token runs `compact-cycle.sh`
+on itself instead, as the nag says), and the same work continues; every turn
+re-reads context.
 Auto-compaction at the end of the window is the backstop, not the plan. Lanes
 follow their return contract. Finish ungated housekeeping first; closeout and
 pre-compaction run `branch-gc --apply` on the repos touched. Pending items,

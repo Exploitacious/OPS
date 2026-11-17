@@ -338,12 +338,16 @@ names the independent pieces and the sequential remainder.
 T3 Code runs Claude Code as an Agent SDK provider thread. No shell function
 wraps that launch, so nothing on the boot path may depend on one: the core
 loads through `~/.claude/rules/ops-core.md` and the hooks through the Stage-1
-settings, the same as in a terminal. Approvals use the T3 UI. Compaction uses
-the composer's `/compact`, fired by the Operator after the session's
-`pre-compact-synthesis`: no session compacts itself, here or in a tmux or
-herdr session, which the Operator runs by hand (a script that typed
-`/compact` into a pane could not tell a finished compaction from a failed
-one, and was retired). Do not assume Claude's process, hooks, or MCP
+settings, the same as in a terminal. Approvals use the T3 UI. A T3 thread on
+a box with a harness token compacts itself; everything else stays manual.
+After `pre-compact-synthesis`, the thread writes its resume baton and runs
+`bin/compact-cycle.sh` on its own thread when the context-watch nag names it;
+the script fires `/compact` through T3's API and sends the baton only once T3
+confirms that compaction completed (the token and its limits:
+`DEPLOYMENT.md` § "T3 Code hosts"). Without the token, outside T3, and in a
+tmux or herdr session the Operator runs by hand, the Operator fires `/compact`
+(an older script that typed `/compact` into a pane could not tell a finished
+compaction from a failed one, and stays retired). Do not assume Claude's process, hooks, or MCP
 registration model applies to another provider in the same T3 instance. If
 native task tools are absent, use the fallback in
 [foreman: Intake and reporting](foreman.md#intake-and-reporting).

@@ -5,7 +5,8 @@
 # Modes (first arg):
 #   stop      (default) Stop hook: block the stop with an escalating nag telling
 #             the agent to run the compact ritual (the pre-compact-synthesis
-#             skill, then tell the Operator a manual /compact is clear to fire).
+#             skill, then compact-cycle.sh on a T3 box with a harness token, else
+#             tell the Operator a manual /compact is clear to fire).
 #   posttool  PostToolUse hook: once usage reaches URGENT, inject a matching
 #             warning MID-TURN via additionalContext. Stop hooks only fire
 #             between turns: a long tool-calling turn once ran from 65% to 98%
@@ -20,14 +21,31 @@
 #             numbers are noise filters on WHEN it speaks (see the readout
 #             branch), never shown to the agent as a reason to act.
 #
-# Who compacts. OPS ships no self-compaction: under T3 Code the Operator fires
-# /compact in the composer, in a terminal they type it, and Claude Code's own
-# auto-compaction near the end of the window is the backstop. Sessions in tmux
-# or herdr are run by hand and never self-compact. (The retired tmux typer,
-# bin/compact-cycle.sh, could not tell a finished compaction from a failed one,
-# and a resume sent after a failed compact resumed work on a thread whose
-# history was never summarized.) So every route this hook prints ends with the
-# Operator's /compact, after the synthesis.
+# Who compacts. A T3 Code thread on a box with a harness token compacts itself;
+# everything else stays manual. The self-compact route is offered only where it
+# can work: a T3 session (hooklib's ops_backend says t3code; a tmux pane can
+# inherit T3's markers, so tmux wins), on Linux (both scripts detach with
+# setsid), with bin/compact-cycle.sh and bin/t3-api.sh executable and the token
+# file ($OPS_T3_TOKEN_FILE, default ~/.config/ops/t3-harness.token) readable and
+# non-empty. Then the route is: synthesis, write the resume baton, run
+# compact-cycle.sh on this thread, end the turn. compact-cycle.sh waits for the
+# thread to go idle, fires /compact through T3's API, and sends the baton only
+# after T3 confirms a completed compaction for that exact request. (The tmux
+# typer this file once drove was retired because it could not tell a finished
+# compaction from a failed one; the T3 cycle reads the proof from the API.) In
+# every other case (no token, not T3, Windows, a script missing, a T3 delegated
+# child thread compact-cycle.sh cannot target) the route ends with the
+# Operator's /compact and names no compactor command: a command that can only
+# exit 3 for want of a token would turn the nag into a loop on every such box.
+# Claude Code's own auto-compaction near the end of the window is the backstop
+# everywhere.
+#
+# The in-flight interlock. While a fresh (under 30 min) resume baton exists for
+# this thread, at $RUNDIR/resume-<thread key>.txt, every mode stays silent: the
+# agent is ending its turn ON PURPOSE so the compactor can fire /compact, and a
+# Stop block there would keep the turn alive. The thread id comes from
+# t3-api.sh thread-for-session, asked only when a fresh baton exists or route
+# text is about to print. Checked only where the self-compact route is offered.
 #
 # Registration: Stop hook (no arg) + PostToolUse hook (matcher ".*", arg
 # `posttool`) + UserPromptSubmit hook (matcher ".*", arg `readout`) in the
@@ -147,6 +165,18 @@ LANE_CLASS="${LANE_CLASS:-$H/.claude-config/bin/lane-class}"
 # classifier worth asking.
 IN_T3=""
 if [ -n "${T3CODE_THREAD_ID:-}" ] || [ -n "${T3CODE_HOME:-}" ]; then IN_T3=1; fi
+# The self-compact route (see "Who compacts" above): every condition it needs, checked
+# here so the agent is never handed a command this box cannot run. T3_API is the test
+# seam compact-cycle.sh also honors; OPS_T3_TOKEN_FILE is t3-api.sh's own setting.
+T3_API="${T3_API:-$H/.claude-config/bin/t3-api.sh}"
+CYCLE="$H/.claude-config/bin/compact-cycle.sh"
+T3_TOKEN="${OPS_T3_TOKEN_FILE:-$HOME/.config/ops/t3-harness.token}"
+SELF_COMPACT=""
+if [ -n "$IN_T3" ] && [ "$(ops_backend)" = t3code ] && [ "$(uname -s 2>/dev/null)" = Linux ] \
+   && command -v setsid >/dev/null 2>&1 && [ -x "$CYCLE" ] && [ -x "$T3_API" ] \
+   && [ -f "$T3_TOKEN" ] && [ -r "$T3_TOKEN" ] && [ -s "$T3_TOKEN" ]; then
+  SELF_COMPACT=1
+fi
 
 # Simple field reads use hook_field (jq-first, python3/python/py fallback):
 # only the transcript tail-scan further down is python3-only.
@@ -172,11 +202,12 @@ command -v python3 >/dev/null 2>&1 || exit 0
 
 CW_TRANSCRIPT="$TRANSCRIPT" CW_SID="$SID" CW_AGENT_ID="$AGENT_ID" RUNDIR="$RUNDIR" MODE="$MODE" \
 CW_CLASS_SID="$CLASS_SID" IN_T3="$IN_T3" LANE_CLASS="$LANE_CLASS" \
+SELF_COMPACT="$SELF_COMPACT" CW_HARNESS="$H" T3_API="$T3_API" \
 WINDOW="${CC_CONTEXT_WINDOW:-1000000}" \
 LANE_WINDOW_OVERRIDE="${LANE_WINDOW_OVERRIDE:-}" LANE_REMIND_PCT="${LANE_REMIND_PCT:-}" LANE_WRAP_PCT="${LANE_WRAP_PCT:-}" \
 NAG_OVERRIDE="${CC_COMPACT_NAG_TOKENS:-}" RENAG_OVERRIDE="${CC_COMPACT_RENAG_TOKENS:-}" \
 python3 - <<'PY' 2>/dev/null || exit 0
-import json, os, re, signal, subprocess, sys, time
+import json, os, re, shlex, signal, subprocess, sys, time
 
 
 def _parse_ts(s):
@@ -480,6 +511,108 @@ def log_silenced(where, ctx_tokens, why):
         pass
 
 
+# --- the T3 self-compact route and its in-flight interlock (header: "Who compacts") ---
+# SELF_COMPACT comes from the shell, set only where the route can work. The canonical
+# baton is <RUNDIR>/resume-<thread key>.txt: compact-cycle.sh keys its baton, lock and
+# status on the literal --target string, so a session-id target would miss the baton and
+# take a separate lock. The route and the interlock therefore both use the thread id.
+SELF_COMPACT = bool(os.environ.get("SELF_COMPACT"))
+T3_SID = os.environ.get("CW_CLASS_SID") or ""
+MANUAL_ROUTE = ("run the pre-compact-synthesis skill, then tell the Operator a manual /compact is clear "
+                "to fire")
+_t3 = {}
+
+
+def t3_thread():
+    """This session's T3 thread id via t3-api.sh thread-for-session, or "". Asked at most
+    once per call, and only when a fresh baton exists or route text is about to print: the
+    lookup is a python and SQLite read of about 100 ms, too slow for every PostToolUse.
+    _t3["state"] says why an id is empty: "ok" (a plain id), "lane" (a T3 child thread,
+    which compact-cycle.sh cannot target), "odd" (an unusable answer), "none" (exit 5: no
+    mapping, or an ambiguous one) or "error" (the helper missing, timed out, any other exit)."""
+    if "tid" not in _t3:
+        tid, state = "", "error"
+        api = os.environ.get("T3_API") or ""
+        if T3_SID and api and os.access(api, os.X_OK):
+            try:
+                r = subprocess.run([api, "thread-for-session", T3_SID], capture_output=True,
+                                   text=True, timeout=5)
+                out = r.stdout.strip()
+                # The id is pasted into a shell command in the route text, so only a plain id
+                # is accepted. A child namespace is checked first: a short child id can match
+                # the plain-id pattern too.
+                if r.returncode == 0 and re.fullmatch(r"thread:(?:delegated-task|provider):\S+", out):
+                    state = "lane"
+                elif r.returncode == 0 and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", out):
+                    tid, state = out, "ok"
+                elif r.returncode == 0 and out:
+                    state = "odd"
+                elif r.returncode in (0, 5):
+                    state = "none"
+            except Exception:
+                pass
+        _t3["tid"], _t3["state"] = tid, state
+    return _t3["tid"]
+
+
+def cycle_key(s):
+    # compact-cycle.sh's KEY: tr ':. ' '---' | tr -cd 'A-Za-z0-9-'
+    return re.sub(r"[^A-Za-z0-9-]", "", s.translate(str.maketrans(":. ", "---")))
+
+
+def compact_route():
+    """The compact route this session is told to take. The manual route unless the shell
+    found the self-compact route usable here, and then never for a T3 child thread
+    (compact-cycle.sh targets top-level threads only). Called only where text prints."""
+    if not SELF_COMPACT:
+        return MANUAL_ROUTE
+    tid = t3_thread()
+    if _t3.get("state") == "lane":
+        return MANUAL_ROUTE
+    rundir = os.environ["RUNDIR"]
+    bindir = os.path.join(os.environ.get("CW_HARNESS") or "", ".claude-config", "bin")
+    cycle = shlex.quote(os.path.join(bindir, "compact-cycle.sh"))
+    if tid:
+        baton = f"{rundir}/resume-{cycle_key(tid)}.txt"
+        return ("run the pre-compact-synthesis skill, then write the resume baton to "
+                f"{baton}, run {cycle} --backend t3 --target {shlex.quote(tid)} "
+                f"--baton {shlex.quote(baton)} (it detaches its own worker), then END YOUR TURN "
+                "so the compactor can fire /compact")
+    # Unresolved (no mapping, an ambiguous one, a lookup that failed): hand over the
+    # resolve step instead of a session-id target that would miss the baton.
+    return ("run the pre-compact-synthesis skill, then resolve this T3 thread with "
+            f"{shlex.quote(os.path.join(bindir, 't3-api.sh'))} thread-for-session "
+            f"{shlex.quote(T3_SID) if T3_SID else '<this session id>'} (it must print one plain "
+            f"thread id), write the resume baton to {rundir}/resume-<thread-id>.txt, run {cycle} "
+            "--backend t3 --target <thread-id> --baton <that file>, then END YOUR TURN so the "
+            "compactor can fire /compact")
+
+
+BATON_FRESH_S = 30 * 60   # an arming older than this is abandoned; nag again
+if SELF_COMPACT and not os.environ.get("CW_AGENT_ID"):
+    # A fresh baton for THIS thread: stay silent in every mode. An in-process lane carries
+    # the same session id but has its own context and still needs its checkpoint text, so
+    # agent_id calls skip this. The cheap directory scan gates the lookup, so the common
+    # no-baton case never pays for it.
+    rundir = os.environ["RUNDIR"]
+    now = time.time()
+
+    def _fresh(p):
+        try:
+            return now - os.path.getmtime(p) < BATON_FRESH_S
+        except OSError:
+            return False
+
+    try:
+        names = os.listdir(rundir)
+    except OSError:
+        names = []
+    if any(n.startswith("resume-") and n.endswith(".txt") and _fresh(os.path.join(rundir, n))
+           for n in names):
+        tid = t3_thread()
+        if tid and _fresh(os.path.join(rundir, f"resume-{cycle_key(tid)}.txt")):
+            sys.exit(0)
+
 agent_id = os.environ.get("CW_AGENT_ID") or ""
 # A T3 delegated lane is not an in-process subagent: T3 starts it as its own top-level
 # claude process, so its hooks carry NO agent_id and used to take the foreman branch
@@ -683,12 +816,9 @@ for i, t in enumerate(tiers, 1):
 BREAK_TURN = 250_000   # this heavy AND a real boundary -> "natural break point"
 LONG_TURN  = 400_000   # this heavy regardless of a boundary -> "run long" backstop
 
-# how = the compact route. Defined here, above the readout, so the readout texts
-# and the ladder nags below share one definition. One route on every host: OPS
-# has no self-compaction (see the header), so the session synthesizes and the
-# Operator fires /compact.
-how = ("run the pre-compact-synthesis skill, then tell the Operator a manual /compact is clear "
-       "to fire")
+# how = the compact route, compact_route() above, so the readout texts and the ladder
+# nags share one definition. Each emitting branch below asks for it just before it
+# prints, so the thread lookup a self-compact route needs runs only when text is shown.
 
 # --- readout mode: ALWAYS handled here, at EVERY tier, and always exits. ---
 # This branch must come before any ladder logic. A readout is a passive
@@ -722,6 +852,7 @@ if mode == "readout":
     if at_boundary and ctx >= BREAK_TURN:
         # A real break AND a turn heavy enough to be worth the nudge. Rest-stop
         # framing, never pressure: a compact here is hygiene, not scarcity.
+        how = compact_route()
         print("[context] Natural break point. A compact here hands the next stretch "
               "a clean desk, pre-authorized, no ask. Run pre-compact-synthesis, then "
               f"{how}. Or keep rolling if you'd rather; nothing is at risk either "
@@ -729,6 +860,7 @@ if mode == "readout":
     elif ctx >= LONG_TURN:
         # Long-session backstop (replaces the old scarcity nag). Still calm: the
         # four artifacts carry the work across a reset, so nothing is at stake.
+        how = compact_route()
         print("[context] This session has run long; a clean handoff is the kind thing "
               f"for the next stretch. Run pre-compact-synthesis, then {how}. Nothing is "
               "lost either way: git, memory, the task list, and the baton carry the work "
@@ -789,6 +921,7 @@ if mode == "posttool":
             f.write(f"{last_ctx} {last_tier} {ctx}")
     except Exception:
         sys.exit(0)
+    how = compact_route()
     if name == "CRITICAL":
         msg = (f"[context-watch mid-turn] CRITICAL: context ~{ctx_k}K/{win_k}K (~{pct}%). "
                f"At the next safe point in THIS turn, wrap what is open, do not start new work, and {how}. "
@@ -825,6 +958,7 @@ try:
 except Exception:
     sys.exit(0)
 
+how = compact_route()
 core = f"[context-watch] {name}: context ~{ctx_k}K of {win_k}K (~{pct}%)."
 if name == "NOTICE":
     body = (f" If the work is at a natural break, {how}. If you are mid-critical-step, finish that "
