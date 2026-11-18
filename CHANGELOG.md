@@ -4,6 +4,15 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-18: memory saves only what has no other home
+
+The save rule changes from "write memory as you learn" to "memory holds only a trap with no
+other home". A measurement of the memory pools found most entries repeated a doctrine line,
+a repo doc or a client fact that already had a home, and pools on several boxes grew past
+their caps with nobody pruning. Rulings, repo facts and client facts now go to their homes
+at write time; the pool keeps the traps nothing else records. `CONTEXT/core.md` (Memory and
+where knowledge goes) and the `harness` skill's closing steps say so.
+
 ## 2026-11-17: one `harness` skill replaces six
 
 `active-minutes` bills to the nearest hundredth of an hour again (40 minutes shows 0.67 h), the owner's ruling the same day; the truncation added earlier today is reverted, so every copy reads the same.

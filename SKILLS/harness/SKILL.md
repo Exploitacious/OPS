@@ -17,7 +17,7 @@ Three endings. Pause: the same thread continues after a compact. Move: the work 
 
 - Every ending starts with `session-end <pause|move|close>`. It snapshots git, runs the merged-branch and worktree cleanup (`branch-gc`) on the thread's repos, rebuilds the memory index, lints, and prints what is left for you to decide.
 - What only you can do, every time:
-  - Save the lessons worth keeping: one fact per file in the memory pool. A session with none saves none.
+  - Save to the memory pool only a trap with no other home, one fact per file; a ruling, a repo fact or a client fact goes to its home instead. A session with none saves none.
   - Leave the memory pool better than you found it: correct an entry this thread proved wrong, merge duplicates you touched, move a lesson that belongs in a repo's docs. The closing thread owns this; nothing else tidies the pool (`verify-ops.sh` only warns when one outgrows its budget).
   - Put knowledge where the next person will look. A client or technical fact goes to its page in the documentation system, a repo fact to that repo's docs, a decision to the changelog. Fix any document this thread made untrue.
   - Write the resume note at the top of the anchor or baton: NEXT ACTION (one step), VERIFY FIRST, DO NOT (with who said so), DEAD ENDS, ASK THE OWNER.

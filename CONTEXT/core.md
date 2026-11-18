@@ -167,7 +167,8 @@ foreman's session id, so a close run from a lane settles the foreman's session.
 
 ## Memory and where knowledge goes
 
-Write memory as you learn; rediscovery costs more. Route by who needs it
+Memory holds only a trap with no other home: route a ruling, a repo fact or a
+client fact to its home at write time. Route by who needs it
 next: a gotcha that spans projects to the cross-project memory pool; a
 project lesson to its repo's docs by PR when the team reads that tree,
 otherwise to `CONTEXT/projects/<project>-lessons.md`, with a one-line pointer
