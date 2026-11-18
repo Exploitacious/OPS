@@ -59,6 +59,9 @@
 #                                 # the same scorer by hand: top matches with scores
 #   memory-index --digest-fit <DIR>...
 #                                 # per pool: entries, described, by name only, not shown
+#   memory-index --pool-for [--cwd DIR] [--ops DIR]
+#                                 # print the existing pool the digest uses for DIR;
+#                                 # exit 4 when there is none; creates nothing
 #   memory-index -h | --help
 #
 # Exit codes:
@@ -70,6 +73,8 @@
 #      caller detect "backfill needed" without losing good lines.
 #   --digest always exits 0: it prints the digest or its one-line failure
 #   notice. --digest-fit exits 1 when a pool could not be measured.
+#   --pool-for exits 0 with the pool on stdout, 4 when the directory has no
+#   pool, 1 for an unknown argument or an unusable host key file.
 #
 # A pool of more than POOL_CAP (60) entries is a WARN on stderr and nothing
 # else: the index is still written, the exit status does not change, and no
@@ -106,7 +111,8 @@ import tempfile
 import time
 
 USAGE = ("usage: memory-index [--check] <DIR> | --digest [--cwd DIR] [--ops DIR] | "
-         "--hint [--cwd DIR] [--ops DIR] | --find [--cwd DIR] [--ops DIR] [--limit N] <words...>")
+         "--hint [--cwd DIR] [--ops DIR] | --find [--cwd DIR] [--ops DIR] [--limit N] <words...> | "
+         "--pool-for [--cwd DIR] [--ops DIR]")
 
 # The index line separator (see the header): an em dash between spaces.
 INDEX_SEP = " \u2014 "
@@ -972,6 +978,30 @@ def digest_main(cwd, ops):
     return 0
 
 
+def pool_for_main(cwd, ops):
+    """--pool-for: print this directory's existing pool, the one --digest shows,
+    and exit 0; exit 4 with nothing on stdout when there is none. It resolves
+    the way digest_main does (the same cwd and OPS defaults and the same
+    MEMORY_INDEX_DIR hook, then resolve_pools: the repository's main checkout,
+    so a worktree shares its pool, the profile's projects/<key>/memory and the
+    host key), so a caller that rebuilds the index rebuilds the pool the digest
+    reads. Why it exists: session-end rebuilds this directory's index, and a
+    second copy of the lookup would drift from the digest's. Creates nothing.
+    Exit 4, not 2 or 3: 2 already means entries need backfill."""
+    ops = resolve_ops(ops)
+    cwd = cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        pool = resolve_pools(cwd, ops, os.environ.get("MEMORY_INDEX_DIR"))[0]
+    except DigestError as e:
+        sys.stderr.write(f"memory-index: {e}\n")
+        return 1
+    if pool is None:
+        sys.stderr.write(f"memory-index: no memory pool for {cwd}\n")
+        return 4
+    print(pool)
+    return 0
+
+
 def digest_fit_main(pools):
     """One line per pool, digested as a directory's own pool with no root
     section: "<pool>\t<entries>\t<described>\t<by name only>\t<not shown>",
@@ -1196,6 +1226,16 @@ def main(argv):
     directory = None
     if len(argv) > 2 and argv[1] == "--digest-fit":
         return digest_fit_main(argv[2:])
+    if len(argv) > 1 and argv[1] == "--pool-for":
+        rest, opts = argv[2:], {"--cwd": None, "--ops": None}
+        while rest:
+            if rest[0] in opts and len(rest) > 1:
+                opts[rest[0]] = rest[1]
+                rest = rest[2:]
+            else:
+                sys.stderr.write(f"memory-index: unexpected pool-for arg: {rest[0]}\n{USAGE}\n")
+                return 1
+        return pool_for_main(opts["--cwd"], opts["--ops"])
     if len(argv) > 1 and argv[1] in ("--digest", "--hint", "--find"):
         mode = argv[1]
         opts = {"--cwd": None, "--ops": None, "--limit": "5"}
@@ -1225,6 +1265,7 @@ def main(argv):
             print("  --digest  print the memory digest (--cwd, --ops); write nothing")
             print("  --hint    UserPromptSubmit payload on stdin: print up to three relevant entries")
             print("  --find    score the pools against <words>; print the best matches")
+            print("  --pool-for  print the existing pool the digest uses (--cwd, --ops); exit 4 for none")
             return 0
         elif arg == "--check":
             check = True

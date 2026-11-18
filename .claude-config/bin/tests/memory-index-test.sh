@@ -17,6 +17,7 @@
 #     still written and the exit status is unchanged (a pool is its owner's)
 #   - warns, without failing, on more than 20 pinned entries
 #   - --find ranks the entry a query is about first
+#   - --pool-for prints the pool the digest uses and creates nothing (exit 4 for none)
 #
 # Run:  bash ~/OPS/.claude-config/bin/tests/memory-index-test.sh
 # Exit: 0 = all pass; non-zero on first failure.
@@ -281,6 +282,43 @@ pass "--find: the entry the words are about ranks first; no words is an error"
 if grep -q -e "$(printf '\342\200\224')" -e "$(printf '\342\200\223')" "$GEN"; then fail "memory-index carries an em or en dash character (spell it as an escape)"; fi
 pass "memory-index has no em or en dash character"
 rm -rf "$C"
+
+# --- Test 14: --pool-for prints the pool the digest uses and creates nothing. -----------
+# session-end rebuilds this directory's index through it, so it must agree with
+# --digest for a linked worktree, the host-key file and a profile's
+# projects/<key>/memory, and must never create a pool for a directory without one.
+P="$(mktemp -d "${TMPDIR:-/tmp}/memory-index-poolfor.XXXXXX")"; P="$(cd "$P" && pwd -P)"
+PH="$P/home"; mkdir -p "$PH/.config/ops" "$P/ops/.claude-memory" "$P/elsewhere"
+gx() { git -c init.defaultBranch=main -c user.name=t -c user.email=t@example.invalid "$@"; }
+gx init -q "$P/proj" && gx -C "$P/proj" commit -q --allow-empty -m base \
+  && gx -C "$P/proj" worktree add -q -b lane "$P/proj-wt" 2>/dev/null || fail "--pool-for: cannot build the fixture repo"
+printf 'fixhost\n' > "$PH/.config/ops/memory-host"
+PKEY="$(printf '%s' "$P/proj" | sed 's/[^A-Za-z0-9]/-/g')"
+PPOOL="$P/ops/.claude-memory/fixhost$PKEY"; mkdir -p "$PPOOL"
+printf -- '---\nname: pool-entry\ndescription: an entry\nmetadata:\n  type: project\n---\nbody\n' > "$PPOOL/pool-entry.md"
+PCFG=""  # a profile dir for one case; empty means none
+pf() { env -u MEMORY_DIGEST_HOST -u MEMORY_INDEX_DIR -u MEMORY_DIGEST_ROOT_DIR -u CLAUDE_CONFIG_DIR \
+  -u CLAUDE_PROJECT_DIR -u OPS_DIR HOME="$PH" ${PCFG:+CLAUDE_CONFIG_DIR="$PCFG"} "$GEN" "$@"; }
+OUT="$(pf --pool-for --cwd "$P/proj-wt" --ops "$P/ops")"; rc=$?
+[ "$rc" = 0 ] && [ "$OUT" = "$PPOOL" ] || fail "--pool-for from a worktree with the host-key file: rc=$rc out=$OUT, want $PPOOL"
+pf --digest --cwd "$P/proj-wt" --ops "$P/ops" | grep -qF "$PPOOL" \
+  || fail "--digest does not name the pool --pool-for printed ($PPOOL)"
+mkdir -p "$P/cfg/projects/$PKEY/memory"
+cp "$PPOOL/pool-entry.md" "$P/cfg/projects/$PKEY/memory/profile-entry.md"
+PCFG="$P/cfg"
+OUT="$(pf --pool-for --cwd "$P/proj-wt" --ops "$P/ops")"
+[ "$OUT" = "$P/cfg/projects/$PKEY/memory" ] || fail "--pool-for with a profile's projects/<key>/memory: got $OUT"
+pf --digest --cwd "$P/proj-wt" --ops "$P/ops" | grep -qF "$OUT" \
+  || fail "--digest does not name the profile pool --pool-for printed ($OUT)"
+PCFG=""
+before="$(find "$P" | sort)"
+OUT="$(pf --pool-for --cwd "$P/elsewhere" --ops "$P/ops" 2>"$ERRFILE")"; rc=$?
+[ "$rc" = 4 ] && [ -z "$OUT" ] || fail "--pool-for without a pool must exit 4 and print nothing: rc=$rc out=$OUT"
+[ "$before" = "$(find "$P" | sort)" ] || fail "--pool-for created something for a directory without a pool"
+pf --pool-for --bogus x >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] || fail "--pool-for with an unknown argument must exit 1, got $rc"
+rm -rf "$P"
+pass "--pool-for: the digest's pool for a worktree, host-key file and profile dir; exit 4 and nothing created without one"
 
 echo
 echo "ALL TESTS PASSED"

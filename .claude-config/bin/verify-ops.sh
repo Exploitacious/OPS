@@ -847,21 +847,27 @@ check_identity_exclusion() {
 #   pre-compact.sh    prunes snapshots by retention and runs branch-gc --apply
 #   memory-init       moves memory files into .claude-memory, removes old dirs
 #   deploy.sh         runs memory-init; replaces links, rc lines and units
+#   session-end       starts branch-gc --apply on the thread's repos and moves
+#                     the thread's billing stamps into an archive
 # Not listed, by the same rule: session-briefing.sh (reads only),
 # daily-sync.sh (commits and pulls its own checkout; its gc stage is branch-gc,
 # reached only through a stub in the suites that cover it), and tools that
 # replace only their own output or state file.
-OPS_DESTRUCTIVE_TOOLS=(branch-gc pre-compact.sh memory-init deploy.sh)
+OPS_DESTRUCTIVE_TOOLS=(branch-gc pre-compact.sh memory-init deploy.sh session-end)
 # Suites that must carry the guard although the name check cannot see why. The three
 # T3 suites: t3-api.sh and compact-cycle.sh delete nothing, but they send messages into
 # and settle threads on a real T3 server, and the box that runs a suite usually runs one
 # (T3 Code's default port, 127.0.0.1:3773). Listed, they must start with the guard, and
 # each also refuses to run with any interface but loopback or with that port answering,
 # so they run only in sandbox-run --no-net against their own loopback stubs.
+# session-end-test.py names its tool today; it is listed as well because it runs a
+# copy of a command that archives stamp files and detaches workers under $HOME, so
+# a refactor that builds the name at run time must not drop its guard.
 OPS_SANDBOX_SUITES=(
   .claude-config/bin/tests/t3-api-test.sh
   .claude-config/bin/tests/t3-api-v2-safety-test.py
   .claude-config/bin/tests/compact-cycle-t3-test.sh
+  .claude-config/bin/tests/session-end-test.py
 )
 check_sandbox_guards() {
   local b="$OPS/.claude-config/bin" f miss="" out rc summary v t py

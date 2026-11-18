@@ -30,6 +30,73 @@ delivered separately by that organization.
   daily backup does not commit it, and `verify-ops.sh` warns that the clone is
   missing from `projects-map.md` until it is gone.
 
+## 2026-11-17: one command starts every thread ending
+
+Pause, move and close each assembled their mechanical steps by hand from prose in three
+skills, and a close assembled by hand skipped steps. `bin/session-end` runs them the same
+way every time and prints what is left for the agent to judge.
+
+- **`bin/session-end <pause|move|close>`**: snapshots git read-only, starts `branch-gc
+  --apply` on the thread's repos (only those the PreCompact hook would hand to branch-gc, with
+  its timeout numbers), rebuilds this directory's memory index, lints with `verify-ops.sh
+  --quiet` when the thread touched `.claude-config/` or `SKILLS/`, lists the thread's open
+  asks, and prints the remainder: lessons, documents, the resume note, the memory entries
+  touched in the thread's window, the compact line, the baton path, or for a close the
+  measured time as evidence, the objects the thread created (listed, never removed) and the
+  settle route (T3's own settle tool, `t3-api.sh settle-when-idle` only as the fallback). It
+  never commits, pushes, edits a ticket, logs time, writes a baton, compacts or settles. Lint
+  FAILs are findings, not a failed run, because on a shared box most of them are other
+  sessions'. `--dry-run` writes nothing.
+  A zero lint exit still requires a clean gate summary; empty or contradictory output fails
+  the receipt instead of allowing `finish` to stamp it.
+- **`session-end finish [--logged N | --declined REASON]`**: after knowledge capture, advances
+  `last-closeout` only when the run was real and nothing failed, and after a close moves this
+  thread's two billing stamps into a fresh `~/.claude-compact-cycle/reaped/` directory by
+  rename, never by copy and delete, so a late append cannot be lost. Only a T3 per-thread key
+  is archived; a shared-cwd or tmux key is refused.
+- **Scope**: Claude sessions only, the main thread only (a T3-delegated lane is refused, and
+  `hooks/git-guard.sh` blocks a run other than `--dry-run` from a payload with an `agent_id`,
+  under either `GIT_GUARD=off` hatch too, including rtk proxies and quoted executable paths;
+  a dry-run flag inside a path argument, comment or redirection is not an exemption), Linux only.
+- **`memory-index --pool-for [--cwd DIR] [--ops DIR]`**: prints the pool the digest would show
+  and creates nothing; exit 4 means no pool.
+- **Tests**: `bin/tests/session-end-test.py` (63 cases, sandboxed, every tool a recording stub,
+  a sentinel tree that must survive every case), 22 new probes in `hooks/guard-selftest.sh`,
+  and a `--pool-for` case in `bin/tests/memory-index-test.sh`. `verify-ops.sh` lists
+  `session-end` as a destructive tool and its suite as a sandbox suite (check 24).
+
+## 2026-11-17: the asks register and the active-minutes measure
+
+Two small commands, both Python standard library only, each with a sandboxed suite that
+CI picks up by glob.
+
+- **`bin/asks`**: the per-thread register of what is waiting on the box's owner. A thread
+  writes `asks add "<question>"` with an optional recommendation, default and deadline, and
+  `asks list --all` shows every thread's open asks in one place. Console asks (steps only a
+  person can do in a vendor's web console) carry their steps and paste text. State lives in
+  `${OPS_STATE_DIR:-~/.local/state/ops}/asks/`. A secret-shaped value is refused, the same ask
+  re-added updates instead of duplicating, and resolved asks are pruned after 14 days while
+  their next numbers are retained. An unreadable register stops pruning and new adds before
+  they change any asks. It is POSIX only: without `fcntl` it prints one line and exits 1.
+  `asks list` and the
+  `session-end` command read the register. Why: an Operator with several threads open had
+  to poll each one for what it was waiting on.
+- **`bin/active-minutes`**: working minutes from a Claude Code transcript, for billing a
+  thread's time to a ticket. Pauses of 30 minutes or less count; longer gaps are classified
+  from their evidence and listed with the cause, so a hold or an overnight stop is never billed
+  silently. It is generic by option: `--time-tool NAME` names the ticketing system's time-entry
+  tool for the hook mode (default any tool ending in `time_manage`), and `--zone NAME` sets the
+  display zone (default `$TZ`, then the machine's zone, then UTC), converted per timestamp so a
+  daylight-saving change cannot shift a printed window. A named zone with no zone database
+  prints one line and exits 2.
+  The billing display truncates decimal hours instead of rounding up, and a time-create call
+  without a ticket or with an explicit error result does not reset the unlogged window.
+- **Tests**: `bin/tests/asks-test.py` and `bin/tests/active-minutes-test.py`, unittest, no
+  pytest. The second exits non-zero on a failure and a case proves it cannot pass without
+  running a test. `asks-test.py` starts with the sandbox guard; the secret-refusal case builds
+  its private-key header from parts so `secrets-scan.sh` and gitleaks see no key. Both are
+  documented in `bin/README.md`.
+
 ## 2026-11-17: skills hold facts, not procedure; twelve template skills retire
 
 The owner cut the skill set with one test: a skill holds only what a capable agent with
@@ -94,6 +161,7 @@ description costs listing space a live skill needs.
   workflow script in place of the removed `audit_workflow.js`. `wf-resume-test.sh` drops
   its case for a mounted `dynamic-workflows` prelude, which always skipped once nothing
   mounts it.
+
 
 ## 2026-11-17: a T3 thread on a box with a harness token compacts itself
 
