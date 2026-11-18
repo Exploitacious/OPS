@@ -41,9 +41,11 @@ have to assemble yourself. That means:
 
 - **Fixed model tiers** instead of per-task model shopping: Opus 5.5 is the
   foreman, Sonnet 5.5 every sub-agent's default, Opus 5.5 again for
-  high-criticality lanes, Haiku 5.5 for cheap bounded reads, Fable 5.1 rarely
-  (optional: a copy whose plan lacks it loses nothing). Effort is `xhigh`
-  everywhere. `CONTEXT/model-roles.md` is the policy.
+  high-criticality lanes, Haiku 5.5 for cheap bounded reads, Fable 5.2 as the
+  second mind the foreman consults at set moments (optional: a copy whose plan
+  lacks it loses nothing). Effort defaults to `high`, `medium` on Fable, and
+  the foreman raises or lowers it per lane. `CONTEXT/model-roles.md` is the
+  policy.
 - **A full-autonomy posture**: you plan with it up front, then it runs the list
   end to end without re-prompting.
 
@@ -84,9 +86,9 @@ because these defaults decide what Claude Code may do without asking you:
   (`CONTEXT/foreman.md` § "Rhythm and compaction"). Haiku 5.5 gets a 100K
   compaction window so its lanes stay cheap.
 
-The same file also pins the model tiers above, sets effort to `xhigh`, empties
-the commit and PR attribution lines, and turns on push notifications for agent
-events. `BOOTSTRAP.md` asks you, as an explicit step, whether to keep the
+The same file also pins the model tiers above, saves each model's default
+effort (`high`, `medium` for Fable), empties the commit and PR attribution
+lines, and turns on push notifications for agent events. `BOOTSTRAP.md` asks you, as an explicit step, whether to keep the
 permission defaults or switch to normal permission prompts, and shows the exact
 change. Do not edit the Stage-1 file to change them: it is a tracked file in
 your linuxploitacious checkout, so a local edit (including a `/config` or

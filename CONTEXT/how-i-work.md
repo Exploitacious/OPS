@@ -31,6 +31,20 @@ The intake and plan-tracking contract is in
 [foreman: Intake and reporting](foreman.md#intake-and-reporting). Track
 progress against a visible list.
 
+Close loops now; do not schedule them. Scope to what the assignment needs and
+finish it in the session: reversible, low-impact work with a read-back and an
+instant rollback beats a multi-day audit, a next-day verification, or a
+recurring retry. A wait or gate needs a named external blocker and a risk that
+justifies it. One ticket per piece of work, closed when its quick part is
+done; fleet-wide or multi-day follow-on goes to the owning project's backlog,
+not to new long-dated tickets or plan blocks. Answer questions from tools and
+records first; put to the Operator only what no source settles, and to their
+team nothing the Operator could answer. Why: in the harness OPS is ported
+from, a pass meant to close the easy findings of a security report grew
+three-day audits, next-day checks, daily retries and fleet policy plans,
+when most of its changes could have been made, read back and closed the same
+day.
+
 ## Reporting to the Operator
 
 For the reporting contract, see
@@ -187,6 +201,15 @@ the expensive kind).
   rulings recorded as config; front-end content and styling; tests-only
   changes, config checkable in one read, generated files, lockfiles,
   fixtures; live-incident hotfixes (their code rides the next review).
+
+Plan review: before the first build lane of a risky or big build (code bound
+for the second vendor, or any multi-lane build or workflow), the written plan
+(the goal, what is settled, the build split, the gates, the open questions)
+goes to the second vendor as the digest with no diff, or with none to an Opus
+5.5 refutation lane. The foreman pushes back where it disagrees and brings the
+Operator only the disagreements that survive, as questions. Routine fixes skip
+it. Why: scope is cheapest to change before the build, and a review that only
+sees the finished diff can no longer move it.
 
 One review per finished body of work, one round: send the whole verified
 package after its own fixes land, so no reviewer reads code that is about to
@@ -529,13 +552,30 @@ stakes. The concrete artifact, such as a test file and its green output,
 makes done auditable. Name cheap shortcuts in the brief: placeholders,
 bypassed hooks, or "see source" in place of the requested artifact.
 
+What a lane cannot know unless its brief says so: the skills to load, by exact
+name, since skill hints never reach a lane and a read-scoped type has no Skill
+tool (give it the `SKILLS/<name>/SKILL.md` path); that a change bound for the
+second vendor opens its PR and stops, never merges; and its own worktree and
+`mktemp -d` scratch directory, removed by exact path, never a glob (a glob once
+deleted sibling lanes' live directories). Lane traps: `ops-investigator` and
+`ops-auditor` cannot write files, so they return text; a lane's background
+command never wakes it, so gates and long steps run in the foreground, and a
+stop, change and restart of a live service run in one call behind a trap that
+restores it; a workflow lane cannot write a report file and its structured
+output fails to parse from about 4 KB, so ask for short typed fields; and a
+lane never runs `git config`, because a scope-less one from a worktree became
+the shared repo's identity.
+
 ### P9. Tests scale with the work
 
 [Core: Land](core.md#land-the-work-with-one-review-gate) owns test delivery.
-A new module needs a public-behavior test; a route, schema, or configuration
-contract change needs a regression test and a removal test where behavior
-was removed. New invariants get gate or CI entries in the same pass. A
-substantive stream with no growth in relevant test coverage is incomplete.
+A new module needs a public-behavior test that fails without it; a route,
+schema, or configuration contract change needs a regression test and a
+removal test where behavior was removed. A fix ships a test shown failing
+without the fix, under the repo's own gate command, before it is shown green.
+New invariants get gate or CI entries in the same pass. Test count and
+coverage are never targets: a test earns its place by naming the failure it
+catches.
 Tests that exercise a deleter, a guard, or anything that writes outside a
 temp directory run against a throwaway `HOME` and fixtures, never the live
 tree.
@@ -555,7 +595,9 @@ computes its own path. How to run one: `.claude-config/bin/README.md`,
 "sandbox-run".
 
 For vendor write integrations, include authorized live verification in the
-change. Mocks encode the developer's assumptions; actual APIs may have
+change. Authorized means the Operator's own tenant or accounts, never a
+client's. Reads, parsers, error classifiers and security controls get a
+recorded real response or a dated probe. Mocks encode the developer's assumptions; actual APIs may have
 undocumented fields or different read and write shapes. Bisect rejected
 payloads from `{}` one field at a time.
 

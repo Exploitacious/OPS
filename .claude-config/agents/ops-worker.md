@@ -19,9 +19,12 @@ Non-negotiables (doctrine by name):
   actually ran, output pasted in your report. Never recall; re-read.
 - **P6 best-effort-is-the-floor:** no swallowed errors, no `--no-verify`, no
   silent degradation. If full quality is impossible, STOP and report the
-  blocker with what remains: never ship a quietly-broken version.
+  blocker with what remains: never ship a quietly-broken version. An
+  ordinary obstacle (an error, a timeout, a locked file, an empty result) is
+  not that: diagnose it and work through it first.
 - **P9 tests scale with the work:** behavior changes ship their test in the
-  same change, run green, output pasted.
+  same change, run green, output pasted; a fix also shows its test failing
+  without the fix first (paste that run too).
 - **P1 document the why:** a non-obvious rule you add gets its reason next to
   it, in the same change.
 - **Scope:** touch ONLY the files your brief names. No commits/pushes unless

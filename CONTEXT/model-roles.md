@@ -14,7 +14,7 @@ Catalog facts checked 2026-11-09 against Anthropic's [model overview](https://pl
 | Default lane: builds, fixes, docs, research, recon, refutation, mechanical work | Sonnet 5.5 | `claude-sonnet-5-5[1m]` | `CLAUDE_CODE_SUBAGENT_MODEL` in the Stage-1 `env` (every spawn or workflow `agent()` that names no model); `ANTHROPIC_DEFAULT_SONNET_MODEL` (`model: "sonnet"`); the `ops-worker` and `ops-auditor` pins (full id) and `ops-investigator` (`model: sonnet`) |
 | High-criticality build lane | Opus 5.5 | `claude-opus-5-5[1m]` | `model: "opus"` on a spawn, with the reason stated in the brief; the judgment lanes of `harness-audit.js` pin the full id |
 | Cheap reading | Haiku 5.5 | `claude-haiku-5-5` (the exact id) | `ANTHROPIC_DEFAULT_HAIKU_MODEL` in the Stage-1 `env` (the haiku alias and Claude Code's background requests); `model: 'claude-haiku-5-5'` named on a workflow stage; never the bare `haiku` alias |
-| Rare | Fable 5.1 | `claude-fable-5-1` | Agent tool `model: "fable"`; `/model claude-fable-5-1[1m]` for a session that needs it at the top |
+| Consult, the second mind (optional) | Fable 5.2 | `claude-fable-5-2` | Agent tool `model: "fable"` (the alias resolves to `claude-fable-5-2`); `delegate_task` with that id and an effort option for a consult that needs its own thread; see [Fable 5.2, the second mind](#fable-52-the-second-mind) |
 | Retired | Sonnet 5; Opus 4.8 | `claude-sonnet-5`; `claude-opus-4-8` | pinned nowhere; `verify-ops.sh` check 15b fails on a live pin |
 | Banned | Opus 5; every Haiku except 5.5 | `claude-opus-5` (the exact id); every haiku id except `claude-haiku-5-5` | see Bans |
 
@@ -26,18 +26,18 @@ Opus 5.5 is the foreman (the `"model"` pin) and the lane for work where Sonnet i
 
 API behavior that touches the harness:
 
-- Its effort default is `medium`, so the explicit `xhigh` pin (see Effort) is what keeps it at the harness default.
+- Its effort default is `medium`, so the saved per-model `high` level (see Effort) is what keeps it at the harness default.
 - Thinking cannot be disabled; the CLI never tries to.
 - Forced `tool_choice` (`any` or `tool`) returns a 400. Claude Code's structured output does not depend on it; a script of yours that calls the API directly must use `auto` and say which tool to call.
 - Thinking blocks are bound to the model and conversation that produced them; the CLI handles that binding.
 
 ## Context windows
 
-Opus 5.5, Sonnet 5.5, and Fable 5.1 run with a 1M-token window; the 4.6-era ids reach 1M only through their `[1m]` variants. Haiku 5.5 has a native 1M window, but every rate is 5x once a request passes 100K tokens, so the harness holds it under 100K: the Stage-1 settings give `claude-haiku-5-5` a 100K auto-compaction window. The context-watch hook sizes each sub-agent lane from its own model on this basis (a reminder at 60% and a wrap-up at 80% of a 1M window, one backstop at 95K for Haiku 5.5); its `LANE_WINDOWS` table is the per-id record, and a new model id gets a row there before a lane runs on it.
+Opus 5.5, Sonnet 5.5, and Fable 5.2 run with a 1M-token window; the 4.6-era ids reach 1M only through their `[1m]` variants. Haiku 5.5 has a native 1M window, but every rate is 5x once a request passes 100K tokens, so the harness holds it under 100K: the Stage-1 settings give `claude-haiku-5-5` a 100K auto-compaction window. The context-watch hook sizes each sub-agent lane from its own model on this basis (a reminder at 60% and a wrap-up at 80% of a 1M window, one backstop at 95K for Haiku 5.5); its `LANE_WINDOWS` table is the per-id record, and a new model id gets a row there before a lane runs on it.
 
 ## Sonnet 5.5, the workhorse
 
-Sonnet 5.5 is the default lane for builds, fixes, docs, research, recon, migrations, mechanical work, and refutation. It has a 1M window and 128K max output and lists at $2 / $10 per MTok. Claude Code learned the `claude-sonnet-5-5` id in 2.1.284; an older build runs it as an unknown model with a 200K window, so update Claude Code on a host before relying on the pin. Its effort default on the [Claude API](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) is `high` (Claude Code defaults to `medium`), so the `xhigh` pin stays explicit.
+Sonnet 5.5 is the default lane for builds, fixes, docs, research, recon, migrations, mechanical work, and refutation. It has a 1M window and 128K max output and lists at $2 / $10 per MTok. Claude Code learned the `claude-sonnet-5-5` id in 2.1.284; an older build runs it as an unknown model with a 200K window, so update Claude Code on a host before relying on the pin. Its effort default on the [Claude API](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) is `high` (Claude Code defaults to `medium`), so the saved `high` level stays explicit.
 
 Overturn condition (P14). The constraint is the shared usage window, and this default bets that Sonnet 5.5 holds quality on ordinary lane work at half Opus 5.5's list price. Two readings would falsify it: churn, meaning Sonnet 5.5 lanes write more cache per output token than Opus 5.5 lanes on comparable work (the reading that got Opus 5 banned); and rework, meaning lanes the foreman must respawn on Opus 5.5 after verification fails, against all Sonnet 5.5 lanes of the same week. Read churn with `.claude-config/bin/transcript-usage.py --since <ISO time> ~/.claude/projects` (lane rows: `ccr` against `out`, with the `models` column naming the model); rework is the foreman's own count of respawns, since no tool records it. A reasonable line: churn above Opus 5.5's, or more than one lane in four respawned on Opus. If either holds, bring the Operator the figures with a recommendation. New input that reopens the question: a cheaper model that clears the same bar, or a price change on any tier.
 
@@ -60,13 +60,29 @@ How the 100K ceiling holds. Claude Code's own auto-compaction holds it, so a Hai
 
 What would break it: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` outranks every per-model window; `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` lowers every model's threshold; a removed `DISABLE_AUTO_COMPACT` leaves an inherited `"1"` in force; Claude Code drops a malformed per-model value without a word, and `claude doctor` does not flag it; `/autocompact` saves a window for the current model into the user settings file, which on a linuxploitacious host is the shared Stage-1 file; and a top-level `autoCompactWindow` in a higher-precedence settings file (`settings.local.json`, managed settings) replaces the per-model windows of lower files. No OPS check reads these keys today, so when a Haiku lane runs past 100K, read them in that order.
 
-Effort. `CLAUDE_CODE_EFFORT_LEVEL=xhigh` in the Stage-1 settings overrides an agent's `effort` frontmatter, so Haiku lanes run at `xhigh` like every tier. That spends more tokens than its API default (`medium`), which fills the 100K ceiling sooner.
+Effort. The Stage-1 settings save `high` for `claude-haiku-5-5`, so a Haiku lane runs at `high` unless its agent frontmatter or the spawn sets another level. That spends more tokens than its default (`medium`), which fills the 100K ceiling sooner.
 
 Overturn condition (P14). The constraint is Haiku's accuracy on retrieval and summaries against its price. A same-brief comparison in which Haiku misses or fabricates more than Sonnet on the same lookups would falsify a placement; a price change on either tier reopens it.
 
-## Fable 5.1, rare
+## Fable 5.2, the second mind
 
-Spawn Fable only for deep, high-impact design or infrastructure planning and for some front-end work. It lists at $10 / $50 per MTok (cache reads $0.25), 2.5 times Opus 5.5 and 5 times Sonnet 5.5, and spends the shared usage window several times faster per token: Fable lanes on ordinary work have used up a whole five-hour window overnight and stopped the foreman and its lanes with it. Each lane also carries about 30K tokens of fixed overhead (system prompt and tool schemas), so give it substantive work and a complete brief; a lane sees only its brief. The cases that once justified a top-tier lane (concurrency, security, guards and deploy code, a second attempt) go to Opus 5.5. A code review is never a Fable lane. Nobody is required to have Fable: not every account or seat includes it, and a copy that lacks it loses nothing the harness needs, because Opus 5.5 takes that work.
+Fable 5.2 (`claude-fable-5-2`) is the consult: a second mind beside the Opus 5.5 foreman, called at set moments, never a reviewer and never a volume worker. Opus is meticulous and misses little, but it rarely challenges the premise it was handed, and its options cluster. Fable has range: the premise, a structural shortcut, a real spread of options. Work that can be hill-climbed to a check is Opus work; work judged by taste, premise, or a spread of options is consult work. Its answer is advice the foreman verifies before acting on it or reporting it (P3).
+
+Call it at three moments, without asking, and name which in the brief:
+
+1. Before: a multi-lane build plan or a new system, ahead of its plan review (routine fixes skip both); options going to the Operator on a design decision; a visual or UX direction the Operator will judge by eye, before it is built.
+2. After a miss: a problem that beat Opus once (a fix that did not hold, evidence against the answer, or two answers that disagree); a third review round coming on one workstream; or an item carried "not done" across two rest stops. The question is why it keeps happening and whether the shape is wrong (split, cut, restart smaller). Send the attempt and the evidence, not a fresh start; an error a retry fixes is an ordinary obstacle, not a miss.
+3. Security: a security design before it is built, or a high-stakes conclusion ("safe to expose", "contained") as a refutation with numbered claims.
+
+Elsewhere, call it when the open question is which shape, and no check can settle it.
+
+How to call it: the Agent tool with `model: "fable"` (it runs at Fable's saved `medium`; pass the tool's `effort` when the question needs more), or `delegate_task` with model `claude-fable-5-2` and the effort option in the call for a consult that needs its own thread. Word the brief as a challenge ("what is wrong with the premise of the plan at <path>"), never "review this" or "is it safe to merge". Give it the Operator's own words for the ask, one question, the evidence paths (a cheaper lane gathers them first), and a capped return: the recommendation, what would falsify it, and what would reopen it.
+
+What does not move: a consult challenges plans and refutes conclusions; it never reviews a code change and never stands in for the second-vendor review or a refutation lane. No volume work (build lanes, bulk reading, fan-out); a small patch that is the finding comes back as a diff the foreman lands.
+
+Cost. Fable lists at $8 / $40 per MTok, twice Opus 5.5, on the same shared usage windows, and each lane carries about 30K tokens of fixed overhead (system prompt and tool schemas), so give it one substantive question and a complete brief. A single consult needs no usage check; volume work on Fable has drained whole usage windows and stays out. Where a seat also offers Mythos 5.2 (`claude-mythos-5-2`), it can take the same role at the same settings.
+
+Nobody is required to have Fable: not every account or seat includes it, and a copy that lacks it skips the consult and loses nothing the harness needs, because Opus 5.5 takes that work.
 
 ## Bans
 
@@ -74,11 +90,22 @@ Opus 5 (`claude-opus-5`, the exact id) is banned harness-wide. As a fan-out work
 
 Every Haiku except Haiku 5.5 is banned: Haiku 4.5 in any form (dated, Bedrock or Vertex naming), the older `claude-3-5-haiku-*` naming, a dated 5.5 snapshot, and any later Haiku until the policy names it. Only the exact id `claude-haiku-5-5` is allowed. `verify-ops.sh` check 15b fails when the `ANTHROPIC_DEFAULT_HAIKU_MODEL` pin is anything but exactly `claude-haiku-5-5`, and when another Haiku id, or the bare `haiku` alias as a value, appears in an agent definition, a workflow script (`SKILLS/**/*.js` included), a command, or a Claude settings file. In those files, name a banned Haiku in words ("Haiku 4.5"), never by id.
 
-Sonnet 5 and Opus 4.8 are retired, not banned: nothing may pin them, because a retired id left in a pin keeps lanes quietly running the retired model. Check 15b fails on a live pin in agent frontmatter, workflow lanes, and the Claude settings files, matching each id at its end so that `claude-sonnet-5-5` does not trip `claude-sonnet-5`. It does not scan prose. One platform exception: Claude Code's safety-refusal fallback (`switchModelsOnFlag` in the Stage-1 settings) can move a refused turn to an older model on its own; no pin of ours chooses it.
+Sonnet 5 and Opus 4.8 are retired, not banned: nothing may pin them, because a retired id left in a pin keeps lanes quietly running the retired model. Check 15b fails on a live pin in agent frontmatter, workflow lanes, and the Claude settings files, matching each id at its end so that `claude-sonnet-5-5` does not trip `claude-sonnet-5`. It does not scan prose. One platform exception: Claude Code's safety-refusal fallback (`switchModelsOnFlag` in the Stage-1 settings) can move a refused turn to an older model on its own; no pin of ours chooses it. Fable 5.2 widens it: Anthropic answers a blocked Fable request with Opus 4.8 for cyber topics and with Opus 5, the banned id, for biology and a small set of AI-development topics (the Fable 5.2 launch page, 2026-11-09). Both reroutes stay platform behavior; word a Fable consult on a security question neutrally (the engineering question restated honestly, never the work hidden or altered), which narrows them.
 
 ## Effort
 
-Effort is `xhigh` on every tier, Haiku 5.5 included (`effortLevel` and `CLAUDE_CODE_EFFORT_LEVEL` in the Stage-1 settings). The 5.5 models default to `medium` without that pin, so it must stay explicit. `max` is not used on a Claude model. An effort decrease is the Operator's token-saving lever: honor a `/effort` drop, never auto-restore it mid-session, and never autonomously downgrade a lane (least of all a review or verify lane). First-launch gotcha: the first boot on a newly pinned model can reset effort to default once despite the settings pin; re-pin with `/effort xhigh` only for that unintended reset. `xhigh` returns on its own at the next boot via the settings default.
+Effort defaults to `high` on Opus 5.5, Sonnet 5.5, and Haiku 5.5 and to `medium` on Fable 5.2 (and Mythos 5.2 where a seat has it). `max` is never used on a Claude model. The levels are defaults, not caps: the foreman sets a thread's or lane's effort, `low` to `xhigh`, when the work needs it (the Agent tool's `effort` on a native lane, the effort option in a `delegate_task` call, T3's picker for a thread it starts), and says why in the brief. A hard design, a security read, or a second attempt is the usual reason to raise it; mechanical volume work is the reason to lower it. An effort decrease is also the Operator's token-saving lever: honor a `/effort` drop, never auto-restore it mid-session, and never autonomously downgrade a review or verify lane.
+
+How the levels are held. The Stage-1 `settings.json` saves one level per model under `modelSettings` and sets no effort variable, because `CLAUDE_CODE_EFFORT_LEVEL` outranks every pick, T3's picker included: the backend sets defaults and never overrides a choice. Claude Code resolves effort in this order (measured on 2.1.322 by reading the level each run sends): the `CLAUDE_CODE_EFFORT_LEVEL` variable, a level picked in the session, `--effort` at launch, the saved per-model level, then the model's own default, which is `medium` for these models. A top-level `effortLevel` in the user file is ignored by them, and a saved `max` or a misspelled level falls to `medium` without a warning.
+
+What follows from the order:
+
+- T3 passes `--effort` on every launch from the thread's selection, so T3's picker decides a thread's effort; a selection with no effort option becomes T3's own default.
+- A `delegate_task` child on its parent's model inherits the parent's effort. A child that names a different model gets T3's default unless the call passes the effort option, so always pass it.
+- A native lane that names a different model than its parent runs at that model's saved level: `model: "fable"` under an Opus foreman runs at `medium`, and a lane that names no model runs on Sonnet 5.5 at `high`. A lane on its parent's own model inherits the parent's level. An agent's `effort` frontmatter overrides both, and the Agent tool's `effort` on the spawn overrides all three.
+- A Stage-1 checkout from before 2026-11-16 still carries the old `xhigh` variable and pins until that checkout is updated; a template sync does not touch it.
+
+First-launch gotcha: the first boot on a newly pinned model can reset effort to the model default once despite the saved level; re-pin with `/effort` to the saved level only for that unintended reset, never for the Operator's deliberate change.
 
 ## Settings, pins, and the shared Stage-1 file
 
