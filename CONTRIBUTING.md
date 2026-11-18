@@ -85,7 +85,7 @@ python3 -B .claude-config/bin/tests/ci-gate-test.py
 It runs the `Check every JavaScript script` step from `gate.yml` itself, so
 there is no second copy to drift. A workflow script (any `.js` whose first
 statement is `export const meta =`, in `.claude-config/workflows/` or bundled
-with a skill such as `SKILLS/memory-prune/audit_workflow.js`) uses top-level
+with a skill under `SKILLS/<name>/`) uses top-level
 `await` and `return`, because the workflow runner runs its body as an async
 function, so the step parses that body as one. Plain `node --check <file>` is
 wrong for these: Node 18 rejects the valid files, and newer releases can report

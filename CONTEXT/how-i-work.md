@@ -16,8 +16,8 @@ always-on layer stays short and this file carries the depth.
 
 ## Intake detail
 
-Use `grill-me` (where mounted) for the rounds and the decision frontier. The
-question tool depends on the provider and mode: Claude Code's
+Ask in rounds, each question with a recommendation, until no decision is
+left open. The question tool depends on the provider and mode: Claude Code's
 AskUserQuestion takes concrete options with a recommended default; where no
 such tool exists, ask in numbered prose with each question's choices spelled
 out. Offer a choice, not an empty prompt:
@@ -87,6 +87,23 @@ When preparing a rollup:
   existing language for a policy update, the framework they actually operate
   under for compliance work. Account for the stack in
   [USER.md](USER.md).
+
+### Client documents that ask for decisions
+
+The template's default story order (an owner may change it in their
+`CONTEXT/voice.md`). A decision cannot come before the reader knows what it
+refers to, so a document that asks its reader to decide something runs:
+context in one paragraph with a road map of the parts; what was done, or the
+current state; what was found; the proposal (how it works, the options, the
+cost); then the decisions, last, on their own final page, each naming the page
+that explains it. Each page has one headline sentence that states the
+takeaway, one main visual, and a line or two of text; headings only where a
+reader scans. The reader has zero context, so say what each system is the
+first time it appears. Judge length by reading time (about 15 minutes), not
+page count. Rendering the draft and checking for collisions is not the test:
+read it in this order before it reaches the Operator. The cover email is
+short: the headline result, what is needed back and on which page, and nothing
+the document already says.
 
 Backlog placement and the layered IDEAS files belong to
 [project-kata](project-kata.md).
@@ -330,8 +347,8 @@ Delegation Viability: [Yes / No / Partial]
   - Foreman estimate: [solo divided by 5-10, or N-A if sub-day]
 ```
 
-Apply `delegation-sizing` for the gate and conversion estimate. "Partial"
-names the independent pieces and the sequential remainder.
+Apply the delegation rule in [foreman: Orchestration](foreman.md#orchestration).
+"Partial" names the independent pieces and the sequential remainder.
 
 ## Hosted inside T3 Code
 
@@ -469,7 +486,8 @@ apply. [Git operations](#git-operations) owns merge mechanics.
 
 ### P5. Terse chat, full-register artifacts
 
-[Core: Writing](core.md#writing) owns the register. Understanding a rule's
+[Core: Writing](core.md#writing) owns the register;
+[ai-tells.md](ai-tells.md) is the editing catalog. Understanding a rule's
 reason outperforms repeating the rule. Chat compression never reaches briefs,
 decision records, commit messages, docs, or code: a compressed brief gets
 degraded work. Suspend it for security warnings and irreversible-action
@@ -509,7 +527,6 @@ lanes as peers delivering into a real system. Avoid "just", which signals low
 stakes. The concrete artifact, such as a test file and its green output,
 makes done auditable. Name cheap shortcuts in the brief: placeholders,
 bypassed hooks, or "see source" in place of the requested artifact.
-Templates: `briefing-subagents`.
 
 ### P9. Tests scale with the work
 
@@ -578,9 +595,7 @@ sequential, the Agent tool for independent scopes, a workflow for dozens of
 agents or orchestration worth codifying. When the
 answer's value does not justify a workflow, use the cheaper viable tier.
 Refutation workflows use the same briefing and verification discipline as
-manual delegation. The delegation skills (`delegation-sizing`,
-`briefing-subagents`, `worktree-isolation`, `verifying-delegated-output`,
-`dynamic-workflows`) carry the method.
+manual delegation.
 
 Lanes run as high as the work needs. Briefs split work for parallelism, never
 to save context: every continuation lane re-pays its reading, a restart cost

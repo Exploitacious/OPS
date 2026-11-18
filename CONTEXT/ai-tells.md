@@ -1,8 +1,8 @@
 # Pattern catalog: cut AI tells from any writing
 
-This is the editing catalog referenced by `SKILL.md`; the active writing contract owns the standing rules. Load it when editing anything longer than a chat reply: a doc, an email, a report, site copy.
+This is the editing catalog `CONTEXT/core.md` (Writing) points to, kept whole as a doctrine reference since the template retired its `operating-model` skill on 2026-11-17; core.md owns the standing rules. Load it when editing anything longer than a chat reply: a doc, an email, a report, site copy. It is the template's default; a copy's owner may change it, like the rest of their writing style.
 
-Provenance: this catalog is adapted from cursor/plugins (pstack/skills/unslop/SKILL.md), MIT-licensed, at commit fd878692de15 on 2026-08-30; the upstream notice is at the end of this file. Re-review upstream before any version bump. The operator's own voice merge lives in `CONTEXT/voice.md`, when present.
+Provenance: this catalog is adapted from cursor/plugins (pstack/skills/unslop/SKILL.md), MIT-licensed, at commit fd878692de15 on 2026-08-30; the upstream notice is at the end of this file. Re-review upstream before any version bump. The Operator's own voice lives in `CONTEXT/voice.md`, when it is filled in.
 
 ## Process
 

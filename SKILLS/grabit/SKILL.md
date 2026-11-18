@@ -38,7 +38,7 @@ The receive direction is the next section. Most "look at this image" requests ar
 
 An image attached in a T3 message arrives in the prompt as a saved path (`[User attached one or more files ...]`): read it directly with the Read tool and say what you see. Do not run grabit for it. A receive skill whose description matches ordinary talk about pasted or attached images fires on requests that need no pull at all.
 
-Pull with `~/OPS/.claude-config/bin/grabit --inbox` only when the operator says they pushed (Taildropped) something to this box. It pulls everything waiting into `~/grabit-inbox` and lists what landed; the `grabit-screenshots` skill carries the full receive procedure (read each pending image newest first, say what you actually see before interpreting it, never ask for a path or suggest base64-pasting an image). An empty inbox means nothing arrived: say so rather than guessing.
+Pull with `~/OPS/.claude-config/bin/grabit --inbox` only when the operator says they pushed (Taildropped) something to this box. It pulls everything waiting into `~/grabit-inbox` and lists what landed; read each pending image newest first, say what you actually see before interpreting it, and never ask for a path or suggest base64-pasting an image. An empty inbox means nothing arrived: say so rather than guessing.
 
 ## Workflow
 

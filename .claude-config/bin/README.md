@@ -314,9 +314,9 @@ frontmatter for three more jobs, all read-only:
   A pool of more than 60 entries is a WARN on stderr and nothing else: the
   index is still written, the exit status does not change and no entry is
   removed, because a pool is its owner's. Past about 40 entries the digest can no
-  longer describe every one, so the tail loses its descriptions; the
-  `memory-prune` skill is the fix, whenever you choose it. More than 20 pinned
-  entries warns the same way.
+  longer describe every one, so the tail loses its descriptions; pruning the
+  pool (fold, merge or delete entries) is the fix, whenever you choose it. More
+  than 20 pinned entries warns the same way.
 
 Tests: `tests/memory-index-test.sh`, `tests/memory-digest-test.sh`,
 `tests/memory-boundary-test.py`, `tests/memory-init-test.sh` (conflicting pools
@@ -324,8 +324,7 @@ and the push gate), `tests/memory-init-hostkey-test.sh` (the host key flags and
 which cwds get a pool), `tests/memory-host-key-rule-test.sh` and
 `tests/memory-init-windows-test.ps1`. The hint hook's own suite is
 `tests/memory-hint-test.sh`; `tests/memory-digest-test.sh` also drives
-`hooks/memory-digest.sh`. The `memory-prune` skill's read-only inventory has
-`tests/memory-prune-inventory-test.sh`.
+`hooks/memory-digest.sh`.
 
 ## `memory-hint.sh`, `report-lint.sh`, `askuser-cancel.sh`, `foreman-context.sh`: prompt, stop and boot hooks
 
@@ -581,9 +580,8 @@ of a returned lane misses the cache and runs again), and skip a lane whose
 branch you took over. `WF_RESUME_PROJECTS` (colon-separated) overrides the
 projects directories; `WF_RESUME_TZ` (an IANA zone name) sets the zone times
 print in, default the machine's local one. Test: `tests/wf-resume-test.sh` (a
-fixture run with every lane state, a real linked worktree whose index must stay
-byte-identical, and, when a `dynamic-workflows` skill is mounted with its args
-prelude, that prelude run against every args shape that crashed scripts).
+fixture run with every lane state, and a real linked worktree whose index must
+stay byte-identical).
 
 ## `lane-class`, `await`, `safe-pkill`, and `hooks/lane-rules.sh`: lane boots and shell stumbles
 

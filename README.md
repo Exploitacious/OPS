@@ -26,14 +26,13 @@ What it gives you, out of the box:
   synthesis, cross-session handoff batons, and post-compact re-orientation hooks
   keep durable state on disk *before* a `/compact` runs, so a fresh context can
   self-recover from files alone.
-- **A skills system.** Local Claude Code Skills (and their Claude.ai GUI Project
-  twins) for the recurring work that binds to OPS's own hooks and layout: memory
-  pruning, pre-compact synthesis, session lifecycle, file transfer, and more. The
-  portable technique skills (delegation, skill authoring) aren't vendored here:
-  OPS *mounts* them from a shared skill source rather than carrying a copy that
-  drifts. The default source is
-  [`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills);
-  an org or private source mounts alongside it. See `SKILLS/README.md`.
+- **A small skills set.** A skill holds only what a capable agent with a fresh
+  context could not know, never procedure; rules live in doctrine and steps in
+  scripts. The template ships the few that bind to OPS's own hooks and layout:
+  pre-compact synthesis, session lifecycle, file transfer, inline T3 pages and
+  template sync. A shared skill lives in exactly one repo, so the template
+  mounts none by default; an org or private source mounts through
+  `SKILLS/VENDORED.tsv`. See `SKILLS/README.md`.
 
 ## Opinionated by design
 
@@ -300,11 +299,11 @@ exists but cannot be reached is still a failed pull, reported as an error.
 
 ## Skill mounts
 
-Portable technique skills are mounted, not copied. `SKILLS/VENDORED.tsv` lists
-nine from [`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills):
-`delegation-sizing`, `briefing-subagents`, `worktree-isolation`,
-`verifying-delegated-output`, `dynamic-workflows`, `meta-skill-creator`,
-`grill-me`, `tdd`, and `diagnosing-bugs`. Deploy clones that repo once under
+Shared skills are mounted, not copied. `SKILLS/VENDORED.tsv` lists each
+mounted skill and its source; since 2026-11-17 the template ships it with no
+rows (it used to mount nine from
+[`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills),
+which the owner ruled out of the template). Deploy still clones that repo once under
 `PROJECTS/Exploitacious/agent-skills` (it never pulls an existing clone, so a
 re-deploy cannot slip in an unreviewed upstream change), then runs
 `.claude-config/bin/skills-vendor.sh sync` to mirror each skill into
@@ -314,9 +313,8 @@ mirror did not), or `MISSING` (the source is not cloned). The sync never
 deletes a folder it did not write: your own skill under a mounted name, or a
 hand-edited mirror, moves to `.claude-config/backup/skills-replaced/` first.
 Add a row to `VENDORED.tsv` for an org or private source of your own
-(`SKILLS/README.md`). Some mounted and local skills adapt third-party work;
-[`SKILLS/THIRD_PARTY_NOTICES.md`](SKILLS/THIRD_PARTY_NOTICES.md) lists each
-source and its license.
+(`SKILLS/README.md`). Third-party work the template adapts is listed with its
+license in [`SKILLS/THIRD_PARTY_NOTICES.md`](SKILLS/THIRD_PARTY_NOTICES.md).
 
 ## Template sync
 
@@ -382,6 +380,7 @@ OPS/
 ├── .github/workflows/     # gate.yml: the CI gate (runs on the template repository only)
 ├── CONTEXT/               # core.md always loaded; everything else on demand
 │   ├── core.md                 #   the always-loaded rules (linked into ~/.claude/rules/ops-core.md)
+│   ├── ai-tells.md             #   the AI-tells editing catalog core.md's Writing section points to
 │   ├── foreman.md              #   the main thread's rules, printed into foreman sessions by a hook, never into a lane
 │   ├── how-i-work.md           #   principles P1-P15 + situational rules (the why behind core.md)
 │   ├── model-roles.md          #   the model-tier policy, one source
@@ -438,10 +437,9 @@ add ultracode to terminal launches.
 For a forker, this means:
 
 - **Your identity is not in the boot.** `USER.md`, `voice.md`, and
-  `standing-orders.md` load on demand, through the core's "Where to look" table
-  and the context skills (`operator-voice`, `harness-readme`, `harness-deploy`,
-  `project-kata`, `projects-map`, `machines`). BOOTSTRAP fills them, and
-  `harness-update` never syncs them, so a template refresh never clobbers them.
+  `standing-orders.md` load on demand, through the core's "Where to look"
+  table. BOOTSTRAP fills them, and `harness-update` never syncs them, so a
+  template refresh never clobbers them.
 - **Keep the core small and generic.** It is paid on every turn of every
   session and lane, and the template sync updates it. Put your rulings in
   `standing-orders.md`, never in `core.md` or `foreman.md`.
@@ -471,6 +469,6 @@ layer for the Claude Code CLI, not a desktop product.
 
 ## License
 
-MIT; see [`LICENSE`](LICENSE). Skills adapted from third-party work keep their
-upstream licenses; see
+MIT; see [`LICENSE`](LICENSE). Doctrine adapted from third-party work keeps
+its upstream license; see
 [`SKILLS/THIRD_PARTY_NOTICES.md`](SKILLS/THIRD_PARTY_NOTICES.md).

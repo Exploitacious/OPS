@@ -2,9 +2,7 @@
 
 **Purpose:** Move real files between a (usually headless) OPS box and the operator's machine over Tailscale, via the `grabit` binary, not in-chat delivery. Corrects the default reflex to hand files back as chat attachments.
 
-**Two skills, one binary:**
-- `grabit/SKILL.md`: the SEND direction. Push a named file to the operator's Downloads (`grabit FILE...` / `--to` / `--serve` / `--list`).
-- `grabit-screenshots/SKILL.md`: the RECEIVE direction. Pull files the operator pushed to the box, screenshots included (`grabit --inbox`), and read images natively.
+**One skill, one binary:** `grabit/SKILL.md` covers the SEND direction (push a named file to the operator's Downloads: `grabit FILE...` / `--to` / `--serve` / `--list`) and the RECEIVE direction (`grabit --inbox` pulls what the operator pushed to the box, screenshots included). The separate `grabit-screenshots` skill was retired on 2026-11-17.
 
 **Deployment:** Claude Code **skills only**. A Claude.ai GUI Project can't execute a local shell binary over the tailnet, so there is no Project half. Picked up automatically via the `~/.claude/skills/` to `OPS/SKILLS/` symlink; no per-entry symlink needed.
 

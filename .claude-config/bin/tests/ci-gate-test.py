@@ -80,8 +80,9 @@ class JavaScriptGateTests(unittest.TestCase):
     def test_every_tracked_javascript_file_passes(self):
         # The step over the repository's own .js files, so a checker change that
         # rejects a shipped script fails here, not first on the hosted runner.
-        # This covers the skill-bundled workflow SKILLS/memory-prune/
-        # audit_workflow.js, which a path rule once sent to the module check.
+        # The template's workflow scripts are among them; a skill-bundled one
+        # (a path rule once sent those to the module check) is covered by the
+        # synthetic case below, since the template ships none since 2026-11-17.
         listed = subprocess.run(
             ["git", "-C", str(ROOT), "ls-files", "-z", "*.js"],
             capture_output=True,
@@ -97,7 +98,7 @@ class JavaScriptGateTests(unittest.TestCase):
                 if ".git" not in path.relative_to(ROOT).parts
             ]
         files = {name: (ROOT / name).read_text() for name in names}
-        self.assertIn("SKILLS/memory-prune/audit_workflow.js", files)
+        self.assertIn(".claude-config/workflows/harness-audit.js", files)
         self.assert_result(self.check(files), True)
 
     def test_workflow_outside_the_workflows_directory(self):

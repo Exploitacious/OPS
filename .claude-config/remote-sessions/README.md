@@ -23,8 +23,33 @@ up as sessions appearing, vanishing, and taking each other down.
 | `registry.tsv.example` | Sample registry. The live registry is `~/.claude-remote-sessions.tsv` (machine-local, not committed). |
 | `../systemd/tmux-main.service` | Optional: a base `main` tmux session at login. |
 
-The `remote-session` skill (`SKILLS/remote-session/`) lets Claude run this
-lifecycle on request.
+The scripts above are the interface; the `remote-session` skill that wrapped
+them was retired on 2026-11-17. Facts it carried that the scripts do not show:
+
+- Pass a session name exactly as the Operator said it; the launcher normalizes
+  it to Title-Case-Hyphen (`morning briefing` becomes `Morning-Briefing`). A
+  name already in the registry keeps its directory so its conversation
+  resumes. The launcher prints one status line: `OK ...` (exit 0),
+  `ERR_EXISTS` (3), `ERR_DIR` (4), `ERR_USAGE` or `ERR_NAME` (2).
+- A session started under a second profile resumes under it: the launcher
+  records the live `CLAUDE_CONFIG_DIR` in the row's fourth column, so start it
+  from a shell where that variable already points at the profile.
+- End a session for good, with no archive row: `source lib-remote-claude.sh &&
+  rc_deregister "$(rc_normalize_name "<Name>")"`, then
+  `tmux kill-session -t "=<Name>"`.
+- Pane-level tmux commands (`send-keys`, `capture-pane`, `display-message`) do
+  not resolve a bare `=<Name>` target on recent tmux; they need the window
+  part, `=<Name>:`. Session-level commands (`has-session`, `kill-session`)
+  still take `=<Name>`. The launcher handles it; the trap bites hand-rolled
+  `send-keys`.
+- Injecting a prompt into a live session fails silently in three ways: a
+  dialog on screen eats the first keystrokes; a multi-line paste submits
+  early, so write the work order to a file and inject one line,
+  `send-keys -t "=<Name>:" -l '<text>'`, then a separate `Enter`; and
+  `Escape` while the session is working interrupts its turn. Confirm receipt
+  with `tmux capture-pane -p -t "=<Name>:"`.
+- A T3 Code thread is not a tmux session and has no registry row; start,
+  switch and end T3 threads in the T3 UI.
 
 ## Registry schema
 
