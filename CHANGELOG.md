@@ -4,6 +4,30 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-17: the skill mounts retire
+
+The template mounted no skills once `SKILLS/VENDORED.tsv` lost its last row, yet the
+deployers still carried the step that cloned the public `agent-skills` repo and synced
+mirrors from it. The mechanism goes: the template
+ships its own harness skills in `SKILLS/`, and an organization's shared skills are
+delivered separately by that organization.
+
+- **Removed**: `.claude-config/bin/skills-vendor.sh`, `SKILLS/VENDORED.tsv`, and the
+  suites `tests/skills-vendor-test.sh` and `tests/deploy-skills-mount-test.sh`.
+- **`deploy.sh` and `deploy.ps1`** no longer clone a skill source or sync mirrors, and
+  no longer record a `skills-mount` failure. `deploy.sh` keeps its step numbers (step 2
+  is now a note), because the docs and the session briefing cite steps 7 and 8;
+  `deploy.ps1` renumbers its last two steps.
+- **`verify-ops.sh`**: check 22 (mirror drift) is retired, its number left free;
+  `skills-vendor.sh` leaves the destructive-tool list of check 24; checks 4 and 9b no
+  longer read a manifest. The self-test and `deploy-windows-test.ps1` lose their
+  mount cases; CI no longer installs rsync, which only the mount tests used.
+- **An existing copy keeps its leftovers**, since neither deploy nor a template sync
+  deletes files: the clone under `PROJECTS/`, the mirrored `SKILLS/<name>/` folders,
+  `SKILLS/.vendored-state.tsv`. `DEPLOYMENT.md`, "Leftovers from the skill mounts",
+  says how to recognise them; all are safe to remove by hand, and `verify-ops.sh`
+  warns that the clone is missing from `projects-map.md` until it is gone.
+
 ## 2026-11-17: skills hold facts, not procedure; twelve template skills retire
 
 The owner cut the skill set with one test: a skill holds only what a capable agent with

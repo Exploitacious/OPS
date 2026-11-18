@@ -195,10 +195,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install bubblewrap, zsh, rsync and a current git, and prove bubblewrap can build a sandbox
+      - name: Install bubblewrap, zsh and a current git, and prove bubblewrap can build a sandbox
         # sandbox-run needs a root-owned bwrap. One root-wrapper case runs in zsh
-        # (it prints SKIP without it), and the skill-mount tests exercise the
-        # rsync engine as well as the tar fallback. branch-gc reads `git rev-parse
+        # (it prints SKIP without it). branch-gc reads `git rev-parse
         # --show-ref-format` (git 2.45) and skips every repository without it;
         # Ubuntu 24.04's own git is 2.43, so an older git is upgraded from the
         # git-core PPA (the 26.04 runner image already ships 2.55, so this is
@@ -211,7 +210,7 @@ jobs:
         # hide a broken gate.
         run: |
           need=()
-          for pkg in bubblewrap:bwrap zsh:zsh rsync:rsync; do
+          for pkg in bubblewrap:bwrap zsh:zsh; do
             command -v "${pkg#*:}" >/dev/null 2>&1 || need+=("${pkg%%:*}")
           done
           git_ok() { [ "$(printf '%s\n2.45\n' "$(git --version | awk '{print $3}')" | sort -V | head -n 1)" = 2.45 ]; }

@@ -31,8 +31,8 @@ What it gives you, out of the box:
   scripts. The template ships the few that bind to OPS's own hooks and layout:
   pre-compact synthesis, session lifecycle, file transfer, inline T3 pages and
   template sync. A shared skill lives in exactly one repo, so the template
-  mounts none by default; an org or private source mounts through
-  `SKILLS/VENDORED.tsv`. See `SKILLS/README.md`.
+  carries none; an organization delivers its own shared skills separately. See
+  `SKILLS/README.md`.
 
 ## Opinionated by design
 
@@ -208,7 +208,8 @@ idempotent and safe to re-run after any pull. On Linux, in order:
 
 1. Link `~/.claude/{skills,commands,agents,workflows}` to the matching OPS
    directories, backing up any real directory already there.
-2. Mount the shared skills (see "Skill mounts").
+2. No skill step: `SKILLS/` arrives through the step 1 link (see "Shared
+   skills"). The later steps keep their numbers.
 3. Link the always-loaded core into `~/.claude/rules/ops-core.md`.
 4. Strip the retired fleet's PATH and wrapper lines from your shell rc files
    (whole-line matches only; anything you wrote stays).
@@ -297,24 +298,16 @@ private GitHub remote (`git -C ~/OPS remote add origin <url>`, see the push
 gate above); the next run pulls and pushes every local commit. An origin that
 exists but cannot be reached is still a failed pull, reported as an error.
 
-## Skill mounts
+## Shared skills
 
-Shared skills are mounted, not copied. `SKILLS/VENDORED.tsv` lists each
-mounted skill and its source; since 2026-11-17 the template ships it with no
-rows (it used to mount nine from
-[`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills),
-which the owner ruled out of the template). Deploy still clones that repo once under
-`PROJECTS/Exploitacious/agent-skills` (it never pulls an existing clone, so a
-re-deploy cannot slip in an unreviewed upstream change), then runs
-`.claude-config/bin/skills-vendor.sh sync` to mirror each skill into
-`SKILLS/<name>/`. Edit a mounted skill at its source repo, never in `SKILLS/`.
-`skills-vendor.sh --check` prints `OK`, `DRIFT` (the source changed and the
-mirror did not), or `MISSING` (the source is not cloned). The sync never
-deletes a folder it did not write: your own skill under a mounted name, or a
-hand-edited mirror, moves to `.claude-config/backup/skills-replaced/` first.
-Add a row to `VENDORED.tsv` for an org or private source of your own
-(`SKILLS/README.md`). Third-party work the template adapts is listed with its
-license in [`SKILLS/THIRD_PARTY_NOTICES.md`](SKILLS/THIRD_PARTY_NOTICES.md).
+The template ships its own harness skills in `SKILLS/`, and deploy links that
+folder to `~/.claude/skills/`. An organization's shared skills are delivered
+separately by that organization: a shared skill lives in exactly one repo, so
+the template carries no copy. Until 2026-11-17 deploy cloned a public skill
+source and mirrored skills from it; `DEPLOYMENT.md`, "Leftovers from the skill
+mounts", says what an older copy may still hold. Third-party work the template
+adapts is listed with its license in
+[`SKILLS/THIRD_PARTY_NOTICES.md`](SKILLS/THIRD_PARTY_NOTICES.md).
 
 ## Template sync
 
@@ -351,7 +344,7 @@ origin (`CONTEXT/how-i-work.md`, "The template and a copy's owner").
 
 - **The drift gate:** `bash ~/OPS/.claude-config/bin/verify-ops.sh`
   machine-checks the conventions that used to live only in prose: the core's
-  size and link, the model pins, the retired files, the skill mounts, the
+  size and link, the model pins, the retired files, the skill sizes, the
   sandbox guards, and more. Exit 0 means no FAIL (a WARN is advice). `--quiet`
   prints only WARN and FAIL lines, and `OPS_DIR=<path>` checks another
   checkout. Its host checks read `$HOME` (the core link, the Stage-1
@@ -391,13 +384,13 @@ OPS/
 │   └── projects/               #   per-project lessons, loaded only when on that project
 ├── SKILLS/                # Claude Code Skills + GUI Project twins (symlinked -> ~/.claude/skills/); THIRD_PARTY_NOTICES.md
 ├── .claude-config/        # Stage 2 deploy + the machinery it does not itself install
-│   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (links, core rule, skill mounts, memory sync, ...)
+│   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (links, core rule, memory sync, ...)
 │   ├── hooks/                  #   SessionStart briefing + foreman doctrine + lane rules + memory digest, pre-compact snapshot + branch-gc +
 │   │                           #   tool re-select, context-watch, memory hint, report-lint, askuser-cancel, secrets/git guards
 │   ├── systemd/                #   ops-verify timer (nightly drift gate) + optional tmux-main
 │   ├── remote-sessions/        #   hand-run tmux sessions you remote-control (see its README)
 │   ├── agents/ + workflows/    #   sub-agent definitions + multi-lane workflow scripts
-│   └── bin/                    #   memory-index/-init, branch-gc, sandbox-run, verify-ops, skills-vendor, lane-class, await, tests/ (and more)
+│   └── bin/                    #   memory-index/-init, branch-gc, sandbox-run, verify-ops, lane-class, await, tests/ (and more)
 ├── .claude-memory/        # per-machine memory pools (git-synced via bin/memory-init; loaded natively or by the digest hook)
 ├── .claude-handoffs/      # cross-session / cross-machine handoff batons
 ├── PROJECTS/              # your working repos (2nd-level subdirs are their own repos, gitignored)
@@ -446,8 +439,6 @@ For a forker, this means:
 - **Rest-stop cadence.** Compaction is a rest stop, not a scarcity response:
   compact by hand at natural breaks (foreman.md § "Rhythm and compaction");
   auto-compaction is the backstop.
-- **Mount portable skills.** `deploy.sh` clones the public skill source and
-  runs `.claude-config/bin/skills-vendor.sh sync`; see `SKILLS/README.md`.
 - **The drift gate checks it.** `verify-ops.sh` fails if the core is missing,
   over budget, or not linked (check 16), if a root `CLAUDE.md` would hide
   `AGENTS.md` (1b), if `USER.md` is still the template on a bootstrapped copy

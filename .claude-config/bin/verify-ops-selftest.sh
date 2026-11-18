@@ -384,30 +384,14 @@ mkdir -p "$OPS/WORKFORCE"
 run check_retired_context
 chk "about-me.md and WORKFORCE/ left behind -> WARN naming both" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'about-me.md' && printf '%s' "$OUT" | grep -q 'WORKFORCE/'; echo $?)"
 
-# 12. Line-ref lint (4) skips mounted skills: a line number in a mirror listed
-# in VENDORED.tsv is not fixable here; the same text in a local skill WARNs.
+# 12. Line-ref lint (4): the shipped skills pass; a line number in a skill WARNs.
 new_case linerefs
-mkdir -p "$OPS/SKILLS/mountedx" "$OPS/SKILLS/localx"
-printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/mountedx/SKILL.md"
-printf 'mountedx\tsrc/skills/mountedx\n' >> "$OPS/SKILLS/VENDORED.tsv"
+mkdir -p "$OPS/SKILLS/localx"
 run check_linerefs
-chk "line ref in a mounted skill -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+chk "shipped skills, no line refs -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
 printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/localx/SKILL.md"
 run check_linerefs
 chk "line ref in a local skill -> WARN" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'localx'; echo $?)"
-
-# A gate cannot return green when its mirror verifier cannot run or encounters
-# an unsafe manifest or filesystem error. MISSING sources retain their WARN.
-new_case vendored-error
-mkdir -p "$OPS/.claude-config/bin"
-printf '#!/usr/bin/env bash\necho "skills-vendor: unsafe mirror destination" >&2\nexit 3\n' \
-  > "$OPS/.claude-config/bin/skills-vendor.sh"
-chmod +x "$OPS/.claude-config/bin/skills-vendor.sh"
-run check_skills_vendored
-chk "mirror verifier error -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
-chmod -x "$OPS/.claude-config/bin/skills-vendor.sh"
-run check_skills_vendored
-chk "mirror verifier not executable -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 
 # 24. Sandbox guards: the shipped suites pass; a fixture suite that names a
 # destructive tool without the guard FAILs, and missing tooling FAILs.
@@ -597,7 +581,7 @@ out += "b" * (size - len(out.encode()))
 open(path, "w").write(out)
 PY
 }
-size_case() { new_case "$1"; rm -rf "${OPS:?}/SKILLS"; mkdir -p "$OPS/SKILLS"; : > "$OPS/SKILLS/VENDORED.tsv"; }
+size_case() { new_case "$1"; rm -rf "${OPS:?}/SKILLS"; mkdir -p "$OPS/SKILLS"; }
 new_case size-shipped
 run check_skill_size
 chk "shipped skills within 16 KB and 1,500 characters a line -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
@@ -619,11 +603,10 @@ run check_skill_size
 chk "a 1,501-character line -> WARN naming the line and its length" \
   "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qE 'wide \(line [0-9]+ is 1501 characters\)'; echo $?)"
 size_case size-skipped
-mk_skill mountedx 40000; printf 'mountedx\tsrc/skills/mountedx\n' > "$OPS/SKILLS/VENDORED.tsv"
 mk_skill synced 40000
 mk_skill linked 40000; mv "$OPS/SKILLS/linked" "$HOME/linked-target"; ln -s "$HOME/linked-target" "$OPS/SKILLS/linked"
 run check_skill_size
-chk "mounted, synced and symlinked skills are skipped -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+chk "synced and symlinked skills are skipped -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
 rm -rf "${OPS:?}/SKILLS"
 run check_skill_size
 chk "no SKILLS dir -> FAIL, not a pass" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'could not run'; echo $?)"

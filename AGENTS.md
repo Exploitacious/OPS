@@ -66,11 +66,10 @@ current task allows.
 
 ## Conventions
 
-- `SKILLS/` is the single source for skills, deployed through the
-  `~/.claude/skills/` symlink. Mounted entries (`SKILLS/VENDORED.tsv`) are
-  edited at their source repo and synced with
-  `.claude-config/bin/skills-vendor.sh`; never edit the mirror or
-  `~/.claude/skills/` directly.
+- `SKILLS/` is the single source for the template's skills, deployed through
+  the `~/.claude/skills/` symlink; edit them here, never in
+  `~/.claude/skills/`. An organization's shared skills are delivered
+  separately by that organization, not through this repo.
 - `.claude-config/`, `.claude-memory/`, and `.claude-handoffs/` are literal
   names; do not rename them.
 - Personalization lives only in the files `harness-update` never syncs:

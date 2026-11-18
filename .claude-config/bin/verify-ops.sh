@@ -91,15 +91,9 @@ check_changelog() {
 }
 
 # 4. Line-ref lint: core docs must not cite code by line number (drift class).
-# Mounted skills (SKILLS/VENDORED.tsv) are skipped: they are mirrors edited at
-# their source repo, so a hit there is not fixable here, and deploy syncs them
-# onto every fresh install.
 check_linerefs() {
-  local hits f name mounted="" skills=()
-  mounted=" $(awk -F'\t' '$1 !~ /^#/ && NF >= 2 {printf "%s ", $1}' "$OPS/SKILLS/VENDORED.tsv" 2>/dev/null)"
+  local hits f skills=()
   while IFS= read -r f; do
-    name="$(basename "$(dirname "$f")")"
-    case "$mounted" in *" $name "*) continue ;; esac
     skills+=("$f")
   done < <(_ops_own_skill_mds)
   hits="$(grep -rnE '(line ~?[0-9]{2,}|:[0-9]{3,}\))' \
@@ -266,8 +260,7 @@ check_skills_index() {
 
 # The SKILL.md files this checkout holds itself, one per line: SKILLS/<name>
 # entries that are real directories. A symlinked entry is a machine-local link
-# to a skill another repo owns, so it is linted there. Mounted skills
-# (SKILLS/VENDORED.tsv) are listed; a check that must skip them does so.
+# to a skill another repo owns, so it is linted there.
 _ops_own_skill_mds() {
   local d
   for d in "$OPS"/SKILLS/*/; do
@@ -282,21 +275,16 @@ _ops_own_skill_mds() {
 # past 1,500 characters is a wall the reader skims. Both limits are inclusive.
 # WARN, never FAIL: trimming a skill is an editing task (split it, or move detail
 # into a reference file beside it), and a skill the Operator wrote is theirs to
-# trim. Skipped: mounted skills (SKILLS/VENDORED.tsv, edited at their source
-# repo), SKILLS/synced (Claude Code's claude.ai sync), and a symlinked entry (a
-# skill another repo owns). FAIL only when the lint itself cannot run.
+# trim. Skipped: SKILLS/synced (Claude Code's claude.ai sync) and a symlinked
+# entry (a skill another repo owns). FAIL only when the lint itself cannot run.
 check_skill_size() {
-  local py out rc name
-  local -a mounted=()
+  local py out rc
   py="$(hook_python 2>/dev/null)" || { warn "no Python 3: cannot measure skill sizes"; return; }
-  while IFS= read -r name; do
-    [ -n "$name" ] && mounted+=("$name")
-  done < <(awk -F'\t' '$1 !~ /^#/ && NF >= 2 {print $1}' "$OPS/SKILLS/VENDORED.tsv" 2>/dev/null)
-  out="$("$py" -I - "$OPS/SKILLS" ${mounted[@]+"${mounted[@]}"} 2>&1 <<'PY'
+  out="$("$py" -I - "$OPS/SKILLS" 2>&1 <<'PY'
 import os
 import sys
 
-root, skip = sys.argv[1], set(sys.argv[2:]) | {"synced"}
+root, skip = sys.argv[1], {"synced"}
 LIMIT_BYTES, LIMIT_LINE = 16384, 1500
 try:
     names = sorted(os.listdir(root))
@@ -823,22 +811,8 @@ check_retired_context() {
     || warn "retired files still present:$left (move their content per DEPLOYMENT.md, \"Migrating to the core boot\", then delete them)"
 }
 
-# 22. Skills mirror in sync. SKILLS/<name> for a vendored row is a mirror of a
-# source skill repo under PROJECTS/; skills-vendor.sh --check is the drift gate
-# (rc 0 clean, 1 DRIFT = source edit not vendored, 2 MISSING = source repo not
-# cloned). DRIFT FAILs; MISSING WARNs (a public template ships zero project repos,
-# so the source not being cloned is the normal fresh-fork state).
-check_skills_vendored() {
-  local sv="$OPS/.claude-config/bin/skills-vendor.sh" out rc
-  [ -x "$sv" ] || { fail "skills-vendor.sh missing/not executable: cannot verify mounted skills"; return; }
-  out="$(OPS_DIR="$OPS" "$sv" --check 2>&1)"; rc=$?
-  case "$rc" in
-    0) ok "skills mirror in sync with source repos" ;;
-    1) fail "skills mirror DRIFT (source edit not vendored; run skills-vendor.sh sync):"$'\n'"$(printf '%s' "$out" | grep '^DRIFT' | head -10)" ;;
-    2) warn "skills mirror source repo(s) not cloned (run skills-vendor.sh sync after cloning them):"$'\n'"$(printf '%s' "$out" | grep '^MISSING' | head -10)" ;;
-    *) fail "skills-vendor.sh --check errored (rc=$rc):"$'\n'"$(printf '%s' "$out" | head -5)" ;;
-  esac
-}
+# 22. Retired 2026-11-17 with the skill mounts (it checked the mirrored skills
+# against their source clone). The number stays free: docs cite checks 23-25.
 
 # 23. Identity exclusion. The files BOOTSTRAP fills with the Operator's identity,
 # rulings, people, and systems must never be overwritten by a template refresh,
@@ -873,12 +847,11 @@ check_identity_exclusion() {
 #   pre-compact.sh    prunes snapshots by retention and runs branch-gc --apply
 #   memory-init       moves memory files into .claude-memory, removes old dirs
 #   deploy.sh         runs memory-init; replaces links, rc lines and units
-#   skills-vendor.sh  mirrors skill repos into SKILLS/<name> (rsync --delete)
 # Not listed, by the same rule: session-briefing.sh (reads only),
 # daily-sync.sh (commits and pulls its own checkout; its gc stage is branch-gc,
 # reached only through a stub in the suites that cover it), and tools that
 # replace only their own output or state file.
-OPS_DESTRUCTIVE_TOOLS=(branch-gc pre-compact.sh memory-init deploy.sh skills-vendor.sh)
+OPS_DESTRUCTIVE_TOOLS=(branch-gc pre-compact.sh memory-init deploy.sh)
 # Suites that must carry the guard although the name check cannot see why. The three
 # T3 suites: t3-api.sh and compact-cycle.sh delete nothing, but they send messages into
 # and settle threads on a real T3 server, and the box that runs a suite usually runs one
@@ -960,7 +933,6 @@ main() {
   check_anxiety_vocab
   check_identity_canary
   check_retired_context
-  check_skills_vendored
   check_identity_exclusion
   check_sandbox_guards
   check_memory_links

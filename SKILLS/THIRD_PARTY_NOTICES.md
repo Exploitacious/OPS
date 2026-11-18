@@ -22,9 +22,8 @@ referenced ideas; no text from those works is copied.
 On 2026-11-17 the template stopped shipping the skills that adapted the other
 works this file used to list (mattpocock/skills, ayghri/i-have-adhd and
 anthropics/skills `frontend-design`): the `operating-model` and `design-method`
-skills were removed, and `SKILLS/VENDORED.tsv` no longer mounts the
-`Exploitacious/agent-skills` set. A source you mount yourself carries its own
-notices.
+skills were removed, and the template no longer mounts skills from another
+repository. A skill you add from another source carries its own notices.
 
 ## What the license asks
 

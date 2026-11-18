@@ -18,10 +18,8 @@
       6. Emit the always-on ultracode shim to the profile.local.ps1 seam
       7. Register the daily backup scheduled task (dynamic bash + WorkingDirectory),
          on every copy (one with no origin remote commits locally)
-      8. Mount the shared skills: clone the public skill source under
-         PROJECTS/ when absent, then run bin/skills-vendor.sh sync in Git Bash
-      9. Check for the caveman + ponytail Claude Code plugins (report and offer, never remove)
-     10. Pin CLAUDE_CODE_GIT_BASH_PATH + run the security-guard self-test
+      8. Check for the caveman + ponytail Claude Code plugins (report and offer, never remove)
+      9. Pin CLAUDE_CODE_GIT_BASH_PATH + run the security-guard self-test
 
     -NoSystem skips the scheduled task (a system-wide registration), for test
     installs; deploy.sh's --no-system is the Linux counterpart.
@@ -523,92 +521,6 @@ else {
     }
     catch {
         Write-Warn "Could not register backup task (run elevated once on a fresh box): $_"
-    }
-}
-
-# --- Mount the shared skills (clone the public source once, then sync) ---
-# Same contract as deploy.sh: clone Exploitacious/agent-skills over HTTPS only
-# when absent (never pull an existing clone on a re-deploy), then mirror
-# SKILLS/VENDORED.tsv with skills-vendor.sh in Git Bash (it falls back to tar
-# where rsync is missing, as in a stock Git Bash).
-Write-Host ""
-Write-Status "Mounting shared skills..." "Yellow"
-$SkillsSrcUrl = "https://github.com/Exploitacious/agent-skills.git"
-$SkillsSrcDir = Join-Path $OpsRoot "PROJECTS\Exploitacious\agent-skills"
-$Vendored     = Join-Path $OpsRoot "SKILLS\VENDORED.tsv"
-if (-not ((Test-Path $Vendored) -and (Select-String -Path $Vendored -Pattern '^[^#\s]\S*\s+Exploitacious/agent-skills/' -Quiet))) {
-    Write-Good "No mounted skills from Exploitacious/agent-skills in SKILLS\VENDORED.tsv"
-}
-else {
-    $cloned = Test-Path (Join-Path $SkillsSrcDir ".git")
-    if (-not $cloned -and (Test-Path $SkillsSrcDir)) {
-        Write-Bad "$SkillsSrcDir exists but is not a git clone -- move it aside, then re-run."; $DeployFailed += 'skills-mount'
-    }
-    elseif (-not $cloned) {
-        # Publish only a complete clone. Interrupted clones must not occupy the
-        # canonical source path and prevent a later deploy from retrying.
-        $cloneParent = Split-Path $SkillsSrcDir -Parent
-        $cloneTemp = Join-Path $cloneParent ('.agent-skills.clone-' + [guid]::NewGuid())
-        $prevEap = $ErrorActionPreference
-        try {
-            New-Item -ItemType Directory -Path $cloneParent -Force | Out-Null
-            $ErrorActionPreference = "Continue"
-            & git clone --quiet $SkillsSrcUrl $cloneTemp 2>&1 | Out-Null
-            $cloneRc = $LASTEXITCODE
-            $ErrorActionPreference = $prevEap
-            if ($cloneRc -ne 0 -or -not (Test-Path (Join-Path $cloneTemp ".git"))) { throw "git clone failed (rc=$cloneRc)" }
-            # Directory.Move refuses an existing destination instead of nesting
-            # into or replacing a source another process created meanwhile.
-            [IO.Directory]::Move($cloneTemp, $SkillsSrcDir)
-            $cloned = $true
-            Write-Good "Cloned $SkillsSrcUrl -> $SkillsSrcDir"
-        }
-        catch { Write-Bad "Could not clone ${SkillsSrcUrl}: $_. Mounted skills are missing; re-run to retry."; $DeployFailed += 'skills-mount' }
-        finally {
-            $ErrorActionPreference = $prevEap
-            if (Test-Path -LiteralPath $cloneTemp) { Remove-Item -LiteralPath $cloneTemp -Recurse -Force }
-        }
-    }
-    else { Write-Good "Skill source already cloned: $SkillsSrcDir (not pulled)" }
-    if ($cloned) {
-        if ($BashExe) {
-            # Pass the root as data, including spaces and apostrophes. Piping a
-            # constant script also avoids Windows PowerShell native argv quoting.
-            $prevRoot = $env:OPS_DEPLOY_ROOT
-            $prevEap = $ErrorActionPreference
-            try {
-                $env:OPS_DEPLOY_ROOT = $OpsRoot
-                $ErrorActionPreference = "Continue"
-                $mountScript = @'
-opsUnix=$(cygpath -u "$OPS_DEPLOY_ROOT") || exit
-OPS_DIR="$opsUnix" bash "$opsUnix/.claude-config/bin/skills-vendor.sh" sync || exit
-# sync skips absent sources; verify every required mount before reporting success.
-OPS_DIR="$opsUnix" bash "$opsUnix/.claude-config/bin/skills-vendor.sh" --check
-exit $?
-'@
-                # Windows native pipelines append CRLF. Supply LF script lines
-                # and exit before that appended newline can become shell input.
-                $mountScript = ($mountScript -replace "`r", '') + "`n"
-                $svOut = $mountScript | & $BashExe -ls 2>&1
-                $svRc = $LASTEXITCODE
-            }
-            catch { $svOut = @($_); $svRc = 1 }
-            finally {
-                $ErrorActionPreference = $prevEap
-                if ($null -eq $prevRoot) { Remove-Item Env:\OPS_DEPLOY_ROOT -ErrorAction SilentlyContinue }
-                else { $env:OPS_DEPLOY_ROOT = $prevRoot }
-            }
-            if ($svRc -eq 0) {
-                Write-Good "Mounted skills synced into SKILLS\"
-                # The output is captured, and printed whole only on failure. A
-                # successful sync can still have moved the Operator's own folder
-                # aside (BACKUP) or put one back (RESTORED); show those lines, or
-                # the folder leaves SKILLS\ with no notice.
-                $svOut | Where-Object { "$_" -match '^(BACKUP|RESTORED) ' } | ForEach-Object { Write-Warn "  $_" }
-            }
-            else { Write-Bad "skills-vendor.sh sync or completeness check failed:"; $svOut | ForEach-Object { Write-Warn "  $_" }; $DeployFailed += 'skills-mount' }
-        }
-        else { Write-Bad "Git Bash not found -- mounted skills not synced (install Git for Windows, then re-run deploy.ps1)."; $DeployFailed += 'skills-mount' }
     }
 }
 
