@@ -25,7 +25,13 @@ call); (17) the default timeout is 1860 s, read from the script's own constant; 
 classify_failure reads the HTTP status where the client puts it, and an isError is retried,
 not fatal; (19) the scrub list is seeded from the key in $OPS_DIR/.env and ~/OPS/.env; (20)
 every exit code is documented in the header and in bin/README.md; (21) the built-in default
-kind and the configuration file's checks.
+kind and the configuration file's checks; (22) terminal refusals (opt-in through
+terminal_refusals): each code ends the wait on its first answer with exit 2, read from structured
+fields (the envelope before its result) or the client's own NOTE line on either exit, never from
+quoted text; an empty or missing list keeps today's classification; each kind's key_connector
+is the only ~/.claude.json entry it reads; the line names the connector, the key's source and
+at most its last four characters, matching the real client's lookup; malformed configuration is
+a usage error; and the real client and the waiter together against a scripted server.
 
 Exit 0 = all pass. Any failure exits non-zero and names the case.
 """
@@ -34,6 +40,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -77,8 +84,12 @@ n = int(open(cp).read()) if os.path.exists(cp) else 0
 open(cp, "w").write(str(n + 1))
 step = scenario[min(n, len(scenario) - 1)]
 rec = {"argv": sys.argv[1:], "server": server, "tool": tool, "args": json.load(open(args_path)),
-       "key": os.environ.get("OPS_MCP_API_KEY"), "args_mode": oct(os.stat(args_path).st_mode & 0o777), "n": n}
+       "key": os.environ.get("OPS_MCP_API_KEY"), "args_mode": oct(os.stat(args_path).st_mode & 0o777), "n": n,
+       "refusal_codes": os.environ.get("OPS_MCP_REFUSAL_CODES"), "connector": os.environ.get("OPS_MCP_CONNECTOR"),
+       "key_source": os.environ.get("OPS_MCP_KEY_SOURCE")}
 open(os.path.join(d, "calls.jsonl"), "a").write(json.dumps(rec) + "\n")
+if step.get("stderr"):
+    sys.stderr.write(step["stderr"])
 if step.get("needs_key") and not os.environ.get("OPS_MCP_API_KEY"):
     sys.stderr.write("ERROR: no API key: set OPS_MCP_API_KEY in the environment or in /nonexistent/OPS/.env\n")
     sys.exit(1)
@@ -105,6 +116,104 @@ with os.fdopen(fd, "w") as fh:
     json.dump(step["out"], fh)
 print("wrote " + out_path)
 '''
+
+# The real bin/mcp-http-call.py with only its HTTP session replaced by a scripted server, so the
+# waiter and the real client run together offline. Steps in transport.json answer tools/call with
+# {"result": <tools/call result>} or {"http_status": N, "body": "<raw text>"}; the client's stderr
+# is copied to child-stderr.txt so a case can count its NOTE lines.
+TRANSPORT = r'''#!/usr/bin/env python3
+import importlib.machinery, importlib.util, json, os, sys
+d = os.environ["STUB_DIR"]
+loader = importlib.machinery.SourceFileLoader("mcp_http_call_under_test", os.environ["REAL_CLIENT"])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+client = importlib.util.module_from_spec(spec)
+loader.exec_module(client)
+steps = json.load(open(os.path.join(d, "transport.json")))
+cp = os.path.join(d, "count")
+n = int(open(cp).read()) if os.path.exists(cp) else 0
+open(cp, "w").write(str(n + 1))
+step = steps[min(n, len(steps) - 1)]
+rec = {"n": n, "argv": sys.argv[1:], "key_source": os.environ.get("OPS_MCP_KEY_SOURCE"),
+       "connector": os.environ.get("OPS_MCP_CONNECTOR"), "refusal_codes": os.environ.get("OPS_MCP_REFUSAL_CODES")}
+open(os.path.join(d, "calls.jsonl"), "a").write(json.dumps(rec) + "\n")
+
+
+class Tee:
+    def __init__(self, stream, path):
+        self.stream, self.copy = stream, open(path, "a")
+
+    def write(self, text):
+        self.copy.write(text)
+        self.copy.flush()
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+class Server:
+    def __init__(self):
+        self.headers = {}
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        import json as J
+        method, rid = json.get("method"), json.get("id")
+
+        def answer(obj):
+            return client.Response(200, {"Content-Type": "application/json", "mcp-session-id": "s1"},
+                                   J.dumps(obj).encode())
+        if method == "initialize":
+            return answer({"jsonrpc": "2.0", "id": rid, "result": {}})
+        if method == "notifications/initialized":
+            return client.Response(202, {}, b"")
+        if method == "tools/list":
+            return answer({"jsonrpc": "2.0", "id": rid, "result": {"tools": [{"name": "approvals__session_status"}]}})
+        if "http_status" in step:
+            return client.Response(step["http_status"], {"Content-Type": "text/plain"}, step["body"].encode())
+        if "rotate_dotenv_to" in step:
+            path = client.env_file()
+            with open(path + ".new", "w") as fh:
+                fh.write(client.KEY_VAR + "=" + step["rotate_dotenv_to"] + "\n")
+            os.replace(path + ".new", path)
+        return answer({"jsonrpc": "2.0", "id": rid, "result": step["result"]})
+
+    def delete(self, url, headers=None, timeout=None):
+        return client.Response(200, {}, b"")
+
+
+client.HttpSession = Server
+sys.stderr = Tee(sys.stderr, os.path.join(d, "child-stderr.txt"))
+sys.argv = ["mcp-http-call.py"] + sys.argv[1:]
+client.main()
+'''
+
+# Terminal refusals (opt-in): the five example codes the header shows, and one custom code.
+CODES = ["not_requester", "requester_mismatch", "identity_missing", "identity_ambiguous", "identity_invalid"]
+CUSTOM = "caller_unverified"
+def fixture_key(label, length=24):
+    """A fake credential for a test, built at run time from a label. Built, not written: a
+    literal in this shape reads as a real key to a secrets scanner (CI runs gitleaks over the
+    whole history). Deterministic, so a failure reproduces."""
+    import hashlib
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    n, out = int(hashlib.sha256(("ops-test-fixture:" + label).encode()).hexdigest(), 16), ""
+    while len(out) < length:
+        n, r = divmod(n, len(alphabet))
+        out += alphabet[r]
+    return out
+
+
+RKEY = fixture_key("refused-poll")  # the line may show its last four characters, never more
+KEY_A = fixture_key("connector-a")
+KEY_B = fixture_key("connector-b")
+TR_CONFIG = {
+    "default_kind": "session",
+    "terminal_refusals": CODES + [CUSTOM],
+    "kinds": {
+        "session": dict(CONFIG["kinds"]["session"], key_connector="approvals"),
+        "grant": dict(CONFIG["kinds"]["grant"], key_connector="grants"),
+    },
+}
 
 
 def check(label, cond, detail=""):
@@ -641,6 +750,335 @@ def run_cases(root):
           and mod.DEFAULT_CONFIG["key_connectors"] == [])
     check("21 fill_args substitutes only the two placeholders, wait as an integer",
           mod.fill_args({"a": "{id}", "b": "{wait}", "c": "{id}x", "d": 7}, "idid", 12) == {"a": "idid", "b": 12, "c": "{id}x", "d": 7})
+
+    check("20 header documents terminal_refusals, key_connector and the five example codes",
+          all(x in header for x in ["terminal_refusals", "key_connector"] + CODES), "missing from the header")
+    section = readme.split("## `mcp-http-call.py` and `await-approval`", 1)[-1].split("\n## ", 1)[0]
+    check("20 README documents terminal_refusals, key_connector and OPS_MCP_REFUSAL_CODES",
+          all(x in section for x in ("terminal_refusals", "key_connector", "OPS_MCP_REFUSAL_CODES")), "missing from README")
+
+    run_refusal_cases(root)
+
+
+def longer_than_tail(text, key):
+    """Whether text holds five or more consecutive characters of the key."""
+    return any(key[i:i + 5] in text for i in range(len(key) - 4))
+
+
+def refused(case, code, kind="session", short="3f2a91bc"):
+    """The one line of a terminal refusal: state=<code>, exit 2."""
+    line = one_line(case)
+    return bool(line) and line.startswith("await-approval: %s %s state=%s exit=2 " % (kind, short, code))
+
+
+def note_step(code, rc=1):
+    """A failed poll as the client reports a refusal: its ERROR line, then its one NOTE line."""
+    return fail_step('ERROR: tool approvals__session_status returned isError: {"content": [{"type": "text", '
+                     '"text": "refused"}], "isError": true}\nNOTE: the gateway answered %s: the server refused '
+                     'this caller.' % code, rc=rc)
+
+
+def write_claude_json(case, entries):
+    with open(os.path.join(case.home, ".claude.json"), "w") as fh:
+        json.dump({"mcpServers": {name: {"type": "http", "headers": {"Authorization": "Bearer " + key}}
+                                  for name, key in entries.items()}}, fh)
+
+
+def load_client():
+    """The real bin/mcp-http-call.py as a module (it reads OPS_MCP_KEY_VAR when it loads)."""
+    loader = importlib.machinery.SourceFileLoader("mcp_http_call_origin", os.path.join(BIN, "mcp-http-call.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    client = importlib.util.module_from_spec(spec)
+    loader.exec_module(client)
+    return client
+
+
+def run_refusal_cases(root):
+    # (22) Terminal refusals, opted in through terminal_refusals. A refusal of this caller (the
+    # server says the waiter's credential is not the one that requested, or names no identity for
+    # it) cannot change by waiting, so it ends the wait on its first answer: exit 2, the code as
+    # the state, the connector, where the key came from and at most its last four characters.
+    env = {"OPS_MCP_API_KEY": RKEY}
+    for code in CODES + [CUSTOM]:
+        c = Case(root, "tr-inband-" + code, config=TR_CONFIG).run(
+            [{"out": {"error": code, "message": "refused"}}, session("OPEN")], [ID], env=env)
+        check("22 in-band %s: exit 2 after one poll with state=%s" % (code, code),
+              c.rc == 2 and len(c.calls) == 1 and refused(c, code), "rc=%s calls=%d out=%r" % (c.rc, len(c.calls), c.out))
+        check("22 in-band %s: the line names the connector, key source and at most the last four characters" % code,
+              all(x in c.out for x in ("connector=approvals", "key_source=env:OPS_MCP_API_KEY", "key_tail=" + RKEY[-4:]))
+              and not longer_than_tail(c.out + c.err, RKEY), repr(c.out))
+        check("22 in-band %s: says the request may still be pending and to poll with the credential that requested it"
+              % code, "may still be pending" in c.out and "credential that made the request" in c.out, repr(c.out))
+        c = Case(root, "tr-note-" + code, config=TR_CONFIG).run([note_step(code), session("OPEN")], [ID], env=env)
+        check("22 the client's note for %s on a failed poll: exit 2 after one poll" % code,
+              c.rc == 2 and len(c.calls) == 1 and refused(c, code), "rc=%s calls=%d out=%r" % (c.rc, len(c.calls), c.out))
+    c = Case(root, "tr-note-zero-exit", config=TR_CONFIG).run(
+        [dict(session("PENDING"), stderr="NOTE: the gateway answered not_requester: refused\n"), session("OPEN")],
+        [ID], env=env)
+    check("22 a note on a zero exit is read before the status: exit 2 after one poll",
+          c.rc == 2 and len(c.calls) == 1 and refused(c, "not_requester"), "rc=%s calls=%d out=%r" % (c.rc, len(c.calls), c.out))
+    c = Case(root, "tr-note-before-stalled-close", config=TR_CONFIG).run(
+        [{"stderr": "NOTE: the gateway answered not_requester: refused\n", "hang": True}],
+        [ID, "--timeout", "1"], env=env)
+    check("22 a completed refusal survives the timeout during child cleanup",
+          c.rc == 2 and len(c.calls) == 1 and refused(c, "not_requester")
+          and os.path.exists(os.path.join(c.stub_dir, "got-sigterm")),
+          f"rc={c.rc} calls={len(c.calls)} out={c.out!r}")
+    c = Case(root, "tr-grant-context", config=TR_CONFIG).run(
+        [{"out": {"error": True, "code": "refused", "context": {"code": "requester_mismatch"}}}], [GID, "--kind", "grant"],
+        env=env)
+    check("22 grant, a code under context: state=requester_mismatch and the grant kind's connector",
+          c.rc == 2 and len(c.calls) == 1 and refused(c, "requester_mismatch", "grant", "8c1d44e0")
+          and "connector=grants" in c.out, "rc=%s out=%r" % (c.rc, c.out))
+
+    # The envelope is read before its result: a refusal around (or beside) an OPEN record never approves.
+    for label, argv, answer, code in (
+            ("an outer error around an OPEN session", [ID],
+             {"error": "not_requester", "result": session("OPEN")["out"]}, "not_requester"),
+            ("a top-level OPEN beside a refused result", [ID],
+             {"status": "OPEN", "result": {"error": "identity_missing"}}, "identity_missing"),
+            ("an outer code around an OPEN, usable grant", [GID, "--kind", "grant"],
+             {"code": "requester_mismatch", "result": grant("OPEN", True)["out"]}, "requester_mismatch"),
+            ("the envelope's code before its result's", [ID],
+             {"code": "identity_invalid", "result": {"error": "not_requester", "status": "OPEN"}}, "identity_invalid")):
+        c = Case(root, "tr-envelope-" + re.sub(r"\W+", "-", label), config=TR_CONFIG).run([{"out": answer}], argv, env=env)
+        kind, short = ("grant", "8c1d44e0") if "grant" in argv else ("session", "3f2a91bc")
+        check("22 %s: state=%s, never exit 0" % (label, code), c.rc == 2 and refused(c, code, kind, short),
+              "rc=%s out=%r" % (c.rc, c.out))
+
+    # Only a structured field or the client's own NOTE line counts. Words in free text, a note
+    # quoted inside the ERROR line, two NOTE lines (the client prints one), a note for a code that
+    # is not configured and an indented note are not a refusal: the wait goes on as before.
+    for label, first in (
+            ("refusal words in a PENDING answer's free text",
+             {"out": dict(session("PENDING")["out"], output="not_requester",
+                          message="NOTE: the gateway answered not_requester: quoted")}),
+            ("a note quoted inside the ERROR line",
+             fail_step('ERROR: tool approvals__session_status returned isError: {"text": "NOTE: the gateway answered '
+                       'not_requester: quoted"}')),
+            ("two note lines", fail_step("ERROR: HTTP 502 on tools/call: x\nNOTE: the gateway answered not_requester: a\n"
+                                         "NOTE: the gateway answered identity_invalid: b")),
+            ("a note for a code that is not configured",
+             fail_step("ERROR: HTTP 502 on tools/call: x\nNOTE: the gateway answered not_found: c")),
+            ("an indented note", fail_step("ERROR: HTTP 502 on tools/call: x\n NOTE: the gateway answered not_requester: d"))):
+        c = Case(root, "tr-quoted-" + re.sub(r"\W+", "-", label), config=TR_CONFIG).run(
+            [first, session("OPEN", idle_seconds_remaining=900)], [ID], env=env)
+        check("22 %s: no refusal, the wait goes on to OPEN" % label,
+              c.rc == 0 and len(c.calls) == 2 and "state=open exit=0" in c.out, "rc=%s calls=%d out=%r"
+              % (c.rc, len(c.calls), c.out))
+
+    # Opt-in: an empty list, no key and null all keep today's classification, and the poll gets no
+    # codes even when the waiter's own environment carries some.
+    for label, cfg in (("an empty terminal_refusals", dict(TR_CONFIG, terminal_refusals=[])),
+                       ("no terminal_refusals", {k: v for k, v in TR_CONFIG.items() if k != "terminal_refusals"}),
+                       ("terminal_refusals null", dict(TR_CONFIG, terminal_refusals=None))):
+        slug = re.sub(r"\W+", "-", label)
+        c = Case(root, "tr-off-note-" + slug, config=cfg).run(
+            [note_step("not_requester"), session("OPEN")], [ID], env=dict(env, OPS_MCP_REFUSAL_CODES="not_requester"))
+        check("22 %s: the note is not read and the failed poll is retried as before: exit 0 after 2 polls" % label,
+              c.rc == 0 and len(c.calls) == 2 and "retries=1" in c.out, "rc=%s calls=%d out=%r" % (c.rc, len(c.calls), c.out))
+        check("22 %s: the poll gets no OPS_MCP_REFUSAL_CODES" % label,
+              all(x["refusal_codes"] is None for x in c.calls), str([x["refusal_codes"] for x in c.calls]))
+        c = Case(root, "tr-off-inband-" + slug, config=cfg).run(
+            [{"out": {"error": "not_requester", "message": "refused"}}], [ID], env=env)
+        check("22 %s: an in-band refusal is the ordinary in-band error it was" % label,
+              c.rc == 2 and len(c.calls) == 1 and "state=error exit=2" in c.out and "not_requester" in c.out, repr(c.out))
+
+    # A PENDING-to-OPEN control with the codes configured, and what the poll is given.
+    c = Case(root, "tr-control", config=TR_CONFIG).run(
+        [session("PENDING"), session("PENDING"), session("OPEN", idle_seconds_remaining=900)], [ID],
+        env=dict(env, OPS_MCP_KEY_SOURCE="claude.json:elsewhere", OPS_MCP_CONNECTOR="elsewhere"))
+    check("22 control: PENDING, PENDING, OPEN still exits 0 after three polls with the usual line",
+          c.rc == 0 and len(c.calls) == 3 and re.fullmatch(
+              r"await-approval: session 3f2a91bc state=open exit=0 waited=\d+s idle_left=900s", one_line(c) or ""),
+          "rc=%s out=%r" % (c.rc, c.out))
+    check("22 the poll gets the configured codes and the kind's connector, and no inherited key source",
+          c.calls and all(x["refusal_codes"] == ",".join(sorted(CODES + [CUSTOM])) and x["connector"] == "approvals"
+                          and x["key_source"] is None for x in c.calls), str(c.calls[:1]))
+
+    # key_connector: each kind reads only its own entry of ~/.claude.json, even when the legacy
+    # list names both, so one kind's key is never lent to another.
+    two = dict(TR_CONFIG, key_connectors=["approvals", "grants"])
+    c = Case(root, "tr-two-connectors-one-entry", config=two)
+    write_claude_json(c, {"approvals": KEY_A})
+    c.run([dict(grant("OPEN", True), needs_key=True)], [GID, "--kind", "grant"])
+    check("22 two connectors: the grant kind never borrows the approvals entry: exit 2 after one poll, names grants",
+          c.rc == 2 and len(c.calls) == 1 and all(x["key"] != KEY_A for x in c.calls) and "grants" in c.out,
+          "rc=%s calls=%r out=%r" % (c.rc, [x["key"] for x in c.calls], c.out))
+    for kind, ident, want, other in (("grant", GID, KEY_B, KEY_A), ("session", ID, KEY_A, KEY_B)):
+        c = Case(root, "tr-two-connectors-" + kind, config=two)
+        write_claude_json(c, {"approvals": KEY_A, "grants": KEY_B})
+        steps = [dict(grant("OPEN", True) if kind == "grant" else session("OPEN"), needs_key=True)]
+        c.run(steps, [ident, "--kind", kind])
+        check("22 two connectors: --kind %s polls with its own entry's key and no other" % kind,
+              c.rc == 0 and len(c.calls) == 2 and c.calls[1]["key"] == want and all(x["key"] != other for x in c.calls),
+              "rc=%s keys=%r" % (c.rc, [x["key"] for x in c.calls]))
+
+    # Legacy kinds (no key_connector) keep the global key_connectors list; the entry the fallback
+    # selected is the connector the line names, and the refusal ends the wait on that same key.
+    legacy = {"key_connectors": ["other", "approvals"], "terminal_refusals": CODES,
+              "kinds": {"session": CONFIG["kinds"]["session"]}}
+    c = Case(root, "tr-legacy", config=legacy)
+    write_claude_json(c, {"approvals": RKEY})
+    c.run([{"needs_key": True, "out": {"error": "not_requester"}}], [ID])
+    check("22 legacy key_connectors: the selected entry's key, its refusal ends the wait (two polls, no third key)",
+          c.rc == 2 and len(c.calls) == 2 and c.calls[1]["key"] == RKEY and refused(c, "not_requester"),
+          "rc=%s calls=%d out=%r" % (c.rc, len(c.calls), c.out))
+    check("22 legacy key_connectors: the line and the poll name the selected entry as connector and key source",
+          all(x in c.out for x in ("connector=approvals", "key_source=claude.json:approvals", "key_tail=" + RKEY[-4:]))
+          and len(c.calls) == 2 and c.calls[1]["key_source"] == "claude.json:approvals"
+          and c.calls[1]["connector"] == "approvals" and not longer_than_tail(c.out + c.err, RKEY), repr(c.out))
+
+    # Each key source is named as it is: the variable, the .env file, the ~/.claude.json entry.
+    for label, extra, envfile, want in (
+            ("the environment", {"OPS_MCP_API_KEY": RKEY}, None, "key_source=env:OPS_MCP_API_KEY"),
+            ("a custom variable", {"OPS_MCP_KEY_VAR": "EXAMPLE_KEY", "EXAMPLE_KEY": RKEY}, None, "key_source=env:EXAMPLE_KEY"),
+            ("$OPS_DIR/.env", {"OPS_DIR": "@/opsdir"}, ("opsdir/.env", 'OPS_MCP_API_KEY="%s"\n'), "dotenv:@/opsdir/.env"),
+            ("~/OPS/.env", {}, ("home/OPS/.env", "export OPS_MCP_API_KEY=%s\n"), "dotenv:@/home/OPS/.env")):
+        c = Case(root, "tr-src-" + re.sub(r"\W+", "-", label), config=TR_CONFIG)
+        extra = {k: v.replace("@", c.dir) for k, v in extra.items()}
+        if envfile:
+            path = os.path.join(c.dir, envfile[0])
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("OTHER=1\n" + envfile[1] % RKEY)
+        c.run([{"out": {"error": "not_requester"}}], [ID], env=extra)
+        check("22 key from %s: the line names it, with at most the last four characters" % label,
+              c.rc == 2 and want.replace("@", c.dir) in c.out and "key_tail=" + RKEY[-4:] in c.out
+              and not longer_than_tail(c.out + c.err, RKEY), "rc=%s out=%r" % (c.rc, c.out))
+    c = Case(root, "tr-src-claude-json", config=TR_CONFIG)
+    write_claude_json(c, {"approvals": RKEY, "grants": KEY_B})
+    c.run([{"needs_key": True, "out": {"error": "not_requester"}}], [ID])
+    check("22 key from the kind's ~/.claude.json entry: named, and the refusal ends the wait on that key",
+          c.rc == 2 and len(c.calls) == 2 and "key_source=claude.json:approvals" in c.out
+          and "key_tail=" + RKEY[-4:] in c.out and not longer_than_tail(c.out + c.err, RKEY)
+          and c.calls[1]["key_source"] == "claude.json:approvals", "rc=%s out=%r" % (c.rc, c.out))
+    c = Case(root, "tr-src-short", config=TR_CONFIG).run([{"out": {"error": "not_requester"}}], [ID],
+                                                         env={"OPS_MCP_API_KEY": "short-key-12"})
+    check("22 a short key: the source is named and no tail is shown",
+          c.rc == 2 and "key_source=env:OPS_MCP_API_KEY" in c.out and "key_tail=" not in c.out, repr(c.out))
+
+    # The actual out file can carry a remote diagnostic verbatim. The waiter
+    # must scrub the credential itself before printing that diagnostic.
+    key = 'Dx6P"w8\\Fs2/Qt7Yn4Bv9'
+    quoted = json.dumps(key)[1:-1].replace("/", "\\/")
+    for label, value in (("trimmed", key), ("JSON escaped twice", json.dumps(quoted)[1:-1])):
+        c = Case(root, "unconfigured-error-" + label, config=TR_CONFIG).run(
+            [{"out": {"error": "lookup_failed", "message": "request header " + value}}],
+            [ID], env={"OPS_MCP_API_KEY": "  " + key + "  "})
+        check(f"22 generic in-band error scrubs the {label.lower()} key before display",
+              c.rc == 2 and "state=error" in c.out and "<redacted>" in c.out and not longer_than_tail(c.out, key),
+              f"rc={c.rc} redacted={'<redacted>' in c.out}")
+
+    # The waiter names the key source by the client's own lookup; pin the two to each other.
+    mod = load_script()
+    saved = dict(os.environ)
+    origin = getattr(mod, "key_origin", None)
+    try:
+        for label, extra, envfile in (
+                ("env", {"OPS_MCP_API_KEY": RKEY}, None),
+                ("custom variable", {"OPS_MCP_KEY_VAR": "EXAMPLE_KEY", "EXAMPLE_KEY": RKEY}, None),
+                ("$OPS_DIR/.env, quoted", {"OPS_DIR": "@/opsdir"}, ("opsdir/.env", 'OPS_MCP_API_KEY="%s"\n')),
+                ("~/OPS/.env, export form", {}, ("home/OPS/.env", "export OPS_MCP_API_KEY=%s\n")),
+                ("a short key", {"OPS_MCP_API_KEY": "short-key-12"}, None)):
+            base = os.path.join(root, "origin-" + re.sub(r"\W+", "-", label))
+            os.makedirs(os.path.join(base, "home"))
+            for name in ("OPS_MCP_API_KEY", "OPS_MCP_KEY_VAR", "EXAMPLE_KEY", "OPS_DIR", "OPS_MCP_KEY_SOURCE"):
+                os.environ.pop(name, None)
+            os.environ["HOME"] = os.path.join(base, "home")
+            os.environ.update({k: v.replace("@", base) for k, v in extra.items()})
+            if envfile:
+                path = os.path.join(base, envfile[0])
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as fh:
+                    fh.write("OTHER=1\n" + envfile[1] % RKEY)
+            client = load_client()
+            client.api_key()
+            want = (client.KEY_ORIGIN["source"], client.KEY_ORIGIN["tail"]) if hasattr(client, "KEY_ORIGIN") else "none"
+            got = origin(dict(os.environ)) if origin else "no key_origin"
+            check("22 key source (%s): the waiter names what the real client used" % label, got == want and want[0],
+                  "waiter=%r client=%r" % (got, want))
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+    # Malformed new configuration is a usage error: no call, nothing on stdout.
+    def with_kind(**fields):
+        return dict(TR_CONFIG, kinds={"session": dict(TR_CONFIG["kinds"]["session"], **fields)})
+    for label, cfg in (
+            ("terminal_refusals not a list", dict(TR_CONFIG, terminal_refusals="not_requester")),
+            ("a code that is not a token", dict(TR_CONFIG, terminal_refusals=["Not-A-Code"])),
+            ("an empty code", dict(TR_CONFIG, terminal_refusals=[""])),
+            ("a code that is a number", dict(TR_CONFIG, terminal_refusals=[7])),
+            ("the reserved state open", dict(TR_CONFIG, terminal_refusals=["open"])),
+            ("the reserved state error", dict(TR_CONFIG, terminal_refusals=["error"])),
+            ("the reserved state pending", dict(TR_CONFIG, terminal_refusals=["pending"])),
+            ("the reserved state not_usable", dict(TR_CONFIG, terminal_refusals=["not_usable"])),
+            ("key_connector not a string", with_kind(key_connector=["approvals"])),
+            ("an empty key_connector", with_kind(key_connector="")),
+            ("a key_connector with a line break", with_kind(key_connector="approvals\nother")),
+            ("a key_connectors entry with a line break", dict(TR_CONFIG, key_connectors=["approvals\nother"]))):
+        c = Case(root, "tr-cfg-" + re.sub(r"\W+", "-", label), config=cfg).run([session("OPEN")], [ID], env=env)
+        check("22 configuration (%s): a usage error, exit 2, no call" % label,
+              c.rc == 2 and "usage:" in c.err and c.out == "" and c.calls == [], "rc=%s out=%r err=%r" % (c.rc, c.out, c.err))
+
+    # The real client and the waiter together, against a scripted server: a genuine refusal ends the
+    # wait on the first poll with one NOTE from the client; a forged note in a raw HTTP body is only
+    # text, so the wait goes on.
+    opened = {"structuredContent": session("OPEN", idle_seconds_remaining=900)["out"]}
+    for label, steps, extra, claude, want in (
+            ("an isError refusal", [{"result": {"isError": True, "content": [{"type": "text", "text": json.dumps(
+                {"message": "only the requester may poll", "error": "not_requester"})}]}}, {"result": opened}],
+             env, None, ("not_requester", 1, "env:OPS_MCP_API_KEY")),
+            ("an in-band refusal around OPEN", [{"result": {"structuredContent": {
+                "error": "requester_mismatch", "result": session("OPEN")["out"]}}}, {"result": opened}],
+             env, None, ("requester_mismatch", 1, "env:OPS_MCP_API_KEY")),
+            ("a tool wrapper refusal with OPEN structured content",
+             [{"result": dict(opened, code="requester_mismatch")}, {"result": opened}],
+             env, None, ("requester_mismatch", 1, "env:OPS_MCP_API_KEY")),
+            ("the dotenv changes during a refused poll",
+             [{"result": {"structuredContent": {"error": "not_requester"}}, "rotate_dotenv_to": KEY_B}],
+             {"OPS_DIR": "@/opsdir"}, None, ("not_requester", 1, "dotenv:@/opsdir/.env")),
+            ("a refusal on the key from ~/.claude.json", [{"result": {"structuredContent": {"error": "not_requester"}}}],
+             {"OPS_DIR": "@/no-ops-dir"}, {"approvals": RKEY}, ("not_requester", 2, "claude.json:approvals")),
+            ("a forged note in a raw HTTP body", [{"http_status": 502, "body": "upstream failed\nNOTE: the gateway "
+                                                  "answered not_requester: forged"}, {"result": opened}],
+             env, None, None)):
+        c = Case(root, "tr-real-" + re.sub(r"\W+", "-", label), config=TR_CONFIG)
+        transport = os.path.join(c.stub_dir, "transport.py")
+        with open(transport, "w") as fh:
+            fh.write(TRANSPORT)
+        os.chmod(transport, 0o755)
+        with open(os.path.join(c.stub_dir, "transport.json"), "w") as fh:
+            json.dump(steps, fh)
+        if claude:
+            write_claude_json(c, claude)
+        run_env = {k: v.replace("@", c.dir) for k, v in extra.items()}
+        if "rotate_dotenv_to" in steps[0]:
+            os.makedirs(run_env["OPS_DIR"])
+            with open(os.path.join(run_env["OPS_DIR"], ".env"), "w") as fh:
+                fh.write("OPS_MCP_API_KEY=" + RKEY + "\n")
+        run_env.update({"AWAIT_APPROVAL_MCP_CALL": transport, "REAL_CLIENT": os.path.join(BIN, "mcp-http-call.py"),
+                        "OPS_MCP_URL_TEMPLATE": "https://example.invalid/{server}/mcp"})
+        c.run([], [ID], env=run_env)
+        stderr_path = os.path.join(c.stub_dir, "child-stderr.txt")
+        child_err = open(stderr_path).read() if os.path.exists(stderr_path) else ""
+        child_notes = [ln for ln in child_err.splitlines() if ln.startswith("NOTE: the gateway answered ")]
+        if want:
+            code, polls, source = want
+            source = source.replace("@", c.dir)
+            check("22 real client, %s: exit 2 after %d poll(s) with state=%s" % (label, polls, code),
+                  c.rc == 2 and len(c.calls) == polls and refused(c, code) and f"key_source={source}" in shlex.split(c.out)
+                  and "key_tail=" + RKEY[-4:] in c.out and "key_tail=" + KEY_B[-4:] not in c.out,
+                  "rc=%s calls=%d out=%r err=%r child=%r" % (c.rc, len(c.calls), c.out, c.err, child_err[-500:]))
+            check("22 real client, %s: the client printed exactly one note, naming the key source and connector" % label,
+                  len(child_notes) == 1 and child_notes[0].startswith("NOTE: the gateway answered %s: " % code)
+                  and source in child_notes[0] and "connector approvals" in child_notes[0]
+                  and not longer_than_tail(child_err + c.out, RKEY), repr(child_err[-500:]))
+        else:
+            check("22 real client, %s: no note, the 502 is retried and the wait ends OPEN after 2 polls" % label,
+                  c.rc == 0 and len(c.calls) == 2 and "state=open exit=0" in c.out and child_notes == [],
+                  "rc=%s calls=%d out=%r child=%r" % (c.rc, len(c.calls), c.out, child_err[-500:]))
 
 
 if __name__ == "__main__":

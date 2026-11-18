@@ -188,9 +188,12 @@ ON RESUME: verify before you act. The summary is a hypothesis;
 the code/files are truth. Re-confirm the current task, the target
 files, and any "decided" detail against the repo BEFORE editing.
 Honor a RESUME PROTOCOL block (NEXT ACTION / VERIFY FIRST / DO NOT
-/ DEAD ENDS / ASK OPERATOR) if the anchor has one. On genuine
-ambiguity, ask the operator: then save the answer to memory so
-the next session doesn't re-ask.
+/ DEAD ENDS / ASK OPERATOR) if the anchor has one, but verify a DO NOT
+or HOLD line against the operator message or doctrine it cites (or,
+when it cites none, against the operator's newest direction) before
+treating it as settled; standing instructions and real operator holds
+still apply. On genuine ambiguity, ask the operator: then save the
+answer to memory so the next session doesn't re-ask.
 
 Source: \`$LATEST\`
 ============================================================

@@ -387,7 +387,7 @@ OPS/
 ├── .claude-config/        # Stage 2 deploy + the machinery it does not itself install
 │   ├── deploy.sh / deploy.ps1  #   Stage 2 deployer (links, core rule, memory sync, ...)
 │   ├── hooks/                  #   SessionStart briefing + foreman doctrine + lane rules + memory digest, pre-compact snapshot + branch-gc +
-│   │                           #   tool re-select, context-watch, memory hint, report-lint, askuser-cancel, secrets/git guards
+│   │                           #   tool re-select, context-watch, memory hint, report-lint, askuser-cancel, model-fallback flag, secrets/git guards
 │   ├── systemd/                #   ops-verify timer (nightly drift gate) + optional tmux-main
 │   ├── remote-sessions/        #   hand-run tmux sessions you remote-control (see its README)
 │   ├── agents/ + workflows/    #   sub-agent definitions + multi-lane workflow scripts

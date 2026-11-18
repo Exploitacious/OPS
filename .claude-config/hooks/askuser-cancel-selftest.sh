@@ -6,7 +6,8 @@
 # have the shape of two real cancellations: an AskUserQuestion tool_use, a tool_result with
 # is_error true and the stock rejection text, a user record "[Request interrupted by user for
 # tool use]", a queue-operation, then the message that cancelled it. Exit 0 = every case
-# passes; 1 = a case fails.
+# passes; 1 = a case fails; 77 = did not run (a prerequisite is missing: the suite proved
+# nothing, so a runner must not count it as a pass).
 # shellcheck disable=SC2015
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +17,7 @@ pass(){ printf '  PASS  %s\n' "$1"; }
 fail(){ printf '  FAIL  %s\n' "$1"; [ $# -gt 1 ] && printf '        %s\n' "$2"; fails=$((fails + 1)); }
 
 echo "askuser-cancel-selftest:"
-command -v python3 >/dev/null 2>&1 || { echo "askuser-cancel-selftest: SKIP (no python3; the hook is silent without it)"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "askuser-cancel-selftest: did not run: no python3 (the hook is silent without it)"; exit 77; }
 command -v jq >/dev/null 2>&1 || { echo "askuser-cancel-selftest: FAIL (jq required for the assertions)"; exit 1; }
 
 T="$(mktemp -d)"

@@ -31,7 +31,12 @@ Every exit code the waiter can return:
     124    timeout: --timeout passed with the request still PENDING (state=timeout)
     2      error: bad usage or configuration, no caller, no API key, the server refused the
            key, the id is unknown to the server, an answer this script cannot read, or the
-           server kept failing
+           server kept failing. Also a terminal refusal, when the configuration opts in
+           (terminal_refusals, below): the server answered that it refuses THIS caller (its
+           credential is not the one that made the request, or it has no usable identity),
+           which no wait can change. It ends the waiter on that first answer with the code
+           as the state (state=<code>, e.g. state=not_requester); nothing was decided and the
+           request may still be PENDING
     128+N  stopped by signal N before the server answered (state=interrupted): 143 SIGTERM
            (the host stopping a background task), 130 SIGINT, 129 SIGHUP; nothing was decided
 
@@ -41,6 +46,7 @@ Every exit code the waiter can return:
     await-approval: grant 8c1d44e0 state=open exit=0 waited=41s usable=yes
     await-approval: grant 8c1d44e0 state=not_usable exit=3 waited=41s usable=no reason=requested_by_another_caller
     await-approval: session 3f2a91bc state=error exit=2 waited=1s detail="not_found: No such session..."
+    await-approval: session 3f2a91bc state=not_requester exit=2 waited=1s connector=approvals key_source=env:OPS_MCP_API_KEY key_tail=ab12 detail="..."
 
 HOW to run it from an agent:
   - request every approval the task needs first, post the approve links as the last
@@ -54,9 +60,16 @@ HOW to run it from an agent:
     session (or check that the waiter's key is this session's key). On exit 124 re-run the
     waiter only if the server says the request is still PENDING. On exit 128+N the waiter was
     stopped and nothing was decided: re-run it if the request is still PENDING. On exit 2
-    report the line. After exit 0, make the real call the approval was for.
+    report the line, except for a terminal refusal state (a configured code): the waiter's
+    key is not the credential that made the request, so re-run it with the key the agent
+    requested with (see "Which key"), never with another key you pick. After exit 0, make
+    the real call the approval was for.
   - the id may itself be the credential for the follow-up call, so the line prints only its
-    first 8 characters, never an approve URL, and never a key.
+    first 8 characters, never an approve URL, and never a key. A terminal refusal line names
+    the connector (connector=, "unknown" when none is configured), where the waiter's key
+    came from (key_source=env:<variable>, dotenv:<file> or claude.json:<entry>) and at most
+    its last four characters (key_tail=, only for a key of 16 characters or more), so it can
+    be compared with the key behind the agent's connector.
 
 THE STATUS CONTRACT the tool must answer (a flat JSON object, or the same object under the
 kind's "record" key), whatever the server:
@@ -69,10 +82,19 @@ An answer with an "error" key is an error (exit 2). The tool should hold the cal
 request changes state or about wait_s seconds pass, so the call returns the moment the
 approver clicks; a tool that answers PENDING at once is paced, never hammered.
 
+A terminal refusal (only for the codes terminal_refusals names) is read from structured
+fields only: error, code or error_code on the answer or on its "error" or "context" object,
+the envelope before its "result" (so a refusal around or beside an OPEN record is still a
+refusal), or the one line mcp-http-call.py prints for it, "NOTE: the gateway answered
+<code>: ...", on a zero or non-zero exit, read before any status is accepted. Free text (a
+message, quoted command output, an HTTP error body) never counts: the client keeps all
+server text on one line, so only it can start that line, and two such lines count as none.
+
 CONFIGURATION. A JSON file, $AWAIT_APPROVAL_CONFIG or ~/.config/ops/await-approval.json
 (an explicit AWAIT_APPROVAL_CONFIG that does not exist is an error; the default file may be
 absent). Without one the built-in kind "default" applies: tool approval_status, arguments
-{"id": <id>, "wait_s": <seconds>}, a flat record, on the endpoint OPS_MCP_URL names.
+{"id": <id>, "wait_s": <seconds>}, a flat record, on the endpoint OPS_MCP_URL names. A file
+that cannot be read or breaks a rule below is a usage error (exit 2, no poll).
 
     {
       "default_kind": "session",
@@ -93,8 +115,37 @@ absent). Without one the built-in kind "default" applies: tool approval_status, 
                 whole seconds (an integer); every other value is passed as written
   record        the key of the status record inside the answer, or null for the answer itself
   usable_field  the answer key that says whether this caller may use an OPEN request, or null
+  key_connector the one mcpServers entry of ~/.claude.json whose literal key this kind may
+                use (the connector the agent requests this kind through), or null. A kind
+                that sets it reads that entry and no other, so one kind never lends its key
+                to another; it is also the connector a terminal refusal line names
   key_connectors  names of mcpServers entries in ~/.claude.json whose literal "Bearer <key>"
-                header is the last-resort key (see below); default none
+                header is the last-resort key for a kind with no key_connector (see below);
+                default none. The entry it selects is the connector a refusal line names
+  terminal_refusals  the refusal codes that end the wait at once (exit 2, state=<code>).
+                Default none: omitted, null or [] keeps the ordinary classification above,
+                and an in-band one stays an ordinary error. Each code is lowercase letters,
+                digits and "_" and may not be a state of the waiter's own (open, pending,
+                expired, closed, denied, not_usable, timeout, interrupted, error). The waiter
+                passes them to mcp-http-call.py (OPS_MCP_REFUSAL_CODES) so its note follows
+                the same list. A connector name is one printable line of at most 100
+                characters.
+
+To opt in, a copy that polls a server which binds each request to the credential that made
+it adds the codes that server answers and gives each caller-bound kind its connector, e.g.:
+
+    {
+      "terminal_refusals": ["not_requester", "requester_mismatch", "identity_missing",
+                            "identity_ambiguous", "identity_invalid"],
+      "kinds": {
+        "session": {"server": "approvals", "tool": "session_status", "key_connector": "approvals",
+                    "args": {"session_id": "{id}", "wait_s": "{wait}"}}
+      }
+    }
+
+  (the five codes are an example: not_requester and requester_mismatch say the credential is
+  not the requester's, the identity_* codes that the server found no usable identity for it).
+  "terminal_refusals": [] turns the behavior off again.
 
 HOW it polls: one run of mcp-http-call.py per poll (`[--server S] call TOOL args out`), wait_s
 at most 40 (the usual cap on one held call), shorter on the last poll before the deadline. A
@@ -114,13 +165,19 @@ WHAT a box needs:
   2. The MCP endpoint: OPS_MCP_URL, or OPS_MCP_URL_TEMPLATE plus a kind's "server" name.
   3. The API key, read the way mcp-http-call.py reads it: OPS_MCP_API_KEY in the environment
      (or the variable OPS_MCP_KEY_VAR names), else that line of $OPS_DIR/.env (default
-     ~/OPS/.env). When the poll reports no key, this script tries the literal "Bearer <key>"
-     header of the key_connectors entries in ~/.claude.json and gives the key to the poll
-     through the poll's environment only (never argv, never a file, never printed). A
-     ${VAR} reference in the entry is not a key and is skipped.
+     ~/OPS/.env). When the poll reports no key (and only then), this script tries the
+     literal "Bearer <key>" header of the kind's key_connector entry in ~/.claude.json, or
+     for a kind without one the key_connectors entries in order, and gives the key to the
+     poll through the poll's environment only (never argv, never a file, never printed),
+     with its source (OPS_MCP_KEY_SOURCE=claude.json:<entry>) so the client's note names it.
+     A ${VAR} reference in the entry is not a key and is skipped.
   4. Outbound HTTPS to the endpoint. Nothing listens; no inbound URL is needed.
-  The key must be the same person's key the agent session uses where the server binds a
-  request to its requester: usable=no means the waiter's key is not the requester's.
+
+Which key. Where the server binds a request to the credential that made it, the waiter
+must poll with the SAME key the agent requested with, not another key of the same person:
+usable=no, or a terminal refusal state, means the waiter's key is not the requester's. A
+refused poll is never retried with another key, and an agent whose credential is not an API
+key (an OAuth login) reads the status itself through that login.
 
 Test-only environment (tests/await-approval-test.py): AWAIT_APPROVAL_MCP_CALL names a stub
 for mcp-http-call.py; AWAIT_APPROVAL_PACE_S replaces the 3 s pacing and the retry pause
@@ -153,15 +210,33 @@ ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{3,127}")
 KIND_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 SERVER_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 
-# The kind a copy gets when it configures nothing: a neutral shape, no server name.
+# The kind a copy gets when it configures nothing: a neutral shape, no server name, and no
+# terminal refusals (they are opt-in: a code means something only to the server that sends it).
 DEFAULT_CONFIG = {
     "default_kind": "default",
     "key_connectors": [],
+    "terminal_refusals": frozenset(),
     "kinds": {
         "default": {"server": None, "tool": "approval_status", "args": {"id": "{id}", "wait_s": "{wait}"},
-                    "record": None, "usable_field": None},
+                    "record": None, "usable_field": None, "key_connector": None},
     },
 }
+# A terminal refusal code, as configured and as mcp-http-call.py checks OPS_MCP_REFUSAL_CODES.
+CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The waiter's own states. A configured code may not reuse one: state=<code> must never read
+# as a result the agent acts on (open) or as any other outcome the guidance treats differently.
+RESERVED_STATES = frozenset({"open", "pending", "expired", "closed", "denied", "not_usable", "timeout",
+                             "interrupted", "error"})
+# The line mcp-http-call.py prints, on its own, for a configured refusal code. It keeps every
+# piece of server text on one line, so no server text can start this line.
+NOTE_RE = re.compile(r"NOTE: the gateway answered ([a-z][a-z0-9_]{0,63}):(?: |$)")
+# A key is named by its source and, only when it is long enough that four characters give
+# little away, its last four characters. Never more.
+MIN_TAIL_KEY_LEN = 16
+REFUSAL_DETAIL_LIMIT = 600  # the refusal guidance is longer than the usual 240-character detail
+# A connector name's length limit. WHY 100: the poll gets "claude.json:<name>" as its key-source
+# label, and mcp-http-call.py refuses a label longer than 200 characters.
+CONNECTOR_MAX = 100
 
 # The caller prints "ERROR: <message>" and the message may carry up to 800 characters of server
 # text (a response body, a tool answer) that quotes anything at all. So every marker below is
@@ -220,12 +295,28 @@ def _on_signal(signum, frame):
             pass
 
 
+def key_forms(key):
+    """Match the client's raw and JSON-escaped forms in its unredacted out file."""
+    forms, level = {key}, {key}
+    for _ in range(2):
+        escaped = set()
+        for form in level:
+            for ascii_only in (True, False):
+                quoted = json.dumps(form, ensure_ascii=ascii_only)[1:-1]
+                escaped.update((quoted, quoted.replace("/", "\\/")))
+        forms |= escaped
+        level = escaped
+    return sorted(forms, key=len, reverse=True)
+
+
 def scrub(text, limit=240, ident=""):
     """One line, with every key value and any bearer token removed, cut to `limit`."""
     text = str(text)
     for secret in _secrets + [ident]:
-        if secret:
-            text = text.replace(secret, "<redacted>")
+        normalized = (secret or "").strip()
+        if normalized:
+            for form in key_forms(normalized):
+                text = text.replace(form, "<redacted>")
     text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer <redacted>", text)
     # An approval URL can carry a different credential from the request id.
     # No server-supplied URL belongs in the waiter's result notification.
@@ -243,6 +334,7 @@ def finish(code, state, kind, ident, started, **extra):
     parts = [PROG + ":", kind, short(ident), "state=%s" % state, "exit=%d" % code,
              "waited=%ds" % round(time.monotonic() - started)]
     detail = extra.pop("detail", None)
+    limit = extra.pop("detail_limit", 240)
     for key, value in extra.items():
         if value not in (None, ""):
             value = scrub(value, ident=ident)
@@ -250,7 +342,7 @@ def finish(code, state, kind, ident, started, **extra):
                 value = '"%s"' % value
             parts.append("%s=%s" % (key, value))
     if detail:
-        parts.append('detail="%s"' % scrub(detail, ident=ident))
+        parts.append('detail="%s"' % scrub(detail, limit, ident=ident))
     print(" ".join(parts))
     sys.stdout.flush()
     return code
@@ -299,8 +391,34 @@ def check_kind(name, kind, where):
         value = kind.get(field)
         if value is not None and (not isinstance(value, str) or not value):
             raise ConfigError("%s: kind %s \"%s\" is not a key name or null" % (where, name, field))
+    connector = kind.get("key_connector")
+    if connector is not None and not is_label(connector, CONNECTOR_MAX):
+        raise ConfigError("%s: kind %s \"key_connector\" is not a connector name (one printable line of at "
+                          "most %d characters) or null" % (where, name, CONNECTOR_MAX))
     return {"server": server, "tool": tool, "args": args, "record": kind.get("record"),
-            "usable_field": kind.get("usable_field")}
+            "usable_field": kind.get("usable_field"), "key_connector": connector}
+
+
+def is_label(value, limit=200):
+    """A connector name or key-source label: one printable line of at most `limit` characters
+    (mcp-http-call.py applies the same rule, at 200, to OPS_MCP_CONNECTOR and OPS_MCP_KEY_SOURCE)."""
+    return isinstance(value, str) and 0 < len(value) <= limit and value.isprintable() and value.strip() == value
+
+
+def check_refusals(raw, where):
+    """The validated terminal_refusals: omitted, null or [] is none (today's classification)."""
+    codes = raw.get("terminal_refusals")
+    if codes is None:
+        return frozenset()
+    if not isinstance(codes, list):
+        raise ConfigError("%s: terminal_refusals is not a list of codes" % where)
+    for code in codes:
+        if not isinstance(code, str) or not CODE_RE.fullmatch(code):
+            raise ConfigError("%s: terminal_refusals has %r, which is not a code (lowercase letters, digits "
+                              "and '_', starting with a letter)" % (where, code))
+        if code in RESERVED_STATES:
+            raise ConfigError("%s: terminal_refusals has %r, a state of the waiter's own" % (where, code))
+    return frozenset(codes)
 
 
 def load_config():
@@ -327,7 +445,11 @@ def load_config():
     connectors = raw.get("key_connectors", [])
     if not isinstance(connectors, list) or not all(isinstance(c, str) for c in connectors):
         raise ConfigError("%s: key_connectors is not a list of names" % path)
-    return {"default_kind": default, "key_connectors": connectors, "kinds": kinds}
+    if not all(is_label(c, CONNECTOR_MAX) for c in connectors):
+        raise ConfigError("%s: key_connectors has a name that is not one printable line of at most %d "
+                          "characters" % (path, CONNECTOR_MAX))
+    return {"default_kind": default, "key_connectors": connectors, "kinds": kinds,
+            "terminal_refusals": check_refusals(raw, path)}
 
 
 def find_caller():
@@ -340,21 +462,22 @@ def find_caller():
 
 
 def claude_json_key(connectors):
-    """A literal API key from a user-scope mcpServers entry of ~/.claude.json, or None.
+    """(key, entry name) for the first literal API key among the named user-scope mcpServers
+    entries of ~/.claude.json, or (None, None).
 
     The last resort for a box whose key is in no environment and no .env. Only the entries
-    the configuration names count, and only a literal "Bearer <key>"; a ${VAR} reference is
-    not a key.
+    the caller passes count (a kind's own key_connector, or the legacy key_connectors list),
+    and only a literal "Bearer <key>"; a ${VAR} reference is not a key.
     """
     if not connectors:
-        return None
+        return None, None
     try:
         with open(os.path.expanduser("~/.claude.json")) as fh:
             servers = json.load(fh).get("mcpServers") or {}
     except (OSError, ValueError, AttributeError):
-        return None
+        return None, None
     if not isinstance(servers, dict):
-        return None
+        return None, None
     for name in connectors:
         entry = servers.get(name)
         headers = entry.get("headers") if isinstance(entry, dict) else None
@@ -363,8 +486,40 @@ def claude_json_key(connectors):
             continue
         match = re.fullmatch(r"Bearer\s+([A-Za-z0-9._~+/=-]{16,})", auth.strip())
         if match:
-            return match.group(1)
-    return None
+            return match.group(1), name
+    return None, None
+
+
+def key_tail(key):
+    """The last four characters of a key long enough that they give little away, else None."""
+    return key[-4:] if len(key) >= MIN_TAIL_KEY_LEN else None
+
+
+def key_origin(env):
+    """(source, tail) of the key mcp-http-call.py resolves from env, by its own lookup: the
+    variable ("env:<name>"), else the first matching line of $OPS_DIR/.env or ~/OPS/.env
+    ("dotenv:<file>"); (None, None) when neither has one. Never the key itself.
+
+    Fallback for an answer with just a structured refusal and no client provenance.
+    Tests pin this lookup to mcp-http-call.py api_key().
+    """
+    var = env.get("OPS_MCP_KEY_VAR") or "OPS_MCP_API_KEY"
+    key = env.get(var)
+    source = "env:%s" % var
+    if not key:
+        path = os.path.join(env.get("OPS_DIR") or os.path.expanduser("~/OPS"), ".env")
+        source = "dotenv:%s" % path
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    match = re.fullmatch(r"(?:export\s+)?%s=(.*)" % re.escape(var), line.strip())
+                    if match:
+                        key = match.group(1).strip().strip('"').strip("'")
+                        break
+        except OSError:
+            return None, None
+    key = (key or "").strip()
+    return (source, key_tail(key)) if key else (None, None)
 
 
 def dotenv_keys():
@@ -394,12 +549,15 @@ def dotenv_keys():
 class Poll:
     """The outcome of one run of the caller: a payload, or why it failed."""
 
-    def __init__(self, payload=None, err="", fatal=False, transient=True, no_key=False):
+    def __init__(self, payload=None, err="", fatal=False, transient=True, no_key=False,
+                 refusal=None, refusal_origin=None):
         self.payload = payload
         self.err = err
         self.fatal = fatal
         self.transient = transient
         self.no_key = no_key
+        self.refusal = refusal  # a configured terminal refusal code, or None
+        self.refusal_origin = refusal_origin
 
     @property
     def failed(self):
@@ -432,6 +590,71 @@ def classify_failure(stderr):
     return Poll(err=text or "no output from the caller")
 
 
+def note_refusal(stderr, codes):
+    """The code and optional key provenance from the caller's one refusal NOTE line.
+
+    Only a whole line counts, and only when exactly one such line is there: the caller prints
+    one per refusal and keeps all server text on a single line, so a second line, a code that
+    is not configured or a note inside other text is not the caller speaking.
+    """
+    if not codes:
+        return None, None
+    matches = [m for m in (NOTE_RE.match(line) for line in (stderr or "").splitlines()) if m]
+    if len(matches) != 1 or matches[0][1] not in codes:
+        return None, None
+    note = matches[0]
+    code = note[1]
+    _, sep, encoded = note.string.rpartition("\t")
+    if not sep:
+        return code, None
+    try:
+        origin = json.loads(encoded)
+    except (ValueError, RecursionError):
+        return code, None
+    if isinstance(origin, dict):
+        source, tail = origin.get("key_source"), origin.get("key_tail")
+        if isinstance(source, str) and (tail is None or isinstance(tail, str) and len(tail) == 4):
+            return code, (source, tail)
+    return code, None
+
+
+def refusal_state(payload, codes):
+    """The configured terminal refusal code a status answer carries, or None.
+
+    Reads only structured fields (error, code and error_code, on the answer and on its "error"
+    and "context" objects), the envelope first and then its "result", the same rule
+    mcp-http-call.py applies for its note. Free text is never read, so command output that
+    quotes a code cannot end the wait.
+    """
+    if not codes:
+        return None
+    layers = [payload]
+    if isinstance(payload.get("result"), dict):
+        layers.append(payload["result"])
+    for layer in layers:
+        for holder in (layer, layer.get("error"), layer.get("context")):
+            if not isinstance(holder, dict):
+                continue
+            for field in ("error", "code", "error_code"):
+                value = holder.get(field)
+                if isinstance(value, str) and value in codes:
+                    return value
+    return None
+
+
+def refusal_detail(code, connector, source, tail):
+    """What a terminal refusal means and what to do, value-free: it names the connector and
+    where the waiter's key came from, at most its last four characters, never a key, and never
+    offers another key."""
+    used = ("the key from %s%s" % (source, " (ends %s)" % tail if tail else "")) if source else "its key"
+    through = ("the %s connector" % connector) if connector else "the connector the agent requested through"
+    return ("the server answered %s: it refuses this caller, which waiting cannot change. Nothing was decided "
+            "and the request may still be pending. This waiter used %s. Poll with the credential that made the "
+            "request: export %s with the key the agent used through %s and run the waiter again, or read the "
+            "status through that connector or login yourself. Do not try other keys: another key is another "
+            "caller." % (code, used, key_var(), through))
+
+
 def fill_args(template, ident, wait):
     """The kind's args with "{id}" and "{wait}" replaced (the wait stays an integer)."""
     out = {}
@@ -444,8 +667,9 @@ def fill_args(template, ident, wait):
     return out
 
 
-def run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline):
-    """One long poll through the caller; the answer's JSON lands in tmp/out.json."""
+def run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline, codes=frozenset()):
+    """One long poll through the caller; the answer's JSON lands in tmp/out.json. The caller's
+    note of a terminal refusal is read first, on a zero or non-zero exit alike."""
     args_path = os.path.join(tmp, "args.json")
     out_path = os.path.join(tmp, "out.json")
     try:
@@ -469,10 +693,12 @@ def run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline):
     _child[0] = proc
     if STOP.is_set():  # a signal landed between the spawn and the hand-off above
         proc.terminate()
+    timed_out = False
     try:
         try:
             _out, err = proc.communicate(timeout=budget)
         except subprocess.TimeoutExpired:
+            timed_out = True
             # Terminate, not kill: SIGTERM lets the poll send its session DELETE.
             proc.terminate()
             try:
@@ -480,9 +706,16 @@ def run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 _out, err = proc.communicate()
-            return Poll(err="poll timed out after %ds" % budget)
     finally:
         _child[0] = None
+    refusal, origin = note_refusal(err, codes)
+    if refusal:
+        # Before any status: a refused caller's answer says nothing about the request.
+        # The note can arrive before a stalled session DELETE during child cleanup.
+        return Poll(err=f"the server refused this caller: {refusal}", fatal=True,
+                    refusal=refusal, refusal_origin=origin)
+    if timed_out:
+        return Poll(err=f"poll timed out after {int(budget)}s")
     if proc.returncode != 0:
         return classify_failure(err)
     try:
@@ -495,9 +728,15 @@ def run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline):
     return Poll(payload=payload)
 
 
-def interpret(spec, payload):
+def interpret(spec, payload, codes=frozenset()):
     """Map a status answer to (state, info): state is pending, open, expired, closed,
-    denied, not_usable or error, and info carries the fields the result line prints."""
+    denied, not_usable, error or a configured terminal refusal code, and info carries the
+    fields the result line prints."""
+    # A terminal refusal on the envelope or its result outranks everything below, including an
+    # OPEN record beside or inside it: the answer is about this caller, not the request.
+    refusal = refusal_state(payload, codes)
+    if refusal:
+        return refusal, {}
     record_key = spec["record"]
     outer = payload
     if record_key is None and "status" not in payload and isinstance(payload.get("result"), dict):
@@ -567,11 +806,38 @@ def wait_for_approval(args, config):
     # The poll may read its key from a file instead; know that value too so scrub() can
     # redact it from any text that reaches us unscrubbed (a traceback, a proxy page).
     _secrets.extend(dotenv_keys())
+    codes = config.get("terminal_refusals") or frozenset()
+    connector = spec.get("key_connector")  # the configured connector, or the entry the fallback selects
+    injected = None  # "claude.json:<entry>" once this script hands the poll a key from that entry
+    # What the poll is told, and nothing inherited from this environment: the codes to note (the
+    # same validated list), the connector its note names, and (only after the fallback) the key's
+    # source, so the client's note and this line name the same key.
+    for name in ("OPS_MCP_REFUSAL_CODES", "OPS_MCP_CONNECTOR", "OPS_MCP_KEY_SOURCE"):
+        env.pop(name, None)
+    if codes:
+        env["OPS_MCP_REFUSAL_CODES"] = ",".join(sorted(codes))
+    if connector:
+        env["OPS_MCP_CONNECTOR"] = connector
     tmp = tempfile.mkdtemp(prefix="await-approval-")  # mode 0700
     fails = retries = 0
     key_fallback_tried = False
     last = "pending"
     pending_left = None
+
+    def refusal_exit(code, origin=None):
+        """End the wait on a terminal refusal: one line, exit 2, no retry and no other key. The
+        line names the connector, where the refused key came from and at most its last four
+        characters."""
+        if origin is not None:
+            source, tail = origin
+        elif injected:
+            source, tail = injected, key_tail(env.get(var, ""))
+        else:
+            source, tail = key_origin(env)
+        return finish(EXIT_ERROR, code, kind, ident, started, retries=retries or None,
+                      connector=connector or "unknown", key_source=source, key_tail=tail,
+                      detail=refusal_detail(code, connector, source, tail), detail_limit=REFUSAL_DETAIL_LIMIT)
+
     try:
         while True:
             if STOP.is_set():
@@ -584,22 +850,33 @@ def wait_for_approval(args, config):
             # is an immediate read), so the timeout reports a fresh state, not a stale one.
             wait_s = int(min(MAX_WAIT_S, remaining))
             began = time.monotonic()
-            poll = run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline)
+            poll = run_poll(runner, kind, spec, ident, wait_s, tmp, env, deadline, codes)
             if STOP.is_set():
                 return finish(128 + _stop_signal[0], "interrupted", kind, ident, started)
+            if poll.refusal:
+                return refusal_exit(poll.refusal, poll.refusal_origin)
             if poll.failed:
                 if poll.no_key and not key_fallback_tried:
                     key_fallback_tried = True
-                    key = claude_json_key(config["key_connectors"])
+                    # A kind with its own connector reads that entry and no other: another
+                    # entry's key is another credential, which a caller-bound request refuses.
+                    names = [spec["key_connector"]] if spec.get("key_connector") else config["key_connectors"]
+                    key, entry = claude_json_key(names)
                     if key:
                         env[var] = key
                         _secrets.append(key)
+                        connector, injected = entry, "claude.json:%s" % entry
+                        env["OPS_MCP_CONNECTOR"], env["OPS_MCP_KEY_SOURCE"] = connector, injected
                         continue
                 if poll.no_key:
+                    if spec.get("key_connector"):
+                        where = ("or keep it as a literal Bearer key in the %s entry of ~/.claude.json "
+                                 "(this kind reads no other entry)" % spec["key_connector"])
+                    else:
+                        where = ("(a box can also name a connector in key_connectors whose literal Bearer "
+                                 "entry in ~/.claude.json holds it)")
                     return finish(EXIT_ERROR, "error", kind, ident, started, retries=retries or None,
-                                  detail="no API key: export %s, or put it in $OPS_DIR/.env (a box can "
-                                         "also name a connector in key_connectors whose literal Bearer "
-                                         "entry in ~/.claude.json holds it)" % var)
+                                  detail="no API key: export %s, or put it in $OPS_DIR/.env %s" % (var, where))
                 fails += 1
                 if poll.fatal or fails >= MAX_FAILS:
                     return finish(EXIT_ERROR, "error", kind, ident, started, retries=retries or None,
@@ -609,7 +886,9 @@ def wait_for_approval(args, config):
                 STOP.wait(min(pause, max(0.0, deadline - time.monotonic())))
                 continue
             fails = 0
-            state, info = interpret(spec, poll.payload)
+            state, info = interpret(spec, poll.payload, codes)
+            if state in codes:
+                return refusal_exit(state)
             if state == "open":
                 return finish(EXIT_OK, "open", kind, ident, started, retries=retries or None, **info)
             if state in NOT_APPROVED_STATES:

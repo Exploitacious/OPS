@@ -14,13 +14,14 @@
 # command in GST_FLIP. One command per probe site that read through the pipe:
 # a blocked rtk form, an allowed rtk form, and the plain project push (a few
 # heredoc probes send that command too; they are counted either way).
+# Exit 0 = all pass; 1 = a case fails; 77 = did not run (no jq: the suite proved nothing).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOOKS="$(cd "$HERE/../../hooks" && pwd)"
 BIN="$(cd "$HERE/.." && pwd)"
 if ! command -v jq >/dev/null 2>&1; then
-  echo "SKIP: guard-selftest-test (jq not installed; guard-selftest's rtk probes build their JSON with it)"
-  exit 0
+  echo "guard-selftest-test: did not run: no jq (guard-selftest's rtk probes build their JSON with it)"
+  exit 77
 fi
 T="$(mktemp -d "${TMPDIR:-/tmp}/guard-selftest-test.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0

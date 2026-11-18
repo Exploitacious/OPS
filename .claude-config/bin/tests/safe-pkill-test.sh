@@ -24,7 +24,7 @@
 # be hit). Background targets are `sleep` and are reaped by exact PID; the log goes
 # to a temp dir. The shim cases write links only under a temp dir, never ~/.local/bin.
 #
-# Usage: safe-pkill-test.sh    (exit 0 all pass, 1 otherwise)
+# Usage: safe-pkill-test.sh    (exit 0 all pass, 1 otherwise, 77 did not run: no procps)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SP="${SAFE_PKILL_UNDER_TEST:-$HERE/../safe-pkill}"
@@ -32,7 +32,7 @@ SPG="$HERE/../safe-pgrep"
 AW="$HERE/../await"
 [ -x "$SP" ] || { echo "FAIL: $SP missing or not executable"; exit 1; }
 [ -L "$SPG" ] && [ "$(readlink "$SPG")" = safe-pkill ] || { echo "FAIL: $SPG must be a symlink to safe-pkill"; exit 1; }
-command -v pgrep >/dev/null && command -v pkill >/dev/null || { echo "SKIP: no procps pgrep/pkill on this host"; exit 0; }
+command -v pgrep >/dev/null && command -v pkill >/dev/null || { echo "safe-pkill-test: did not run: no procps pgrep/pkill on this host"; exit 77; }
 
 T="$(mktemp -d)"; BG=()
 cleanup() { local p; for p in "${BG[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; rm -rf "$T"; }

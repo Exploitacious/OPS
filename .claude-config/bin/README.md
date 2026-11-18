@@ -529,9 +529,9 @@ which cwds get a pool), `tests/memory-host-key-rule-test.sh` and
 `tests/memory-hint-test.sh`; `tests/memory-digest-test.sh` also drives
 `hooks/memory-digest.sh`.
 
-## `memory-hint.sh`, `report-lint.sh`, `askuser-cancel.sh`, `foreman-context.sh`: prompt, stop and boot hooks
+## `memory-hint.sh`, `report-lint.sh`, `askuser-cancel.sh`, `model-fallback-watch.sh`, `foreman-context.sh`: prompt, stop and boot hooks
 
-Four fail-open hooks (exit 0 always, nothing printed when there is nothing to
+Five fail-open hooks (exit 0 always, nothing printed when there is nothing to
 say, an interpreter or a crash never reaches the session). The Stage-1
 settings register each one behind a `test -x` guard, so it runs once this
 checkout ships it; `deploy.sh` never writes `~/.claude/settings.json`. Each
@@ -566,6 +566,24 @@ header says which event.
   record it as declined; re-ask once or proceed on the stated default). The
   common case, nothing cancelled, costs a `grep` over the transcript tail and no
   Python. `ASKUSER_CANCEL=0` turns it off. Test: `hooks/askuser-cancel-selftest.sh`.
+- `hooks/model-fallback-watch.sh` (Stop; the work is in `model-fallback-watch.py`):
+  when Claude Code answers a refused request on a fallback model, the only trace is a
+  `type:"system"` record in a transcript. The hook reads the session transcript and
+  every lane transcript under `<transcript dir>/<session_id>/subagents/` (any depth),
+  records each new event once in `${OPS_STATE_DIR:-~/.local/state/ops}/model-fallbacks.tsv`,
+  and blocks the stop once so the agent tells the Operator which work ran on the
+  fallback model and re-verifies it. It never blocks a continuation stop
+  (`stop_hook_active`). If the ledger lock (5 s) or the write fails it still blocks,
+  says so, and keeps its read offsets, so the flag repeats until the state directory
+  is fixed. Read offsets track the file identity and sample bytes at the start
+  and before the offset, so a replacement or a detected in-place rewrite
+  starts at byte zero.
+  The locked writer recovers an unfinished ledger row on retry. State files are
+  0600 and the directories it creates 0700.
+  `model_refusal_fallback` was seen on real installations; `model_fallback` and
+  `model_consent_fallback` are unverified. Without `fcntl` (Windows) the ledger is
+  written unlocked; with no Python 3 the hook is silent. `MODEL_FALLBACK_WATCH=0`
+  turns it off. Test: `hooks/model-fallback-watch-selftest.sh`.
 - `hooks/foreman-context.sh` (SessionStart): prints `CONTEXT/foreman.md`, the
   doctrine that binds the main thread only, into a foreman session, so `core.md`
   carries only what binds everyone (every session and every subagent pays for
@@ -654,15 +672,33 @@ body. Tool suffixes match only at the namespace boundary (`invoice_query` finds
 with an HTTP DELETE in a `finally`, also on SIGTERM and SIGHUP (only SIGKILL
 skips it): a server counts live sessions per key and reaps an idle one only
 after a timeout, so a client that opens a session per call and never closes it
-leaks one per call until the cap refuses every new session. Server text printed
-on an error has the key scrubbed, and every out file is written 0600 (results
-can carry secrets). Writes: pass an idempotency key where the tool takes one,
-and never re-run a call that timed out; read back instead. Test:
-`tests/mcp-http-call-test.sh`.
+leaks one per call until the cap refuses every new session. Server text the
+client shows (an error body, a tool answer, the `call` preview, the `list`
+output) has every form of the key redacted first, raw and JSON-escaped, then
+each line break escaped so it stays on one line, and only then is clipped:
+clipping first would leave the start of a key that straddles the cut, and a
+line break in a body could start a line that reads as the client's own note.
+Every out file is written 0600 and keeps the full result (results can carry
+secrets). `OPS_MCP_REFUSAL_CODES` (comma-separated codes; `await-approval`
+passes its `terminal_refusals`) makes `call`, and `batch` on the call that stops
+it, add exactly one stderr line, `NOTE: the gateway answered <code>: ...`, when
+an answer carries one of those codes in a structured field such as `error`,
+`code` or `error_code` on the tool wrapper, the answer or its `error` or
+`context` object (outer fields first), an `isError` result's structured and
+JSON text content, or a JSON-RPC error and its `data`. The note names where the key came from
+(`env:<variable>`, `dotenv:<file>`, or the label in `OPS_MCP_KEY_SOURCE`), its
+last four characters when it has 16 or more, and the connector
+(`OPS_MCP_CONNECTOR`, else `unknown`), never the key. The waiter reads the
+provenance captured by the client when it loaded the credential, including
+when the dotenv file changes during a poll. Free text never makes a
+note, exit codes and out files are unchanged, and a malformed value of any of
+the three variables is refused before any request. Writes: pass an idempotency
+key where the tool takes one, and never re-run a call that timed out; read back
+instead. Test: `tests/mcp-http-call-test.sh`.
 
-`await-approval <id> [--kind NAME] [--timeout SEC]` is the waiter for an approval clicked out of band (a remote session, a write grant, a deploy gate) on a host with no webhook callback: it long-polls a status tool through `mcp-http-call.py` and prints one state line, so run it with `run_in_background` and an explicit Bash timeout of at least 1900000 ms and its exit wakes the idle thread with no typed "Approved". Exit codes, all of them: 0 approved (the request is OPEN, and for a kind with a `usable_field`, usable by this caller); 3 not approved and never will be, with `state=` naming why: `denied` (the approver pressed Deny: status CLOSED with reason denied, or a bare DENIED status), `expired` (the pending window ran out), `closed` (any other close), or `not_usable` (the request is OPEN but another caller made it, so acting on it would be refused); 124 the timeout (default 1860 s, a 1800 s pending window plus margin) passed with the request still PENDING; 2 an error (bad usage or configuration, no caller, no API key, a refused key, an id the server does not know, an unreadable answer, five transient failures in a row); 128+N the waiter was stopped by signal N before an answer (`state=interrupted`: 143 SIGTERM, 130 SIGINT, 129 SIGHUP). The script header carries the same table, the on-exit guidance, the status contract the tool must answer and what a box needs.
+`await-approval <id> [--kind NAME] [--timeout SEC]` is the waiter for an approval clicked out of band (a remote session, a write grant, a deploy gate) on a host with no webhook callback: it long-polls a status tool through `mcp-http-call.py` and prints one state line, so run it with `run_in_background` and an explicit Bash timeout of at least 1900000 ms and its exit wakes the idle thread with no typed "Approved". Exit codes, all of them: 0 approved (the request is OPEN, and for a kind with a `usable_field`, usable by this caller); 3 not approved and never will be, with `state=` naming why: `denied` (the approver pressed Deny: status CLOSED with reason denied, or a bare DENIED status), `expired` (the pending window ran out), `closed` (any other close), or `not_usable` (the request is OPEN but another caller made it, so acting on it would be refused); 124 the timeout (default 1860 s, a 1800 s pending window plus margin) passed with the request still PENDING; 2 an error (bad usage or configuration, no caller, no API key, a refused key, an id the server does not know, an unreadable answer, five transient failures in a row), which with `terminal_refusals` configured includes a terminal refusal: an answer that refuses this caller (its key is not the credential that made the request, or the server found no usable identity for it) ends the wait on that first answer with the code as the state (`state=not_requester`, for example) and names `connector=`, `key_source=` (`env:<variable>`, `dotenv:<file>` or `claude.json:<entry>`) and at most the key's last four characters (`key_tail=`); nothing was decided and the request may still be pending, so re-run the waiter with the key the agent requested with, never another; 128+N the waiter was stopped by signal N before an answer (`state=interrupted`: 143 SIGTERM, 130 SIGINT, 129 SIGHUP). The script header carries the same table, the on-exit guidance, the status contract the tool must answer and what a box needs.
 
-Which server, tool and arguments are configuration, in `$AWAIT_APPROVAL_CONFIG` or `~/.config/ops/await-approval.json` (an explicit path that is missing is an error; the default path may be absent). Each named kind sets `server` (an endpoint name for `--server`, or `null` for `OPS_MCP_URL`), `tool`, `args` (the string `"{id}"` becomes the id and `"{wait}"` the wait in whole seconds), an optional `record` (the answer key that holds the status record) and an optional `usable_field` (the answer key that says whether this caller may use an OPEN request); `default_kind` picks the kind when `--kind` is not given, and `key_connectors` names `mcpServers` entries of `~/.claude.json` whose literal `Bearer <key>` header is the last-resort key (a `${VAR}` reference is not a key; the key reaches the poll through its environment only, never argv or a file). With no file, the built-in kind `default` calls `approval_status` with `{"id": <id>, "wait_s": <seconds>}` on `OPS_MCP_URL`. The tool answers `status` PENDING, OPEN, CLOSED or EXPIRED, an optional `close_reason`, and holds the call until the request changes or about 40 s pass, so a click ends the wait at once; a poll that returns early with PENDING is paced to at least 3 s. Each poll is one run of `mcp-http-call.py`, so at most one session per waiter is live, and SIGTERM, SIGINT and SIGHUP reach the poll in flight so its session still closes. A transient failure (a 5xx, a 429, a dropped connection, an `isError` answer) is retried up to 5 times in a row; a refused key, an unknown endpoint or tool, a missing configuration and any in-band `error` answer stop at once, and the HTTP status is read where the client puts it, in the first `ERROR: ` line, never in the quoted response body. The line prints only the first 8 characters of the id, never an approve URL, and every key value and bearer token is scrubbed from server text. Tests: `tests/await-approval-test.py` (against a stub of the caller, 100+ cases including each signal, every exit code and the header and this section agreeing).
+Which server, tool and arguments are configuration, in `$AWAIT_APPROVAL_CONFIG` or `~/.config/ops/await-approval.json` (an explicit path that is missing is an error; the default path may be absent). Each named kind sets `server` (an endpoint name for `--server`, or `null` for `OPS_MCP_URL`), `tool`, `args` (the string `"{id}"` becomes the id and `"{wait}"` the wait in whole seconds), an optional `record` (the answer key that holds the status record) and an optional `usable_field` (the answer key that says whether this caller may use an OPEN request); an optional `key_connector` names the one `mcpServers` entry of `~/.claude.json` whose literal `Bearer <key>` header that kind may use as its last-resort key, so one kind never lends its key to another; `default_kind` picks the kind when `--kind` is not given, and `key_connectors` names the entries tried in order for a kind with no `key_connector` (a `${VAR}` reference is not a key; the fallback runs only when the poll reports no key, and the key reaches the poll through its environment only, never argv or a file, with `OPS_MCP_KEY_SOURCE=claude.json:<entry>` so the client's note names it). `terminal_refusals` is opt-in: omitted, `null` or `[]` keeps the ordinary classification, and a configured code (lowercase letters, digits and `_`, never one of the waiter's own states) ends the wait at once, read only from structured fields (`error`, `code` or `error_code`, the envelope before its `result`) or the client's one `NOTE:` line on a zero or non-zero exit, never from free text. The header's CONFIGURATION section shows a synthetic opt-in with `not_requester`, `requester_mismatch`, `identity_missing`, `identity_ambiguous` and `identity_invalid`; before turning it on in a copy, check each caller-bound kind's `key_connector` and the codes its server sends, and `"terminal_refusals": []` turns it off again. A malformed file is a usage error. With no file, the built-in kind `default` calls `approval_status` with `{"id": <id>, "wait_s": <seconds>}` on `OPS_MCP_URL`. The tool answers `status` PENDING, OPEN, CLOSED or EXPIRED, an optional `close_reason`, and holds the call until the request changes or about 40 s pass, so a click ends the wait at once; a poll that returns early with PENDING is paced to at least 3 s. Each poll is one run of `mcp-http-call.py`, so at most one session per waiter is live, and SIGTERM, SIGINT and SIGHUP reach the poll in flight so its session still closes. A transient failure (a 5xx, a 429, a dropped connection, an `isError` answer) is retried up to 5 times in a row; a refused key, an unknown endpoint or tool, a missing configuration and any in-band `error` answer stop at once, and the HTTP status is read where the client puts it, in the first `ERROR: ` line, never in the quoted response body. The line prints only the first 8 characters of the id, never an approve URL, and every key value and bearer token is scrubbed from server text. Tests: `tests/await-approval-test.py` (against a stub of the caller and, for refusals, the real client behind a scripted server; 200+ cases including each signal, every exit code and the header and this section agreeing).
 
 ## `t3-api.sh`, `compact-cycle.sh` and `lib/`: T3 Code self-compaction
 
@@ -850,6 +886,10 @@ thread gets the foreman boot. So the rules ride in what fires.
   `post-compact-resume.sh` prints them most-recently-used first and says to
   select lazily (one name, just before its first call). `tests/pre-compact-test.sh`
   pins the snapshot section and `tests/post-compact-resume-test.sh` the block.
+  The resume text also asks the agent to verify a DO NOT or HOLD line in the
+  snapshot against the operator message or doctrine it cites (or, when it cites
+  none, the operator's newest direction) before treating it as settled; standing
+  instructions and real operator holds still apply.
 
 - The lane gate in the hooks that talk: `context-watch.sh` stays silent on
   Stop and in its readout for a lane, and gives a T3 lane its own 60% and 80%
@@ -872,6 +912,15 @@ thread gets the foreman boot. So the rules ride in what fires.
   one line, control characters stripped, 400 characters at most. This hook has no resume
   short form, so a resume or compact prints it with the rest of the briefing. The
   matching ruling for the thread such an ask opens is in `CONTEXT/standing-orders.md`.
+- The briefing's `effort` (`session-briefing.sh`) is resolved in Claude Code's own
+  order (the env `CLAUDE_CODE_EFFORT_LEVEL`, the launch `--effort`, the saved
+  `modelSettings.<model>.effortLevel` in the active profile, the model default) and
+  labelled with its source. On Linux the launch flag is read from the nearest
+  ancestor process named `claude` (at most 16 parents; only a short alphanumeric
+  `--effort` value is kept; nothing else on that command line is stored or printed);
+  elsewhere, or on any read error, the saved level is shown, labelled an estimate when
+  SessionStart omitted the model. An invalid value is reported, never echoed. Test
+  seam: `BRIEFING_PROC_ROOT`. Test: `tests/session-briefing-effort-test.sh`.
 - Per-thread work keys and the leftover-stamp scan (`hooks/hooklib.sh`): under
   T3 Code the work key is `t3-<session id>`, stable across compaction and
   resume, so two threads in one directory keep separate stamps and work logs.
@@ -886,7 +935,7 @@ thread gets the foreman boot. So the rules ride in what fires.
 Tests: `tests/lane-class-test.sh`, `tests/await-test.sh`, `tests/safe-pkill-test.sh`,
 `tests/lane-rules-test.sh`, `tests/session-briefing-lane-test.sh`,
 `tests/session-briefing-scope-test.sh`, `tests/session-briefing-team-ask-test.sh`,
-`tests/work-session-key-test.sh`,
+`tests/session-briefing-effort-test.sh`, `tests/work-session-key-test.sh`,
 `tests/orphan-gate-test.sh`, `hooks/context-watch-selftest.sh`,
 `hooks/foreman-context-selftest.sh` and `tests/post-compact-resume-test.sh`.
 
@@ -903,6 +952,14 @@ from the checkout root, except the sandbox's own tests, which start
 exits non-zero if any fails, is step 2 of "Before you open the PR" in
 `CONTRIBUTING.md`; CI runs the same loops (`.github/workflows/gate.yml`).
 One file, one command: no second copy here to drift.
+
+A whole-suite skip for a missing prerequisite (Python 3, jq, procps, tmux)
+prints `<suite>: did not run: <why>` and exits 77. CI and the contributing
+loop fail on that exit. Skips of single cases inside a suite stay explicit.
+`tests/remote-claude-targets-test.sh` pins the tmux targets of the
+remote-session scripts offline; `tests/remote-claude-tmux-test.sh` proves a
+launch line reaches the exact pane on a real tmux server, on a private `-L`
+socket that only it starts and stops.
 
 `tests/ci-gate-test.py` runs the gate's JavaScript check over every tracked
 `.js` and a set of fixtures. Under `sandbox-run` it skips when `node` lives in

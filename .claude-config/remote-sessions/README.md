@@ -40,8 +40,17 @@ them was retired on 2026-11-17. Facts it carried that the scripts do not show:
 - Pane-level tmux commands (`send-keys`, `capture-pane`, `display-message`) do
   not resolve a bare `=<Name>` target on recent tmux; they need the window
   part, `=<Name>:`. Session-level commands (`has-session`, `kill-session`)
-  still take `=<Name>`. The launcher handles it; the trap bites hand-rolled
-  `send-keys`.
+  still take `=<Name>`. The launcher handles it (and waits, up to about five
+  seconds, for the new pane to answer before it sends). A failed tmux create
+  or send, or a pane that stays unavailable, returns `ERR_TMUX` and a nonzero
+  status. On tmux 3.6, `send-keys -t "=<Name>"` fails with `can't find pane`
+  and `display-message -t "=<Name>"` prints an empty
+  value, so a launch line sent that way is lost and the session is a bare
+  shell. Both forms are exact, so `Dev` never reaches `Dev2`. Tests:
+  `../bin/tests/remote-claude-targets-test.sh` pins the argv of every tmux call
+  offline, and `../bin/tests/remote-claude-tmux-test.sh` proves delivery to the
+  exact pane on a real tmux server at a private `-L` socket (exit 77, "did not
+  run: no tmux", where tmux is absent).
 - Injecting a prompt into a live session fails silently in three ways: a
   dialog on screen eats the first keystrokes; a multi-line paste submits
   early, so write the work order to a file and inject one line,
