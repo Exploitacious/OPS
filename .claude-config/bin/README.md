@@ -90,7 +90,7 @@ digest (with an older indexer it falls back to the 24 KB `MEMORY.md` check),
 and 6b WARNs on a pool over 60 entries; both FAIL only when the indexer cannot
 run or cannot read a pool, because a pool's size is its owner's call. Check 9b
 WARNs on a `SKILL.md` over 16 KB or with a line over 1,500 characters, skipping
-mounted, synced and symlinked skills. Check 5 reads a tracker project number
+synced and symlinked skills. Check 5 reads a tracker project number
 (`P` plus 8 digits, a dot, 4 digits) as an ID, not a principle citation. Check
 8 runs `secrets-scan.sh` over memory and lessons and reports its two failures
 apart: a found credential (exit 1), or a line grep could not scan (exit 2,
@@ -595,22 +595,6 @@ passwordless sudo exists). As root it injects `--permission-mode auto`
 once, and fails closed when `flock` is missing. Your own shell is not wrapped.
 Replaces the fleet's `claude-wrapper.sh`. Test:
 `tests/claude-root-wrapper-test.sh`.
-
-## `skills-vendor.sh`: the skill mounts
-
-Mirrors each `SKILLS/VENDORED.tsv` row from its source clone under `PROJECTS/`
-into `SKILLS/<name>/` (`sync`, the default), or reports drift (`--check`: OK,
-DRIFT, MISSING; the gate behind `verify-ops.sh` check 22). Uses rsync with a
-content comparison where installed and tar otherwise; either builds the mirror
-in a temp dir and swaps it in, so a failed copy leaves the old one intact. Honors `OPS_DIR`. Deploy
-clones the public source once and runs `sync`. It never deletes a folder it
-did not write: `SKILLS/.vendored-state.tsv` records a digest of each mirror,
-and a destination that is not a known mirror (your own skill under a mounted
-name, a hand-edited mirror, any unrecorded folder that differs from its
-source) is moved to
-`.claude-config/backup/skills-replaced/<name>-<UTC>/` first, with a `BACKUP`
-line naming the path, and moved back if the install fails. Test:
-`tests/skills-vendor-test.sh`.
 
 ## `mcp-http-call.py` and `await-approval`: scripts that talk to an MCP server
 

@@ -673,8 +673,8 @@ printf '%s' "$out" | grep -qF 'Deploy finished with failures: git-identity' || f
 if printf '%s' "$out" | grep -q 'core-rule\|core.md'; then fail "git-identity alone printed the core-rule note: $out"; fi
 out="$(deploy_failure_lines " core-rule git-identity")"
 printf '%s' "$out" | grep -qF 'core-rule means sessions boot without CONTEXT/core.md' || fail "core-rule failure lost its note: $out"
-out="$(deploy_failure_lines " skills-mount")"
-if printf '%s' "$out" | grep -q 'core.md'; then fail "skills-mount alone printed the core-rule note: $out"; fi
+out="$(deploy_failure_lines " memory-init")"
+if printf '%s' "$out" | grep -q 'core.md'; then fail "memory-init alone printed the core-rule note: $out"; fi
 pass "failure summary adds the core-rule note only when core-rule failed"
 
 echo "ALL PASS"

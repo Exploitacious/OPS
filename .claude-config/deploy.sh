@@ -8,8 +8,9 @@
 #
 # What this script does (in order):
 #   1. Symlink ~/.claude/{skills,commands,agents,workflows} -> OPS sources
-#   2. Mount the shared skills: clone the public skill source under PROJECTS/
-#      when it is absent, then mirror SKILLS/VENDORED.tsv (bin/skills-vendor.sh)
+#   2. (No step: deploy clones and mounts no skills. SKILLS/ reaches Claude Code
+#      through the step 1 link. The number stays so the docs that cite steps 7
+#      and 8 by number stay right.)
 #   3. Link the always-loaded core: ~/.claude/rules/ops-core.md -> CONTEXT/core.md
 #   4. Strip the retired fleet wiring (PATH export in ~/.<shell>rc.local, the
 #      old wrapper source line in a real ~/.zshrc or ~/.bashrc)
@@ -47,7 +48,7 @@ NO_SYSTEM="${OPS_DEPLOY_NO_SYSTEM:-0}"
 for arg in "$@"; do
   case "$arg" in
     --no-system) NO_SYSTEM=1 ;;
-    -h|--help) sed -n '2,42p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "deploy.sh: unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -123,80 +124,6 @@ for entry in "${LINKS[@]}"; do
     msg_bad "Failed to link ${name}/."
   fi
 done
-
-# --- Mount the shared skills (clone the public source once, then sync) ---
-# SKILLS/VENDORED.tsv lists the portable skills OPS mounts from the public
-# Exploitacious/agent-skills repo (MIT); bin/skills-vendor.sh mirrors them from
-# a clone under PROJECTS/ into SKILLS/<name>/. Without the clone a fresh install
-# has none of the mounted skills, and with a clone but no sync the drift gate
-# reads DRIFT. Deploy clones only when the source is absent and never pulls an
-# existing clone: a re-deploy must not pull an unreviewed upstream HEAD into
-# skills every session loads. Update deliberately: `git -C <clone> pull
-# --ff-only`, then `skills-vendor.sh sync`. HTTPS, because a public repo needs
-# no SSH key. Clone into a temporary sibling so a failed or interrupted clone
-# cannot poison the canonical path and block the next deploy's retry.
-echo ""
-c_yel "Mounting shared skills..."
-SKILLS_SOURCE_URL="https://github.com/Exploitacious/agent-skills.git"
-SKILLS_SOURCE_DIR="${OPS_ROOT}/PROJECTS/Exploitacious/agent-skills"
-SKILLS_VENDOR="${CONFIG_DIR}/bin/skills-vendor.sh"
-
-mount_skills() {
-  if [[ ! -r "${OPS_ROOT}/SKILLS/VENDORED.tsv" ]]; then
-    msg_bad "Cannot read SKILLS/VENDORED.tsv: mounted skills cannot be verified."
-    return 1
-  fi
-  if ! grep -qE '^[^#[:space:]][^[:space:]]*[[:space:]]+Exploitacious/agent-skills/' "${OPS_ROOT}/SKILLS/VENDORED.tsv" 2>/dev/null; then
-    msg_ok "No mounted skills from Exploitacious/agent-skills in SKILLS/VENDORED.tsv"
-    return 0
-  fi
-  if [[ -d "$SKILLS_SOURCE_DIR/.git" || -f "$SKILLS_SOURCE_DIR/.git" ]]; then
-    if ! git -C "$SKILLS_SOURCE_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
-      msg_bad "$SKILLS_SOURCE_DIR is an incomplete clone: move it aside, then re-run."
-      return 1
-    fi
-    msg_ok "Skill source already cloned: $SKILLS_SOURCE_DIR (not pulled; see the comment above)"
-  elif [[ -e "$SKILLS_SOURCE_DIR" || -L "$SKILLS_SOURCE_DIR" ]]; then
-    msg_bad "$SKILLS_SOURCE_DIR exists but is not a git clone: move it aside, then re-run."
-    return 1
-  elif ! command -v git >/dev/null 2>&1; then
-    msg_bad "git not found: cannot clone $SKILLS_SOURCE_URL. Mounted skills stay MISSING."
-    return 1
-  else
-    local clone_tmp
-    if ! mkdir -p "${SKILLS_SOURCE_DIR%/*}" \
-       || ! clone_tmp="$(mktemp -d "${SKILLS_SOURCE_DIR}.clone.XXXXXX")"; then
-      msg_bad "Cannot prepare a temporary skill-source clone."
-      return 1
-    fi
-    if ! git clone --quiet "$SKILLS_SOURCE_URL" "$clone_tmp"; then
-      rm -rf -- "$clone_tmp"
-      msg_bad "Could not clone $SKILLS_SOURCE_URL (network?). Re-run deploy to retry."
-      return 1
-    fi
-    # Rename onto a name that does not exist: plain mv does that identically on
-    # GNU and BSD/macOS (mv -T is GNU-only and broke every macOS deploy). A
-    # source that appeared during cloning is refused, never merged into; the
-    # temp must be gone afterward, or the rename did not happen.
-    if [[ -e "$SKILLS_SOURCE_DIR" || -L "$SKILLS_SOURCE_DIR" ]] \
-       || ! mv -- "$clone_tmp" "$SKILLS_SOURCE_DIR" || [[ -e "$clone_tmp" ]]; then
-      rm -rf -- "$clone_tmp"
-      msg_bad "Skill source appeared during cloning: left $SKILLS_SOURCE_DIR unchanged. Re-run deploy."
-      return 1
-    fi
-    msg_ok "Cloned $SKILLS_SOURCE_URL -> $SKILLS_SOURCE_DIR"
-  fi
-  if OPS_DIR="$OPS_ROOT" bash "$SKILLS_VENDOR" sync \
-     && OPS_DIR="$OPS_ROOT" bash "$SKILLS_VENDOR" --check; then
-    # sync deliberately skips uncloned sources. A deploy must also prove every
-    # declared mount exists, rather than reporting success with missing skills.
-    msg_ok "Mounted skills synced and verified in ${OPS_ROOT}/SKILLS"
-  else
-    msg_bad "skills-vendor.sh sync failed: mounted skills are out of date (verify-ops reports DRIFT)."
-    return 1
-  fi
-}
-mount_skills || DEPLOY_FAILED="$DEPLOY_FAILED skills-mount"
 
 # --- The always-loaded core: ~/.claude/rules/ops-core.md -> CONTEXT/core.md ---
 # CONTEXT/core.md is the one file every session and lane must have loaded.

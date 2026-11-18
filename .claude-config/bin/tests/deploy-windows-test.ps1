@@ -75,10 +75,8 @@ try {
     Remove-Item Function:\New-Item
     Write-Host 'PASS: fallback path collision preserves the competing link target'
 
-    $skillsBlock = Extract-Block '# --- Mount the shared skills ' '# --- Claude Code plugins:'
     $OpsRoot = Join-Path $fixture 'ops'
     New-Item -ItemType Directory -Path (Join-Path $OpsRoot 'SKILLS') -Force | Out-Null
-    [IO.File]::WriteAllText((Join-Path $OpsRoot 'SKILLS/VENDORED.tsv'), "alpha`tExploitacious/agent-skills/SKILLS/alpha`n")
     $ConfigDir = Join-Path $OpsRoot '.claude-config'
     $ClaudeHome = Join-Path $fixture 'claude'
     New-Item -ItemType Directory -Path $ClaudeHome -Force | Out-Null
@@ -94,115 +92,6 @@ try {
     Assert ($DeployFailed -contains 'link-commands') 'Missing source directory was not recorded'
     Remove-Item Function:\New-Item
     Write-Host 'PASS: failed skill links and missing source directories mark deployment failed'
-    function git {
-        param($Action, $Quiet, $Url, $Destination)
-        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $Destination '.git') -Force | Out-Null
-        [IO.File]::WriteAllText((Join-Path $Destination 'interrupted'), 'partial clone')
-        $global:LASTEXITCODE = 128
-    }
-    $DeployFailed = @(); $BashExe = $null
-    Invoke-Expression $skillsBlock
-    Assert ($DeployFailed -contains 'skills-mount') 'Clone failure was not recorded'
-    Assert (-not (Test-Path -LiteralPath $SkillsSrcDir)) 'Failed clone occupied the canonical skill source'
-    Assert (@(Get-ChildItem -LiteralPath (Split-Path $SkillsSrcDir -Parent) -Filter '.agent-skills.clone-*' -Force).Count -eq 0) 'Failed clone left a temporary directory'
-    Write-Host 'PASS: failed skills clone marks failure and leaves its canonical path free'
-    function git {
-        param($Action, $Quiet, $Url, $Destination)
-        New-Item -ItemType Directory -Path (Join-Path $Destination '.git') -Force | Out-Null
-        $global:LASTEXITCODE = 0
-    }
-    $DeployFailed = @()
-    Invoke-Expression $skillsBlock
-    Assert (Test-Path -LiteralPath (Join-Path $SkillsSrcDir '.git')) 'Retry did not publish the complete clone'
-    Write-Host 'PASS: deployment retries and publishes a complete clone'
-    $SkillsSrcDir = Join-Path $OpsRoot 'PROJECTS/Exploitacious/agent-skills'
-    New-Item -ItemType Directory -Path (Join-Path $SkillsSrcDir '.git') -Force | Out-Null
-    $DeployFailed = @()
-    Invoke-Expression $skillsBlock
-    Assert ($DeployFailed -contains 'skills-mount') 'Missing Git Bash was not recorded'
-    Write-Host 'PASS: missing Git Bash marks skills deployment failed'
-    Remove-Item -LiteralPath $SkillsSrcDir -Recurse -Force
-    function git {
-        param($Action, $Quiet, $Url, $Destination)
-        New-Item -ItemType Directory -Path (Join-Path $Destination '.git') -Force | Out-Null
-        New-Item -ItemType Directory -Path $SkillsSrcDir -Force | Out-Null
-        [IO.File]::WriteAllText((Join-Path $SkillsSrcDir 'operator-file'), 'preserve')
-        $global:LASTEXITCODE = 0
-    }
-    $DeployFailed = @()
-    Invoke-Expression $skillsBlock
-    Assert ($DeployFailed -contains 'skills-mount') 'Concurrent clone destination was accepted'
-    Assert ([IO.File]::ReadAllText((Join-Path $SkillsSrcDir 'operator-file')) -eq 'preserve') 'Concurrent destination was damaged'
-    Assert (@(Get-ChildItem -LiteralPath $SkillsSrcDir -Force).Count -eq 1) 'Clone was nested into the concurrent destination'
-    Write-Host 'PASS: clone publication preserves a destination created concurrently'
-    Remove-Item Function:\git
-
-    $nativeBash = Get-Command bash -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($nativeBash -and $PSVersionTable.Platform -eq 'Unix') {
-        $oldRoot = $OpsRoot
-        $OpsRoot = Join-Path $fixture "OPS O'Neill"
-        [IO.Directory]::Move($oldRoot, $OpsRoot)
-        $SkillsSrcDir = Join-Path $OpsRoot 'PROJECTS/Exploitacious/agent-skills'
-        New-Item -ItemType Directory -Path (Join-Path $SkillsSrcDir '.git') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $OpsRoot '.claude-config/bin') -Force | Out-Null
-        $sourceSkill = Join-Path $SkillsSrcDir 'SKILLS/alpha/SKILL.md'
-        New-Item -ItemType Directory -Path (Split-Path $sourceSkill -Parent) -Force | Out-Null
-        [IO.File]::WriteAllText($sourceSkill, 'skill source')
-        # .gitattributes checks *.ps1 out with CRLF, and this here-string
-        # inherits the file's line endings; bash rejects a CRLF script, so a
-        # fresh clone failed this case. Write the fixture with LF only.
-        [IO.File]::WriteAllText((Join-Path $OpsRoot '.claude-config/bin/skills-vendor.sh'), (@'
-[ "$OPS_DIR" = "$OPS_TEST_EXPECTED_ROOT" ] || exit 22
-source="$OPS_DIR/PROJECTS/Exploitacious/agent-skills/SKILLS/alpha/SKILL.md"
-case "$1" in
-    sync)
-        [ -f "$source" ] || exit 0
-        mkdir -p "$OPS_DIR/SKILLS/alpha"
-        cp "$source" "$OPS_DIR/SKILLS/alpha/SKILL.md"
-        printf 'mounted' > "$OPS_DIR/SKILLS/mounted.txt"
-        printf 'BACKUP   alpha: the existing folder was not a mirror sync wrote; kept at %s\n' "$OPS_DIR/.claude-config/backup/skills-replaced/alpha-test"
-        printf 'SYNCED   alpha\n'
-        ;;
-    --check)
-        [ -f "$source" ] && [ -f "$OPS_DIR/SKILLS/alpha/SKILL.md" ] || exit 2
-        cmp "$source" "$OPS_DIR/SKILLS/alpha/SKILL.md" || exit 1
-        ;;
-    *) exit 23 ;;
-esac
-'@ -replace "`r", ''))
-        $env:OPS_TEST_EXPECTED_ROOT = $OpsRoot
-        function Invoke-FixtureBash {
-            param($Mode)
-            # Git Bash's cygpath is unavailable on Linux; identity conversion
-            # still exercises the real script's shell quoting and exit status.
-            $body = 'cygpath() { printf "%s\n" "$2"; }' + "`n" + (@($input) -join "`n")
-            ($body + "`r`n") | & $nativeBash.Source -s
-            $global:LASTEXITCODE = $LASTEXITCODE
-        }
-        $BashExe = 'Invoke-FixtureBash'
-        $DeployFailed = @()
-        $script:warnings = @()
-        function Write-Warn { param($Msg) $script:warnings += @("$Msg") }
-        Invoke-Expression $skillsBlock
-        Assert ($DeployFailed.Count -eq 0) 'Skill sync failed with a spaced or apostrophe path'
-        Assert ([IO.File]::ReadAllText((Join-Path $OpsRoot 'SKILLS/mounted.txt')) -eq 'mounted') 'Skill sync did not reach the intended root'
-        Assert ($null -eq $env:OPS_DEPLOY_ROOT) 'Skill sync leaked its temporary root environment'
-        Write-Host 'PASS: skill sync handles spaces and apostrophes as literal path data'
-        # A successful sync that moved a folder aside must say where it went.
-        Assert (@($script:warnings | Where-Object { $_ -match '^\s*BACKUP   alpha: .*kept at .*alpha-test$' }).Count -eq 1) "A successful sync hid its BACKUP line: $($script:warnings -join ' | ')"
-        Assert (@($script:warnings | Where-Object { $_ -match 'SYNCED' }).Count -eq 0) 'A successful sync echoed more than its BACKUP and RESTORED lines'
-        function Write-Warn { param($Msg) }
-        Write-Host 'PASS: a successful sync shows its BACKUP line'
-        Remove-Item -LiteralPath $sourceSkill -Force
-        $DeployFailed = @()
-        Invoke-Expression $skillsBlock
-        Assert ($DeployFailed -contains 'skills-mount') 'Successful sync with a missing source skill was treated as a complete mount'
-        Write-Host 'PASS: successful sync followed by missing-mount check rc 2 fails deployment'
-        Remove-Item Function:\Invoke-FixtureBash
-        Remove-Item Env:\OPS_TEST_EXPECTED_ROOT
-    }
-    else { Write-Host 'SKIP: POSIX path quoting execution (requires Unix bash)' }
 
     $trustFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-TrustAnchor' }, $true)
     Assert ($null -ne $trustFunction) 'Set-TrustAnchor was not found'
@@ -244,7 +133,7 @@ esac
     # copy with no origin does, so the block never runs git. Run the real block
     # with the ScheduledTask cmdlets replaced by recorders; the repos are real,
     # made with the real git, and a git recorder is in scope only for the block.
-    $taskBlock = Extract-Block '# --- Register daily backup scheduled task ---' '# --- Mount the shared skills'
+    $taskBlock = Extract-Block '# --- Register daily backup scheduled task ---' '# --- Claude Code plugins:'
     $bashLine = '$BashExe = Resolve-BashExe'
     Assert ($taskBlock.Contains($bashLine)) 'The task block no longer resolves bash with Resolve-BashExe'
     $taskBlock = $taskBlock.Replace($bashLine, '$BashExe = $FixtureBash')
@@ -333,12 +222,12 @@ esac
 function Write-Status { param($Msg, $Color) }
 function Write-Bad { param($Msg) }
 function Write-Good { param($Msg) }
-$DeployFailed = @('skills-mount')
+$DeployFailed = @('trust-anchor')
 $ConfigDir = '.'
 '@ + "`n" + $summary)
     & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $summaryProbe *> $null
     Assert ($LASTEXITCODE -eq 1) 'Failed deployment summary returned success'
-    $probeText = [IO.File]::ReadAllText($summaryProbe).Replace('$DeployFailed = @(''skills-mount'')', '$DeployFailed = @()')
+    $probeText = [IO.File]::ReadAllText($summaryProbe).Replace('$DeployFailed = @(''trust-anchor'')', '$DeployFailed = @()')
     [IO.File]::WriteAllText($summaryProbe, $probeText)
     & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $summaryProbe *> $null
     Assert ($LASTEXITCODE -eq 0) 'Successful deployment summary returned failure'

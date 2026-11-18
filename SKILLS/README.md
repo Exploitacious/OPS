@@ -1,6 +1,6 @@
 # SKILLS: source library for Claude skills and GUI projects
 
-This folder is the **authoritative source** for the local, OPS-specific Claude capabilities the Operator maintains across machines. A skill holds only what a capable agent with a fresh context could not know (this copy's systems, house standards), never procedure: a behavior rule goes to doctrine (`CONTEXT/core.md`), a repo fact to the repo, a mechanical step to a script or tool. Shared skills are mounted from their one source repo instead (see "Skill sources" below). Each subfolder is one "library entry" that can deploy in two places:
+This folder is the **authoritative source** for the local, OPS-specific Claude capabilities the Operator maintains across machines. A skill holds only what a capable agent with a fresh context could not know (this copy's systems, house standards), never procedure: a behavior rule goes to doctrine (`CONTEXT/core.md`), a repo fact to the repo, a mechanical step to a script or tool. Shared skills come from their one source repo instead (see "Skill sources" below). Each subfolder is one "library entry" that can deploy in two places:
 
 1. **Claude Code (CLI)**: as a Skill, lazy-loaded by trigger description. Deployed via `~/.claude/skills/` symlinked directly to this folder. One hop. Cross-platform via `.claude-config/deploy.ps1` (Windows) or `.claude-config/deploy.sh` (Linux/macOS).
 2. **Claude.ai GUI (web/desktop/mobile)**: as a Project. Files uploaded manually into a project's instructions field plus knowledge file slots.
@@ -33,21 +33,11 @@ The `SKILL.md` and the `0X_*.md` knowledge files share content but serve differe
 
 ## Skill sources
 
-A shared skill lives in exactly one repo, and every copy that uses it mounts it from there rather than carrying a drifting fork; a template copy of a same-named skill would block the shared one. What lives in *this* `SKILLS/` folder directly is the local, distribution-specific set: glue that binds to OPS's own hooks, scripts, and layout. On 2026-11-17 the template removed its thin context skills (the core's "Where to look" table names those files directly), its two generic method skills, and the skills that restated what a capable agent already knows.
-
-**The mount mechanism is `.claude-config/bin/skills-vendor.sh` + `VENDORED.tsv`** (one mechanism, not two). `VENDORED.tsv` lists each portable skill and its source dir under `PROJECTS/`; `skills-vendor.sh sync` mirrors those source dirs into `SKILLS/<name>/`, and `skills-vendor.sh --check` is the drift gate `verify-ops.sh` runs (DRIFT = a source edit not mirrored = FAIL; MISSING = source repo not cloned = WARN). The template ships `VENDORED.tsv` with no rows: its nine rows for [`github.com/Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills) were removed on 2026-11-17. Add rows for an org or private source of your own. To mount: clone the source under `PROJECTS/<org>/<repo>`, add one row per skill, then sync:
-
-```
-~/OPS/.claude-config/bin/skills-vendor.sh sync
-```
-
-Never hand-edit a mirrored `SKILLS/<name>/` dir; the sync replaces it. The sync never deletes a folder it did not write: a destination that is not a mirror it recorded in `SKILLS/.vendored-state.tsv` (your own skill under a name a manifest row now mounts, or a hand-edited mirror) is moved to `.claude-config/backup/skills-replaced/<name>-<UTC>/` first, and the sync prints a `BACKUP` line naming that path. On a fresh fork the source repos are not cloned, so the mounted skills appear only after the clone and the sync. Until you clone, `skills-vendor.sh --check` reports them MISSING (a WARN). Once the source is cloned, an un-synced mount reads as DRIFT (a FAIL) until you run `sync`.
-
-The clone's checked-out commit is what a mount follows, and deploy never pulls an existing clone, so a newer source release reaches your copy only when you move it on purpose: read what changed (`git -C ~/OPS/PROJECTS/<org>/<repo> fetch`, then `log -p HEAD..origin/main`), `git -C ~/OPS/PROJECTS/<org>/<repo> pull --ff-only`, then `skills-vendor.sh sync` and `skills-vendor.sh --check`. `VENDORED.tsv` has no version column; the commit you pulled is the pin.
+A shared skill lives in exactly one repo; a template copy of a same-named skill would block the shared one. What lives in *this* `SKILLS/` folder is the template's own set: glue that binds to OPS's own hooks, scripts, and layout. An organization's shared skills are delivered separately by that organization, not through this repo. On 2026-11-17 the template removed its thin context skills (the core's "Where to look" table names those files directly), its two generic method skills, and the skills that restated what a capable agent already knows, and deploy stopped cloning and mirroring a public skill source (`DEPLOYMENT.md`, "Leftovers from the skill mounts", lists what an older copy may still hold).
 
 ## How to add a new entry
 
-First route the knowledge (`CONTEXT/core.md`, "Memory and where knowledge goes"): a client fact to the documentation system, a repo fact to the repo, a behavior rule to doctrine, a mechanical step to a script or tool. Only what fits none of those becomes a skill. When a `meta-skill-creator` skill is mounted from a shared source, it says how to build one; the template no longer ships it.
+First route the knowledge (`CONTEXT/core.md`, "Memory and where knowledge goes"): a client fact to the documentation system, a repo fact to the repo, a behavior rule to doctrine, a mechanical step to a script or tool. Only what fits none of those becomes a skill. When your organization delivers a `meta-skill-creator` skill, it says how to build one; the template no longer ships it.
 
 ## Deployment
 
@@ -71,7 +61,7 @@ The script is idempotent, so it is safe to re-run anytime.
 
 ## Index
 
-Local entries live in this folder. The template mounts none; a skill you mount appears in `SKILLS/` only after `skills-vendor.sh sync`.
+Local entries live in this folder.
 
 | Entry | Deployed as Skill? | GUI Project? | Notes |
 |-------|--------------------|--------------|-------|
@@ -92,7 +82,7 @@ Every model-invocable skill puts its name and description into the listing each 
 
 - `disable-model-invocation: true` in a skill's frontmatter (a standalone `#` comment line or a trailing comment beside it parses) drops the skill from the model's listing and leaves only the human `/name` command; the model cannot load it through the Skill tool. It suits a skill the operator starts by name. The template ships it on `harness-update`: a template sync starts only when the operator asks, so its description bought nothing in the listing. Type `/harness-update` to run it; asked in plain words, an agent cannot load it through the Skill tool. To give the model that skill back, delete the line in your copy. Probed on Claude Code 2.1.319. An edit to a template skill's frontmatter is a local change: `harness-update` reports that file as a CONFLICT if upstream later changes it too.
 - The `skillOverrides` setting in your own Claude Code settings (`{"<name>": "on" | "name-only" | "user-invocable-only" | "off"}`) changes how a skill is listed without editing its file, and also covers built-in and account skills. A `Skill(...)` permission deny does not hide a skill from the listing. `deploy.sh` never writes your settings, so this one is entirely yours.
-- A skill you never load can be deleted, local or mounted. For a mounted one, delete its row in `VENDORED.tsv` and its `SKILLS/<name>/` mirror folder: the sync writes mirrors and never removes one, so a dropped row leaves its folder in place.
+- A skill you never load can be deleted from your copy.
 
 ## Migrating a cloud-only Project
 

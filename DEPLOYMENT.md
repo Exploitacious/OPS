@@ -14,7 +14,7 @@ Stage 2 automatically; there is no manual step between them.
 | Stage | Owner | Repo | What it does |
 |-------|-------|------|--------------|
 | **1. Host setup** | `shellSetup.sh` / `winSetup.ps1` | `linuxploitacious` (public) | OS packages, dotfiles via Stow, AI CLI install, `gh` auth, Level 1 Claude files (`CLAUDE.md`, `settings.json`, `statusline.sh`), clone your private OPS copy, **then invoke Stage 2**. |
-| **2. OPS setup** | `.claude-config/deploy.sh` (Linux/macOS) / `deploy.ps1` (Windows) | your private OPS copy | Symlink `~/.claude/{skills,commands,agents,workflows}`. Mount the shared skills. Link the always-loaded core into `~/.claude/rules/`. Strip the retired fleet wiring. Wire the root wrapper. Write the ultracode shim. Initialize auto-memory git-sync. Schedule daily backup. Report the caveman and ponytail plugins (never removes them). Seed the trust anchor. |
+| **2. OPS setup** | `.claude-config/deploy.sh` (Linux/macOS) / `deploy.ps1` (Windows) | your private OPS copy | Symlink `~/.claude/{skills,commands,agents,workflows}`. Link the always-loaded core into `~/.claude/rules/`. Strip the retired fleet wiring. Wire the root wrapper. Write the ultracode shim. Initialize auto-memory git-sync. Schedule daily backup. Report the caveman and ponytail plugins (never removes them). Seed the trust anchor. |
 
 Rule: **anything OPS-specific lives in Stage 2.** linuxploitacious clones the
 repo and hands off; it does not configure OPS itself.
@@ -143,20 +143,12 @@ In order:
    `.claude-config/{commands,agents,workflows}/`. Any real dir already at a
    target is backed up, not clobbered.
 
-2. **Mount the shared skills.** `SKILLS/VENDORED.tsv` lists the portable skills
-   OPS mounts from the public
-   [`Exploitacious/agent-skills`](https://github.com/Exploitacious/agent-skills)
-   repo. When `PROJECTS/Exploitacious/agent-skills` is absent, deploy clones it
-   over HTTPS, then runs `.claude-config/bin/skills-vendor.sh sync` to mirror
-   each listed skill into `SKILLS/<name>/` (rsync where installed, tar
-   otherwise, so a minimal container needs no extra package). Deploy never
-   pulls an existing clone: a re-deploy must not pull an unreviewed upstream
-   change into skills every session loads. Update on purpose:
-   `git -C ~/OPS/PROJECTS/Exploitacious/agent-skills pull --ff-only`, then
-   `~/OPS/.claude-config/bin/skills-vendor.sh sync`. A failed clone (no
-   network) prints an `[XX]` line and fails the deploy (`skills-mount`);
-   `verify-ops.sh` warns that the mounts are MISSING until a re-run clones
-   them.
+2. **No skill step.** The template's harness skills ship in `SKILLS/` and reach
+   Claude Code through the step 1 link; deploy clones and mounts nothing. An
+   organization's shared skills are delivered separately by that organization.
+   (Until 2026-11-17 this step cloned a public skill source; "Updating an
+   existing deploy" says what that left behind. The later steps keep their
+   numbers.)
 
 3. **Link the always-loaded core** into `~/.claude/rules/ops-core.md` (see "How
    the core loads"). A regular file in the way is backed up under a name Claude
@@ -309,8 +301,7 @@ which is tied to the public linuxploitacious repo); the git identity check
 (`bin\memory-init.ps1`, behind the same push gate as step 8); the trust
 anchor; the ultracode shim in the seam; an `OPS Daily Backup` scheduled task
 that runs `daily-sync.sh` in Git Bash (skipped with `-NoSystem`; registered
-with or without an `origin` remote, as on Linux); the skill mount
-(clone, then `skills-vendor.sh sync` through Git Bash); the plugin report (same
+with or without an `origin` remote, as on Linux); the plugin report (same
 CLI reads as step 9); and a Git Bash pin plus the guard self-test (its
 `--quick` probe set, with a line saying it is running, because the full set
 is slow under Git Bash).
@@ -326,9 +317,8 @@ After the script finishes:
 # The core loads on every launch path (expect: the path of CONTEXT/core.md)
 readlink -f ~/.claude/rules/ops-core.md
 
-# Skills resolve, and every mounted skill matches its source (expect: OK lines only)
+# Skills resolve
 diff <(ls ~/.claude/skills/) <(ls ~/OPS/SKILLS/)   # empty diff == correct
-~/OPS/.claude-config/bin/skills-vendor.sh --check
 
 # Deploy reported, and did not remove, any caveman or ponytail plugin
 # (remove one yourself only if you choose: the commands are in its warning)
@@ -382,9 +372,7 @@ The `curl` line fetches the Stage-1 settings a new host has; the git identity
 is the prerequisite from step 7. Expect `Deploy complete.` and, on the last
 line of the gate, `verify-ops: <n> ok · 0 warn · 0 fail (<timestamp>)`, with
 both commands exiting 0. `--no-system` keeps deploy off your crontab and root's
-rc files. Deploy still clones the public skill source over HTTPS, so the test
-needs network access, and the throwaway directory stays in your temp dir until
-you delete it.
+rc files. The throwaway directory stays in your temp dir until you delete it.
 
 Do not drop the `set-url --push` line when you clone a URL. Deploy's memory sync
 commits to the copy and pushes it whenever the push gate finds origin private,
@@ -489,8 +477,8 @@ Stage 2 deploy scripts.
   `/compact` (T3 Code's composer, or the terminal).
 
 - **Destructive-tool tests run in a sandbox:** every suite that runs a tool
-  that deletes or moves files (branch-gc, pre-compact, memory-init, deploy, session-end,
-  skills-vendor) refuses to start outside `.claude-config/bin/sandbox-run`,
+  that deletes or moves files (branch-gc, pre-compact, memory-init, deploy, session-end)
+  refuses to start outside `.claude-config/bin/sandbox-run`,
   which needs `bwrap` (bubblewrap; `apt install bubblewrap`).
   `verify-ops.sh` check 24 fails a suite that names one of those tools
   without the guard; `.claude-config/bin/README.md` ("sandbox-run") has the
@@ -569,6 +557,31 @@ bash ~/OPS/.claude-config/deploy.sh   # or deploy.ps1 on Windows
 
 Stage 2 is idempotent: it no-ops where state is already correct.
 
+### Leftovers from the skill mounts (copies older than 2026-11-17)
+
+Before 2026-11-17, deploy cloned a public skill source into
+`PROJECTS/Exploitacious/agent-skills` and mirrored skills from it into
+`SKILLS/`. Neither deploy nor a template sync deletes files, so an older copy
+keeps them. Inspect them before choosing what to remove; keep skills and
+sources you added yourself.
+
+- `SKILLS/.vendored-state.tsv` lists old mirror names in its first column.
+  A listed `SKILLS/<name>/` folder can have changed since its digest was
+  recorded. Compare it with its source and preserve any local edits and
+  GUI-only files (`00_System_Prompt.md`, `05_gui_dual_track.md`, `SETUP.md`)
+  before removing an unwanted mirror. Keep the ledger until that review is done.
+- `SKILLS/.vendor.XXXXXX` is staging from an interrupted sync. Its `previous/`
+  or `tree/` can hold the only copy of local or GUI files, including a mirror
+  that is missing from `SKILLS/`. Recover or save those files before removing
+  staging. These directories remain gitignored so the daily backup does not
+  commit them while they await review.
+- Check `PROJECTS/Exploitacious/agent-skills` for uncommitted work and unpushed
+  commits before removing the clone, after reviewing its mirrors.
+  `verify-ops.sh` warns that it is absent from `projects-map.md` until it is gone.
+
+Once you have preserved the files you want and removed unwanted mirrors, the
+old ledger can be removed too.
+
 ### Upgrading from a copy older than 2026-11-07
 
 The 2026-11-07 release split the always-loaded core. The rules that bind only
@@ -604,7 +617,7 @@ the code; it never copies your identity files in either direction):
 1. **Re-run Stage 2.** `bash ~/OPS/.claude-config/deploy.sh` links the core
    into `~/.claude/rules/`, replaces the boot shim in your `.local` files
    (keeping a Round F `--settings` edit), strips the fleet PATH and wrapper
-   lines, mounts the shared skills, and runs the ported `memory-init`.
+   lines, and runs the ported `memory-init`.
 2. **Create the new identity files from the template**, then move your content
    into them. From the OPS root:
    ```bash
@@ -669,18 +682,6 @@ and re-run Stage 2:
    discloses what Stage 1 sets; `BOOTSTRAP.md` Round F shows how to keep them
    or switch to normal permission prompts without editing the Stage-1 file.
 
-## Known limits
-
-- **The nightly backup pulls the public skill source.** The backup's project
-  stage runs `PROJECTS/sync-check.sh --auto`, which fast-forwards every clean
-  clone under `PROJECTS/`, including `PROJECTS/Exploitacious/agent-skills`.
-  Deploy never pulls that clone (step 2), but once the backup has pulled an
-  upstream change to a mounted skill, `verify-ops.sh` reports one fail,
-  `skills mirror DRIFT`, until the mirror is synced, and the next `deploy.sh`
-  syncs whatever the backup pulled, reviewed or not. Read what changed
-  (`git -C ~/OPS/PROJECTS/Exploitacious/agent-skills log -p` over the new
-  commits), then run `~/OPS/.claude-config/bin/skills-vendor.sh sync`.
-
 ## What stays out of these scripts
 
 Explicitly NOT handled by Stage 2 (`deploy.sh` / `deploy.ps1`):
@@ -729,7 +730,6 @@ If a new piece of OPS setup needs to run on every host:
 - `.claude-config/bin/verify-ops.sh`: the drift gate.
 - `.claude-config/bin/claude-root-wrapper.sh`: root permission mode and shared-host lock (Linux).
 - `.claude-config/bin/memory-init`, `memory-init.ps1`, `memory-index`: auto-memory git-sync and its index.
-- `.claude-config/bin/skills-vendor.sh`, `SKILLS/VENDORED.tsv`: the skill mounts.
 - `.claude-config/bin/tests/`: the tests for the above.
 - `.github/workflows/gate.yml`: the CI gate (syntax checks, every suite, a fresh-install smoke test with `verify-ops.sh`, a secrets scan); it runs on the template repository only.
 - `SKILLS/THIRD_PARTY_NOTICES.md`: the third-party works the skills adapt, and their licenses.

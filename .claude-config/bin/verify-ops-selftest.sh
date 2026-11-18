@@ -9,7 +9,7 @@
 # against current Stage-1-shaped settings, and fail on each class they exist to
 # catch. It also pins the shipped .gitattributes rule that merges pool
 # MEMORY.md indexes with the union driver, and the shipped .gitignore rules
-# that keep SKILLS/synced and SKILLS/.trash out of the repo.
+# that keep SKILLS/synced, SKILLS/.trash and retired mount staging out of the repo.
 #
 # Sources verify-ops.sh (its main runs only when executed) and drives single
 # checks against fixture trees under a throwaway HOME made by mktemp. It never
@@ -384,30 +384,14 @@ mkdir -p "$OPS/WORKFORCE"
 run check_retired_context
 chk "about-me.md and WORKFORCE/ left behind -> WARN naming both" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'about-me.md' && printf '%s' "$OUT" | grep -q 'WORKFORCE/'; echo $?)"
 
-# 12. Line-ref lint (4) skips mounted skills: a line number in a mirror listed
-# in VENDORED.tsv is not fixable here; the same text in a local skill WARNs.
+# 12. Line-ref lint (4): the shipped skills pass; a line number in a skill WARNs.
 new_case linerefs
-mkdir -p "$OPS/SKILLS/mountedx" "$OPS/SKILLS/localx"
-printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/mountedx/SKILL.md"
-printf 'mountedx\tsrc/skills/mountedx\n' >> "$OPS/SKILLS/VENDORED.tsv"
+mkdir -p "$OPS/SKILLS/localx"
 run check_linerefs
-chk "line ref in a mounted skill -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
+chk "shipped skills, no line refs -> OK" "$([ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
 printf 'a finding at line 702 was wrong\n' > "$OPS/SKILLS/localx/SKILL.md"
 run check_linerefs
 chk "line ref in a local skill -> WARN" "$([ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -q 'localx'; echo $?)"
-
-# A gate cannot return green when its mirror verifier cannot run or encounters
-# an unsafe manifest or filesystem error. MISSING sources retain their WARN.
-new_case vendored-error
-mkdir -p "$OPS/.claude-config/bin"
-printf '#!/usr/bin/env bash\necho "skills-vendor: unsafe mirror destination" >&2\nexit 3\n' \
-  > "$OPS/.claude-config/bin/skills-vendor.sh"
-chmod +x "$OPS/.claude-config/bin/skills-vendor.sh"
-run check_skills_vendored
-chk "mirror verifier error -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
-chmod -x "$OPS/.claude-config/bin/skills-vendor.sh"
-run check_skills_vendored
-chk "mirror verifier not executable -> FAIL" "$([ "$FAILS" = 1 ]; echo $?)"
 
 # 24. Sandbox guards: the shipped suites pass; a fixture suite that names a
 # destructive tool without the guard FAILs, and missing tooling FAILs.
@@ -461,6 +445,14 @@ run check_skills_index
 chk "untracked synced and .trash dirs -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
 chk "the shipped .gitignore ignores SKILLS/synced" "$(git -C "$OPS" check-ignore -q SKILLS/synced/org-skill/SKILL.md; echo $?)"
 chk "the shipped .gitignore ignores SKILLS/.trash" "$(git -C "$OPS" check-ignore -q SKILLS/.trash/old-org-skill/SKILL.md; echo $?)"
+# An interrupted mount can leave the only copy of local files in previous/.
+# Retiring its writer must not make the daily backup commit that staging tree.
+mkdir -p "$OPS/SKILLS/.vendor.Ab12Cd/previous"
+printf 'local setup\n' > "$OPS/SKILLS/.vendor.Ab12Cd/previous/SETUP.md"
+chk "the shipped .gitignore ignores retired mount staging" \
+  "$(git -C "$OPS" check-ignore -q SKILLS/.vendor.Ab12Cd/previous/SETUP.md; echo $?)"
+chk "ordinary local skills remain trackable" \
+  "$(git -C "$OPS" check-ignore -q SKILLS/local-skill/SKILL.md; [ "$?" = 1 ]; echo $?)"
 git -C "$OPS" add -f SKILLS/synced/org-skill/SKILL.md
 git -C "$OPS" -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture
 run check_skills_index
@@ -583,7 +575,7 @@ run memory_checks
 chk "the shipped memory-index on a small pool -> no FAIL, no WARN" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
 
 # 29. Skill size (9b): 16,384 bytes and 1,500 characters a line, both
-# inclusive; WARN only. Mounted, synced and symlinked skills are skipped, and the
+# inclusive; WARN only. Synced and symlinked skills are skipped, and the
 # shipped skills pass.
 mk_skill() {  # name bytes [longest_line_chars]
   local d="$OPS/SKILLS/$1"; mkdir -p "$d"
@@ -597,7 +589,7 @@ out += "b" * (size - len(out.encode()))
 open(path, "w").write(out)
 PY
 }
-size_case() { new_case "$1"; rm -rf "${OPS:?}/SKILLS"; mkdir -p "$OPS/SKILLS"; : > "$OPS/SKILLS/VENDORED.tsv"; }
+size_case() { new_case "$1"; rm -rf "${OPS:?}/SKILLS"; mkdir -p "$OPS/SKILLS"; }
 new_case size-shipped
 run check_skill_size
 chk "shipped skills within 16 KB and 1,500 characters a line -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ] && [ "$OKS" = 1 ]; echo $?)"
@@ -619,11 +611,10 @@ run check_skill_size
 chk "a 1,501-character line -> WARN naming the line and its length" \
   "$([ "$FAILS" = 0 ] && [ "$WARNS" = 1 ] && printf '%s' "$OUT" | grep -qE 'wide \(line [0-9]+ is 1501 characters\)'; echo $?)"
 size_case size-skipped
-mk_skill mountedx 40000; printf 'mountedx\tsrc/skills/mountedx\n' > "$OPS/SKILLS/VENDORED.tsv"
 mk_skill synced 40000
 mk_skill linked 40000; mv "$OPS/SKILLS/linked" "$HOME/linked-target"; ln -s "$HOME/linked-target" "$OPS/SKILLS/linked"
 run check_skill_size
-chk "mounted, synced and symlinked skills are skipped -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
+chk "synced and symlinked skills are skipped -> OK" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
 rm -rf "${OPS:?}/SKILLS"
 run check_skill_size
 chk "no SKILLS dir -> FAIL, not a pass" "$([ "$FAILS" = 1 ] && printf '%s' "$OUT" | grep -q 'could not run'; echo $?)"
