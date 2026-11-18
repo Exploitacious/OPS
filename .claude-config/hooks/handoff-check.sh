@@ -8,8 +8,8 @@
 # this is the fix for "handoffs picking up another agent's work".
 #
 # Notify ONLY. Never auto-loads context (that would re-inject stale state
-# every session). The session-handoff skill does the actual pickup and
-# archives the baton so this stops firing. Exit 0 always, a surface, not a
+# every session). The resuming agent does the actual pickup and
+# archives the baton so this stops firing (.claude-handoffs/README.md, Flow). Exit 0 always, a surface, not a
 # gate. If you run more than one profile via CLAUDE_CONFIG_DIR, this fires in
 # each of them (settings.json is symlinked into every config dir).
 #
@@ -69,7 +69,7 @@ From:    ${writer:-unknown}   @   ${when:-unknown}
 Cwd:     ${bcwd:-unknown}
 Task:    ${goal:-<open the baton>}
 
-Pick up:  say "resume handoff"  (or run /session-handoff)
+Pick up:  say "resume handoff"  (.claude-handoffs/README.md, Flow)
 Baton:    ${BATON}
 ============================================================
 EOF

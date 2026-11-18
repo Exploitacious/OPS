@@ -3,8 +3,8 @@
 Situational rules and the reasoning behind P1-P15. Always-on rules belong to
 [core.md](core.md), and the rules that bind only the foreman to
 [foreman.md](foreman.md); references here name their owner instead of
-repeating them. This file is generic doctrine that `harness-update` syncs from
-the template. The Operator's own rulings live in
+repeating them. This file is generic doctrine that the template sync
+(`harness-update-scan.sh`) carries from the template. The Operator's own rulings live in
 [standing-orders.md](standing-orders.md), which no template sync touches, and
 take precedence over the defaults here. Changes to doctrine follow
 [core: Memory](core.md#memory-and-where-knowledge-goes).
@@ -62,14 +62,15 @@ When preparing a rollup:
   with what mattered and what is next.
 - In a T3 Code thread, data, reports, research findings, and comparisons
   are shown as an inline page by default, without asking first
-  (`t3-html-render`): one page on the turns where a picture reads faster
+  (the `harness` skill): one page on the turns where a picture reads faster
   than prose, never on every turn. Link the saved page so the Operator can
   download or share it; open a browser preview or a local server only when
   asked. Why: a format the reader wants by default should not wait behind a
   question. Outside T3, where no inline page exists, offer a rendered page
   and wait for a yes; once authorized for a workstream, continue that
   format without asking again.
-- "Send me a file" on a headless box invokes `grabit`, not in-chat delivery.
+- "Send me a file" on a headless box invokes `.claude-config/bin/grabit`, not
+  in-chat delivery.
 - File praise for a judgment call too, so the successful pattern survives.
 
 ## Output and files
@@ -285,7 +286,7 @@ file; it never edits this file, so a template sync cannot undo it.
 ## The template and a copy's owner
 
 A copy belongs to its owner. Template changes reach it through
-`harness-update`, which classifies every file and keeps what the owner changed
+the template sync (`harness-update-scan.sh`), which classifies every file and keeps what the owner changed
 or chose. The template adds improvements and offers options; it never takes
 away what the owner chose or built. Anything that would delete, cap, or block
 the owner's content (a plugin, a memory pool's size, a skill the template
@@ -300,7 +301,7 @@ One stated exception, for model pins: the drift gate FAILs on a model id the
 policy bans or has retired, and on a Haiku pin that is missing or not the one
 allowed id (`verify-ops.sh` checks 15 and 15b, `model-roles.md` Bans). The FAIL
 edits nothing and blocks nothing: the pin stays the owner's to change, and
-deploy and `harness-update` never touch it. It stays a FAIL, not a WARN, because
+deploy and the template sync never touch it. It stays a FAIL, not a WARN, because
 such a pin fails quietly in use (lanes keep running a model the policy has
 dropped, and nothing else says so), and because the template's own CI runs the
 same checks to keep its shipped pins and the Stage-1 settings clean. Every
@@ -316,8 +317,8 @@ danger, so the git guard warns about it and lets the commit run. Everything else
 is the owner's call. Why: a harness that quietly rewrites its owner's own choices (a sync
 remote, a pin, a layout built to suit their way of working) teaches the owner
 to stop taking template updates, and then no improvement reaches them.
-Contributors apply the same test to every change to deploy, `harness-update`,
-and the drift gate: if the owner's own choice would be removed, capped, or
+Contributors apply the same test to every change to deploy, the template
+sync, and the drift gate: if the owner's own choice would be removed, capped, or
 blocked, make it advice.
 
 ## Framework alignment
@@ -357,7 +358,7 @@ wraps that launch, so nothing on the boot path may depend on one: the core
 loads through `~/.claude/rules/ops-core.md` and the hooks through the Stage-1
 settings, the same as in a terminal. Approvals use the T3 UI. A T3 thread on
 a box with a harness token compacts itself; everything else stays manual.
-After `pre-compact-synthesis`, the thread writes its resume baton and runs
+After `session-end pause` and what it lists, the thread writes its resume baton and runs
 `bin/compact-cycle.sh` on its own thread when the context-watch nag names it;
 the script fires `/compact` through T3's API and sends the baton only once T3
 confirms that compaction completed (the token and its limits:

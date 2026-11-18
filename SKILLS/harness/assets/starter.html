@@ -1,4 +1,17 @@
 <!doctype html>
+<!-- The T3 frame (delete this comment in your copy):
+ - html, body and the outer element carry no background, card, border or banner title; the page sits on the thread.
+ - Fluid width, no horizontal padding on the outer element, fixed pixel heights for charts, never 100vh or height:100%.
+ - Draw SVG from the container's width and redraw on width change: a phone at about 360 px gets a real layout.
+ - Every hover target answers a tap (pointerdown); every multi-series chart has a legend; the numbers sit in a table too.
+ - Label invented numbers as example data on the page. assets/example-report.html is a worked page to copy patterns from.
+ - html_preview screenshots right after load: log a check (path lengths, row counts) for anything an intro animation hides.
+ - html_render: height = the contentHeight from the 728 px preview, clamped to 80..2000 (raise it when the page grows after load).
+ - The reply after it adds only what the page does not say, and ends with a link to the saved page,
+   $T3CODE_HOME/userdata/attachments/<attachmentId>.html (~/.t3 by default), the id from the render result.
+ - T3 injects a theme style and a script into the saved page (dark by default, light under prefers-color-scheme,
+   live theme changes, links open in the reader's browser). The classes below are why this page never sets its own
+   colors unless no theme arrived. -->
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Page title</title>
 <style>

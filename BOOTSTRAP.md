@@ -14,7 +14,7 @@ replace.
 The doctrine already ships and stays generic: `core.md` (always loaded),
 `foreman.md` (the main thread's rules, printed into foreman sessions by a
 hook), `how-i-work.md` (P1-P15 and the situational rules), `model-roles.md`,
-and `project-kata.md`. The template sync (`harness-update`) keeps updating those
+and `project-kata.md`. The template sync (`harness-update-scan.sh`) keeps updating those
 files, so bootstrap never edits them, with one exception named in Stage 1
 (the kata's Operator overlays). What is missing is the *who* layer, and it
 lives only in files no template sync touches:
@@ -144,7 +144,7 @@ Constraints, Improvement Kata, and the Phoenix Project lens
 **Round E: Output defaults.** Confirm or override the default document
 format (`.docx` / `.md` / other), the conversation register (casual or
 formal), and the visual page for data and reports: in a T3 Code thread it is
-shown inline by default without asking (`t3-html-render`), and elsewhere it is
+shown inline by default without asking (the `harness` skill), and elsewhere it is
 offered first (`how-i-work.md` § Reporting to the Operator). Offer: `Keep the
 default` · `Only when I ask` · `Always offer first`. Record overrides as
 standing orders.
@@ -282,7 +282,7 @@ threads; the managed-settings option does.
 5. **The slots.** `CONTEXT/work-tracking.md`: the Operator's real time,
    ticket, and board tools (which system, how time is logged), replacing the
    EXAMPLE blocks and deleting any block for a surface they do not use. This
-   is the file the `session-close` reconciliation gate reads; leave it
+   is the file a close's time reconciliation reads (`session-end close`); leave it
    accurate or empty, never stale EXAMPLE content posing as a real system.
    `team.md` and `tools.md`: fill what Round A and recon gave you, or leave
    the templates (every skill that reads them degrades gracefully).

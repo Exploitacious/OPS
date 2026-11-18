@@ -11,7 +11,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-ASSETS = Path(__file__).resolve().parents[3] / "SKILLS/t3-html-render/assets"
+ASSETS = Path(__file__).resolve().parents[3] / "SKILLS/harness/assets"
 
 
 def node(source, payload):
@@ -25,6 +25,10 @@ def node(source, payload):
 
 class HtmlRender(unittest.TestCase):
     def test_inline_scripts_parse(self):
+        # The harness skill points at both pages; a move that leaves the glob
+        # empty must fail here, not pass with nothing checked.
+        pages = sorted(p.name for p in ASSETS.glob("*.html"))
+        self.assertEqual(pages, ["example-report.html", "starter.html"])
         for path in sorted(ASSETS.glob("*.html")):
             with self.subTest(page=path.name):
                 scripts = re.findall(r"<script>([\s\S]*?)</script>", path.read_text())

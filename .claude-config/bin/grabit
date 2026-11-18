@@ -10,7 +10,7 @@
 #   grabit FILE...              push file(s) to the machine you're connected from
 #   grabit --to DEVICE FILE...  push to a specific tailnet device (name or 100.x IP)
 #   grabit --serve PATH...      stage path(s) + expose over tailnet HTTPS; prints URLs
-#   grabit --serve-off          tear the serve endpoint down
+#   grabit --serve-off          remove grabit's own serve path (nothing else)
 #   grabit --inbox [DIR]        pull files sent TO this box (default ~/grabit-inbox)
 #   grabit --list               list tailnet devices
 #   grabit -h | --help
@@ -21,6 +21,16 @@
 set -euo pipefail
 
 SERVE_DIR="${GRABIT_SERVE_DIR:-$HOME/.cache/grabit-serve}"
+# grabit serves under its own path on the HTTPS port and removes only that path.
+# Never `tailscale serve reset` here: reset wipes EVERY serve handler on the box,
+# and a box that serves T3 Code (or anything else) over the tailnet lost that
+# endpoint, its phone app included, when --serve-off ran reset. Serving at "/"
+# would replace another handler the same way, so the path is never the root.
+# tests/grabit-test.sh fails if reset is ever invoked.
+# Directory mounts end in / in Tailscale's config; removal matches that exact
+# path. Without the slash, serve-off reports "handler does not exist".
+SERVE_PATH="/grabit/"
+SERVE_PORT=443
 
 die(){ echo "grabit: $*" >&2; exit 1; }
 command -v tailscale >/dev/null 2>&1 || die "tailscale not found on PATH"
@@ -74,15 +84,23 @@ serve(){
   local p; for p in "$@"; do [ -e "$p" ] || die "no such path: $p"; cp -r "$p" "$SERVE_DIR/"; done
   # Serving a path is privileged even for an operator; needs (passwordless) sudo.
   # Taildrop (the default push) does NOT need this, so prefer it where sudo is absent.
-  sudo tailscale serve --bg "$SERVE_DIR" >/dev/null 2>&1 \
+  sudo tailscale serve --bg --https="$SERVE_PORT" --set-path="$SERVE_PATH" "$SERVE_DIR" >/dev/null 2>&1 \
     || die "tailscale serve failed (needs sudo + tailnet HTTPS enabled; just use a plain 'grabit FILE' push instead)"
-  local url; url="https://$(self_dns)/"
+  local url; url="https://$(self_dns)${SERVE_PATH}"
   echo "grabit: serving over the tailnet (HTTPS, not public). Open in your browser:"
   ( cd "$SERVE_DIR" && for f in *; do echo "  ${url}${f}"; done )
   echo "grabit: tear down when done with -> grabit --serve-off"
 }
 
-serve_off(){ sudo tailscale serve reset >/dev/null 2>&1 || true; rm -rf "$SERVE_DIR"; echo "grabit: serve torn down."; }
+serve_off(){
+  # Only grabit's own path; other serve handlers on this box stay up (see SERVE_PATH).
+  if sudo tailscale serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" off >/dev/null 2>&1; then
+    echo "grabit: serve path ${SERVE_PATH} removed."
+  else
+    echo "grabit: WARN no serve path ${SERVE_PATH} was removed (none was set, or sudo or tailscale refused); other serve handlers were not touched. Check: tailscale serve status" >&2
+  fi
+  rm -rf "$SERVE_DIR"
+}
 
 inbox(){
   local dir="${1:-$HOME/grabit-inbox}"; mkdir -p "$dir"

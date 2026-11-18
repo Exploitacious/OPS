@@ -500,7 +500,7 @@ Stage 2 deploy scripts.
   you enabled it, disable it:
   `systemctl --user disable --now ops-memory-gc.timer` and remove its links
   from `~/.config/systemd/user/`. The thread that closes prunes the memory it
-  touched (`session-close`).
+  touched (`session-end` lists the entries; the `harness` skill).
 
 **SessionStart matchers.** Keep the Stage-1 SessionStart hooks split by source,
 so a resume or compact does not re-pay the full boot: a `"startup|clear"` group
@@ -582,6 +582,16 @@ sources you added yourself.
 Once you have preserved the files you want and removed unwanted mirrors, the
 old ledger can be removed too.
 
+### Leftovers from the six retired skills (copies older than 2026-11-17)
+
+On 2026-11-17 the `harness` skill replaced `pre-compact-synthesis`,
+`session-close`, `session-handoff`, `grabit`, `t3-html-render` and
+`harness-update`. A template sync lists their files as REMOVED and deletes
+nothing, so an updated copy keeps the six folders under `SKILLS/` and they still
+load as skills, describing the old hand-run procedure. Nothing in the new tree
+reads them. Delete them once you have kept anything you added to them yourself;
+the inline-page assets now live in `SKILLS/harness/`.
+
 ### Upgrading from a copy older than 2026-11-07
 
 The 2026-11-07 release split the always-loaded core. The rules that bind only
@@ -589,7 +599,7 @@ the main thread (intake and reporting, orchestration, review and merge, model
 choice, rhythm) moved from `CONTEXT/core.md` to the new `CONTEXT/foreman.md`,
 and `core.md` shrank to what a lane needs too. Nothing is taken away from a
 copy: the sync only adds and updates files, and every `core.md#...` anchor
-still resolves. After you sync the template (the `harness-update` skill):
+still resolves. After you sync the template (`harness-update-scan.sh`):
 
 1. **Read the sync report for `core.md`.** If you never edited it, it arrives
    as an UPDATE. If you did, it is a CONFLICT, which the sync lists and leaves
@@ -611,7 +621,7 @@ The 2026-10-19 release replaced the charter-and-digest boot with
 layer to new file names. A copy from before it boots through the old
 `claude()` shim, which fails open once the charter is gone, so it keeps
 working but without doctrine until you migrate. After you sync the template
-(the `harness-update` skill pulls `core.md`, `how-i-work.md`, `AGENTS.md`, and
+(`harness-update-scan.sh` pulls `core.md`, `how-i-work.md`, `AGENTS.md`, and
 the code; it never copies your identity files in either direction):
 
 1. **Re-run Stage 2.** `bash ~/OPS/.claude-config/deploy.sh` links the core
@@ -658,7 +668,7 @@ the code; it never copies your identity files in either direction):
 
 Copies from before the 2026-10-18 release pinned retired models, ran a deploy
 step that rewrote the model pin inside your Stage-1 settings, and reinstalled
-the caveman plugin. After you sync the template (the `harness-update` skill)
+the caveman plugin. After you sync the template (`harness-update-scan.sh`)
 and re-run Stage 2:
 
 1. **Restore the Stage-1 settings file if an earlier deploy edited it.** Check
@@ -695,7 +705,7 @@ Explicitly NOT handled by Stage 2 (`deploy.sh` / `deploy.ps1`):
   setup (see "T3 Code hosts").
 - **Your own choices.** Your git remotes, your backup arrangements, your memory
   layout and sync, your plugins, your hooks, and your model pins are yours: neither deploy
-  nor `harness-update` changes them (`CONTEXT/how-i-work.md`, "The template
+  nor the template sync changes them (`CONTEXT/how-i-work.md`, "The template
   and a copy's owner"). A shim over a system command, such as the one
   `safe-pkill --install-shims` places over `pkill` and `pgrep` where that tool
   ships, is a step you run by hand; deploy never installs one.

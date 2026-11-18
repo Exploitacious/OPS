@@ -5,7 +5,7 @@ The well-known voice slot (CONTEXT/slots.md): portable skills read this file
 by name for the Operator's register and brand. If it is still the template,
 or absent, a skill uses plain professional prose instead.
 
-harness-update never syncs this file in either direction
+The template sync never touches this file in either direction
 (harness-update-scan.sh is_excluded): it is the Operator's voice, never the
 public template's. BOOTSTRAP.md writes a starter in Stage 1 and replaces it
 with an evidence-based profile in Stage 2.

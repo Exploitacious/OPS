@@ -4,9 +4,9 @@
 #
 # Modes (first arg):
 #   stop      (default) Stop hook: block the stop with an escalating nag telling
-#             the agent to run the compact ritual (the pre-compact-synthesis
-#             skill, then compact-cycle.sh on a T3 box with a harness token, else
-#             tell the Operator a manual /compact is clear to fire).
+#             the agent to pause (session-end pause and what it lists, the
+#             harness skill, then compact-cycle.sh on a T3 box with a harness token,
+#             else tell the Operator a manual /compact is clear to fire).
 #   posttool  PostToolUse hook: once usage reaches URGENT, inject a matching
 #             warning MID-TURN via additionalContext. Stop hooks only fire
 #             between turns: a long tool-calling turn once ran from 65% to 98%
@@ -137,8 +137,8 @@
 # python3-only, so hosts without python3 (e.g. Windows Git Bash) never get the
 # nag, in ANY mode. This is fail-open BY DESIGN, unlike git-guard/secrets-guard
 # which fail CLOSED: a missed reminder just means the Operator compacts on their
-# own cue instead of this hook's; the compact ritual itself
-# (pre-compact-synthesis skill) still works fine without this nag ever firing.
+# own cue instead of this hook's; the pause itself (session-end pause, the
+# harness skill) still works fine without this nag ever firing.
 #
 # A hook must never break the session: every failure path exits 0 silently.
 set -uo pipefail
@@ -518,8 +518,8 @@ def log_silenced(where, ctx_tokens, why):
 # take a separate lock. The route and the interlock therefore both use the thread id.
 SELF_COMPACT = bool(os.environ.get("SELF_COMPACT"))
 T3_SID = os.environ.get("CW_CLASS_SID") or ""
-MANUAL_ROUTE = ("run the pre-compact-synthesis skill, then tell the Operator a manual /compact is clear "
-                "to fire")
+MANUAL_ROUTE = ("run session-end pause and finish what it lists (the harness skill, \"Ending a thread\"), "
+                "then tell the Operator a manual /compact is clear to fire")
 _t3 = {}
 
 
@@ -574,13 +574,15 @@ def compact_route():
     cycle = shlex.quote(os.path.join(bindir, "compact-cycle.sh"))
     if tid:
         baton = f"{rundir}/resume-{cycle_key(tid)}.txt"
-        return ("run the pre-compact-synthesis skill, then write the resume baton to "
+        return ("run session-end pause and finish what it lists (the harness skill, \"Ending a thread\"), "
+                "then write the resume baton to "
                 f"{baton}, run {cycle} --backend t3 --target {shlex.quote(tid)} "
                 f"--baton {shlex.quote(baton)} (it detaches its own worker), then END YOUR TURN "
                 "so the compactor can fire /compact")
     # Unresolved (no mapping, an ambiguous one, a lookup that failed): hand over the
     # resolve step instead of a session-id target that would miss the baton.
-    return ("run the pre-compact-synthesis skill, then resolve this T3 thread with "
+    return ("run session-end pause and finish what it lists (the harness skill, \"Ending a thread\"), "
+            "then resolve this T3 thread with "
             f"{shlex.quote(os.path.join(bindir, 't3-api.sh'))} thread-for-session "
             f"{shlex.quote(T3_SID) if T3_SID else '<this session id>'} (it must print one plain "
             f"thread id), write the resume baton to {rundir}/resume-<thread-id>.txt, run {cycle} "
@@ -854,7 +856,7 @@ if mode == "readout":
         # framing, never pressure: a compact here is hygiene, not scarcity.
         how = compact_route()
         print("[context] Natural break point. A compact here hands the next stretch "
-              "a clean desk, pre-authorized, no ask. Run pre-compact-synthesis, then "
+              "a clean desk, pre-authorized, no ask. To pause: "
               f"{how}. Or keep rolling if you'd rather; nothing is at risk either "
               "way. Pick the next clean seam.")
     elif ctx >= LONG_TURN:
@@ -862,7 +864,7 @@ if mode == "readout":
         # four artifacts carry the work across a reset, so nothing is at stake.
         how = compact_route()
         print("[context] This session has run long; a clean handoff is the kind thing "
-              f"for the next stretch. Run pre-compact-synthesis, then {how}. Nothing is "
+              f"for the next stretch. To pause: {how}. Nothing is "
               "lost either way: git, memory, the task list, and the baton carry the work "
               "forward as one body.")
     else:

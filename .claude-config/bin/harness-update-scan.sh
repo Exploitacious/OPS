@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# harness-update-scan.sh: the mechanical half of the harness-update skill.
+# harness-update-scan.sh: the mechanical half of a template sync.
 #
 # Classifies how the local (private, personalized) OPS copy differs from the
-# PUBLIC upstream template, so the judgment half (SKILLS/harness-update/SKILL.md)
-# can decide what to pull. The risk direction is one-way and that shapes every
+# PUBLIC upstream template, so the agent and the Operator (the judgment half;
+# the facts are in .claude-config/bin/README.md) can decide what to pull. The risk direction is one-way and that shapes every
 # rule here: this pulls PUBLIC template code INTO a PRIVATE repo, so a wrong copy
 # breaks the Operator's personalization, which is worse than a missed update. Therefore
 # identity/memory/handoff surfaces are hard-excluded in BOTH directions, and the
@@ -21,8 +21,8 @@
 # No marker → first-sync mode: full tree compare, no baseline, so any difference
 # is a CONFLICT (UPDATE is not computable without a known last-synced version).
 #
-# Never git-commits. Never writes the marker: the skill updates last_synced to
-# the fetched sha at commit time, so a report-only run leaves zero state behind.
+# Never git-commits. Never writes the marker: the sync's commit updates last_synced to
+# the fetched sha, so a report-only run leaves zero state behind.
 #
 # Env overrides: OPS_UPSTREAM (owner/repo), OPS_UPSTREAM_BRANCH (default main),
 # OPS_REMOTE (default ops-template).

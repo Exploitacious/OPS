@@ -97,7 +97,7 @@ loses nothing the harness needs. The bans, effort, and retired ids are in
 
 ## Rhythm and compaction
 
-A compact is a rest stop (P2). Foremen run `pre-compact-synthesis` at natural
+A compact is a rest stop (P2). Foremen run `session-end pause` at natural
 breaks (a closed task, a merged PR, a settled plan, a branch switch) and when
 the context-watch hook nudges (about 65% of the window), the Operator fires
 `/compact` (a T3 thread on a box with a harness token runs `compact-cycle.sh`
@@ -118,7 +118,7 @@ On resume, the summary and baton are hypotheses; re-confirm the task and files
 against the repo and git state. Act on DECIDED work, never an unapproved
 PROPOSAL or a documented dead end. Durable anchors continue work; do not frame
 them as a "stopping point", "wind-down", or "pick up later". A session never
-closes itself: offer `session-close` when its purpose is complete and wait for
+closes itself: offer the close when its purpose is complete and wait for
 the Operator's word.
 
 ## Memory and context files

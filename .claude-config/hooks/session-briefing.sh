@@ -313,21 +313,21 @@ if [ -f "$CLOSE" ]; then
   age_days="$(( ( $(date +%s) - $(date -d "$(cat "$CLOSE")" +%s 2>/dev/null || echo 0) ) / 86400 ))"
   [ "${age_days:-0}" -ge 3 ] && hyg="$hyg last closeout ${age_days}d ago ·"
 fi
-# work-tracking backstop: a session that did work but never ran session-close (so
-# its reconciliation gate never fired) leaves a session-start stamp behind:
-# session-close deletes it on reconcile. A leftover stamp is judged by evidence, not
+# work-tracking backstop: a session that did work but never closed (so its time
+# was never reconciled) leaves a session-start stamp behind: a close archives it
+# (session-end finish). A leftover stamp is judged by evidence, not
 # counted: it is flagged only when a repository it touched shows real commits in its
 # own window (hooklib.sh, orphan_stamp_verdict). Skip this session's own key and any
 # still-live tmux (paused / parallel sessions are not abandoned).
 #
-# THE SWEEP IS NOT ON THE BOOT PATH. A leftover stamp stays until session-close, and
+# THE SWEEP IS NOT ON THE BOOT PATH. A leftover stamp stays until a close, and
 # under T3 every thread that never closes leaves one, so judging them inline made boot
 # grow with the set (126 stamps cost 49 s on one box, and every new session waits on
 # this hook before its first model call). orphan_scan_spawn (hooklib.sh) starts the
 # sweep detached, under a lock and a 30 min throttle (OPS_ORPHAN_SCAN_INTERVAL, in
 # seconds); boot pays for a throttle check and a fork, then reports what the last scan
 # left in the state dir. Flags can be up to one interval old, but a flagged stamp that
-# session-close has since deleted stops counting at the next boot. A failed or vanished
+# a close has since archived stops counting at the next boot. A failed or vanished
 # scan is named here every boot until a later scan passes. OPS_ORPHAN_SCAN=sync runs
 # the sweep inline instead, with no throttle (tests, or a closeout that wants fresh
 # flags). The sweep never removes or moves a stamp.

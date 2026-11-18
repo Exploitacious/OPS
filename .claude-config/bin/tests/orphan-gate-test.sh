@@ -3,7 +3,7 @@
 # that runs it off the boot path (hooks/hooklib.sh: orphan_stamp_verdict,
 # orphan_scan_spawn / _main / _run / _report), with the briefing as the one caller.
 #
-# Why the scan exists: a leftover session-start stamp stays until session-close, and
+# Why the scan exists: a leftover session-start stamp stays until a close, and
 # under T3 every thread that never closes leaves one, so judging them inline made
 # boot grow with the set. The briefing now only starts a detached scan and reports
 # what the last one left in the state dir.
@@ -25,7 +25,7 @@
 #              is recovered, a live one never is
 #   failures   an unwritable state dir, an unwritable status and a scan that died
 #              are each named at boot until a later scan passes
-#   report     a flagged stamp that session-close has since removed stops counting
+#   report     a flagged stamp that a close has since archived stops counting
 #              at once, and the running session's own stamp never counts
 #
 # Every path is under a temp dir; HOME is a fixture. The suite refuses to run
@@ -170,7 +170,7 @@ report() { # CUR: prints ORPHAN_SCAN_HYG
 has "the report counts the flagged stamps that still exist" ' 3 session(s) abandoned without a work-tracking reconciliation' "$(report '')"
 has "the running session's own stamp never counts" ' 2 session(s) abandoned' "$(report s-flag)"
 rm -f "$RUN/session-start-s-flag" "$RUN/session-start-s-dead"
-has "a flagged stamp that session-close removed stops counting at once" ' 1 session(s) abandoned' "$(report '')"
+has "a flagged stamp that a close archived stops counting at once" ' 1 session(s) abandoned' "$(report '')"
 rm -f "$RUN/session-start-s-alive"
 eq "with every flagged stamp gone the report is silent" "" "$(report '')"
 
