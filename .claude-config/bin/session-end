@@ -1,0 +1,2059 @@
+#!/usr/bin/env python3
+"""session-end: the mechanical half of ending a thread (pause, move or close).
+
+  session-end <pause|move|close> [--repo PATH]... [--transcript FILE]
+              [--wait SECONDS] [--dry-run] [--json]
+  session-end finish [--logged N | --declined REASON] [--json]
+
+Every ending starts with `session-end <mode>`. It snapshots git, starts the
+repo cleanup (branch-gc), rebuilds this directory's memory index, lints when the
+thread touched harness files, and prints what is left for the agent to decide.
+It makes no judgment calls: it never commits, pushes, edits a ticket, logs
+time, writes a baton, compacts, settles or deletes scratch. Its writes are the
+selected repos' existing branch-gc mechanic, the resolved memory index, its own
+receipt and GC run files, and (finish only) the closeout stamp and the archive
+of this thread's billing stamps.
+
+`finish` runs after the agent has saved lessons, fixed documents and written
+the resume note. It reads this thread's receipt, re-reads a pending GC result,
+and only when that run was real and nothing failed does it advance
+<state>/last-closeout. After a close it requires exactly one of --logged N (N
+time entries created and read back, 0 allowed) or --declined REASON, and
+archives this thread's two billing stamp files.
+
+Why one command: the
+mechanical steps of the three endings lived as prose in three skills, and a
+close assembled by hand skipped steps. Why `finish` is separate: clearing the
+billing stamps inside the first call would erase the unbilled-window flag
+before the time is logged, so a close that stopped halfway would lose the
+evidence; and last-closeout is the lower bound of transcript knowledge mining,
+so it must not move before knowledge capture is done.
+
+Scope, stated in the output too:
+  - Claude sessions only (CLAUDE_CODE_SESSION_ID). Under Codex or OpenCode the
+    steps that need no transcript run for explicit --repo values; the
+    transcript, time and billing steps print "unsupported provider", and
+    finish archives nothing. The billing stamp's key helper has no Codex branch.
+  - The main thread only. A T3-delegated lane (T3CODE_THREAD_ID starting
+    thread:delegated-task: or thread:provider:, or `lane-class --self` saying
+    t3-lane or agent-lane) is refused every writing mode; --dry-run stays open.
+    An in-process helper shares its main thread's environment, so the Bash
+    guard (hooks/git-guard.sh) blocks it from the payload's agent_id instead.
+  - Linux (fcntl locks, setsid via start_new_session).
+
+Repos. With a verified transcript, GC runs on the current repo plus every
+--repo; without one, only on explicit --repo values. Git roots of other paths
+the thread's tool calls named are printed as candidates ("pass --repo for any
+of these you changed") and get read-only snapshots only: transcript text is
+data and never selects a repo to change. GC runs once per main checkout, only
+for a repo the pre-compact hook would hand to branch-gc (hooks/pre-compact.sh,
+"Branch and worktree GC": ~/OPS, ~/OPS/PROJECTS/<org>/<repo> and
+~/linuxploitacious, compared by realpath under the current $HOME; a clone of
+OPS under another name is not one) with exactly one github.com origin. GC works
+on the whole selected repo, including other threads' eligible idle work;
+branch-gc's own process and T3 checks hold live worktrees.
+
+GC worker. One detached worker per run serializes the repos (branch-gc holds a
+global nonblocking lock). Each branch-gc --apply runs under the hooks' GNU
+timeout resolver (hook_timeout) with the pre-compact hook's numbers: a 900 s
+hard timeout, a soft deadline (BRANCH_GC_DEADLINE) at two thirds of it from the
+same start, 30 s from TERM to KILL, and BRANCH_GC_TRASH_DAYS=0 so this call
+purges nothing. The worker records pre-GC branch tips and worktree paths in its
+run log and writes an atomic result.json; --wait (default 90, a total budget
+for GC) bounds how long this call waits for it. Pending is exit 3 with the
+result path, never success; a second call for the same thread and repos
+reuses the pending worker instead of starting a conflicting copy.
+
+Paths: <state>/session-end/<key>.json is the receipt (key from hooklib.sh's
+work_session_key); <state>/session-end/gc/<run>/ holds plan.json, run.log,
+result.json and the worker lock; <state>/session-end/done/ keeps finished
+receipts. <state> is $OPS_STATE_DIR, else ~/.local/state/ops when verify-ops.sh
+sits beside this file (the directory hooks/session-briefing.sh reads
+last-closeout from). Billing stamps are
+~/.claude-compact-cycle/session-start-<key> and work-log-<key>, the names
+hooks/session-work-init.sh writes; finish moves them, each by one rename, into a
+fresh ~/.claude-compact-cycle/reaped/<key>-<TS>-<hex>/ beside a reaped.meta that
+holds the outcome (archive_billing says why).
+
+Where OPS keeps the rest: the key's backend is hooklib.sh's ops_backend; the
+memory pool is `memory-index --pool-for --cwd <dir> --ops <checkout>`, with the
+checkout the memory-digest hook passes ($OPS_DIR, else this one); the baton is
+key.sh's name under ${OPS_DIR:-~/OPS}/.claude-handoffs/pending, where
+hooks/handoff-check.sh looks; the lint is `verify-ops.sh --quiet` with OPS_DIR
+set to this checkout (the gate has no lint-only mode, and its summary line is
+the result). OPS ships no vault renderer, so that step is an explicit skip.
+
+Exit codes: 0 the requested mechanical steps completed; 1 an executed step or a
+required prerequisite failed, or the call was refused; 2 invalid arguments; 3
+GC still pending after the wait budget (failure wins over pending). A lint that
+ran to the gate's summary line and reported FAIL lines is the step status
+`findings`: it is printed, recorded in the receipt and named again by finish,
+but it does not fail the receipt or change the exit code, because whose FAIL it
+is stays the agent's judgment (lint_verdict says why). A lint that could not run
+or finish is `failed`.
+
+Test seam: SESSION_END_TEST_HOOK names an executable run as `<hook> <phase>
+<path>` at three points of the billing archive: archive-target (the archive
+directory about to be created), before-move (a stamp's destination, just before
+its rename) and archived (the stamp's live path, just after its rename), so the
+suite can collide a name, fail a rename or write a stamp at an exact moment. A failing
+hook fails the archive. SESSION_END_LOCK_WAIT (seconds, default 10) bounds the
+wait for a competing ending's lock, held through receipt retirement.
+"""
+
+import argparse
+import datetime
+import fcntl
+import glob
+import hashlib
+import json
+import math
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+SCRIPT = os.path.realpath(__file__)
+BIN = os.path.dirname(SCRIPT)
+ROOT = os.path.dirname(os.path.dirname(BIN))
+HOOKLIB = os.path.join(ROOT, ".claude-config", "hooks", "hooklib.sh")
+KEY_SH = os.path.join(ROOT, ".claude-handoffs", "key.sh")
+
+MODES = ("pause", "move", "close")
+# The pre-compact hook's numbers ("Branch and worktree GC" in hooks/pre-compact.sh):
+# a kill inside a quarantine strands a worktree, so the soft deadline sits at two
+# thirds of the hard timeout and the KILL waits 30 s after the TERM. The slowest
+# --apply on record took 787 s.
+GC_TIMEOUT = 900
+GC_KILL_AFTER = 30
+GIT_TIMEOUT = 20
+LANE_THREAD_PREFIXES = ("thread:delegated-task:", "thread:provider:")
+MAIN_ONLY = "session-end belongs to the main thread; return your result instead"
+CAP = 64 * 1024
+SCRATCH_ROOTS_FIXED = ("/tmp", "/var/tmp")
+RESUME_FIELDS = ("NEXT ACTION (one step)", "VERIFY FIRST", "DO NOT (with who said so)",
+                 "DEAD ENDS", "ASK THE OWNER")
+UNSUPPORTED = "unsupported provider: this version supports Claude sessions only"
+
+
+class Usage(Exception):
+    """Invalid arguments: exit 2."""
+
+
+# --- small helpers --------------------------------------------------------------
+
+def now_local():
+    return datetime.datetime.now().astimezone()
+
+
+def stamp_text(dt=None):
+    """The `date -Is` format last-closeout has always used."""
+    return (dt or now_local()).isoformat(timespec="seconds")
+
+
+def cap(text):
+    if text is None:
+        return ""
+    if len(text) <= CAP:
+        return text
+    return text[:CAP] + "\n(output cut at %d characters; %d more not shown)" % (CAP, len(text) - CAP)
+
+
+def as_text(v):
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    return v
+
+
+def run(cmd, timeout, cwd=None, env=None, merge=True):
+    """(rc, stdout, stderr). rc is None on timeout and -1 when the program could
+    not be started; the reason is then in stderr. With merge, stderr is folded
+    into stdout so a child's output is shown in order."""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT if merge else subprocess.PIPE,
+                           timeout=timeout, text=True, errors="replace", check=False)
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except subprocess.TimeoutExpired as e:
+        out = as_text(e.stdout)
+        err = as_text(e.stderr) + "timed out after %ss" % timeout
+        return (None, out + "\n" + err, "") if merge else (None, out, err)
+    except OSError as e:
+        err = "cannot run %s: %s" % (cmd[0], e.strerror or e)
+        return (-1, err, "") if merge else (-1, "", err)
+
+
+def git_env():
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        env.pop(k, None)
+    return env
+
+
+def git(d, *args, timeout=GIT_TIMEOUT):
+    """Read-only git at d: (rc, stdout, stderr), never merged."""
+    return run(["git", "-C", d] + list(args), timeout, env=git_env(), merge=False)
+
+
+def atomic_write(path, data, mode=0o600):
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(prefix=".%s." % os.path.basename(path), dir=d)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    fsync_dir(d)
+
+
+def fsync_dir(d):
+    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def read_json_strict(path):
+    """A regular file's JSON (no symlink); raises OSError or ValueError."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError("%s is not a regular file" % path)
+        return json.loads(f.read().decode("utf-8"))
+
+
+def mkdirs(path):
+    os.makedirs(path, mode=0o700, exist_ok=True)
+
+
+# --- where things are -----------------------------------------------------------
+
+def gate_script():
+    """(path, default state dir) of the gate beside this file, or Nones.
+    verify-ops.sh beside the command is what marks an OPS checkout; without it
+    there is no default state directory and no lint, and both say so."""
+    p = os.path.join(BIN, "verify-ops.sh")
+    if os.path.isfile(p):
+        return p, os.path.expanduser("~/.local/state/ops")
+    return None, None
+
+
+def state_dir():
+    # OPS_STATE_DIR first, as every OPS tool that reads this state resolves it.
+    v = os.environ.get("OPS_STATE_DIR")
+    if v:
+        return v
+    return gate_script()[1]
+
+
+def sibling(name):
+    p = os.path.join(BIN, name)
+    return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
+
+
+def stamp_dir():
+    # The writer (hooks/session-work-init.sh) uses $HOME/.claude-compact-cycle, no override.
+    return os.path.join(os.path.expanduser("~"), ".claude-compact-cycle")
+
+
+# --- the step record ------------------------------------------------------------
+
+class Report:
+    def __init__(self, mode, dry_run):
+        self.mode, self.dry_run = mode, dry_run
+        self.steps = []
+        self.remainder = []
+        self.identity = {}
+        self.receipt = None
+
+    def step(self, name, status, summary, output="", **extra):
+        rec = {"step": name, "status": status, "summary": summary, "output": output or ""}
+        rec.update(extra)
+        self.steps.append(rec)
+        return rec
+
+    def status(self):
+        if any(s["status"] == "failed" for s in self.steps):
+            return "failed", 1
+        if any(s["status"] == "pending" for s in self.steps):
+            return "pending", 3
+        return "completed", 0
+
+
+def print_report(rep, as_json, extra=None):
+    status, code = rep.status()
+    if as_json:
+        obj = {"command": "session-end", "mode": rep.mode, "dry_run": rep.dry_run,
+               "status": status, "exit": code, "identity": rep.identity,
+               "receipt": rep.receipt, "remainder": rep.remainder,
+               # --json keeps every child's full output; the trimmed human copy stays out.
+               "steps": [{k: v for k, v in s.items() if k != "human"} for s in rep.steps]}
+        if extra:
+            obj.update(extra)
+        sys.stdout.write(json.dumps(obj, indent=1, sort_keys=False) + "\n")
+        return code
+    idn = rep.identity
+    head = "session-end %s%s" % (rep.mode, " --dry-run (nothing written)" if rep.dry_run else "")
+    print(head)
+    print("  provider session: %s (%s)" % (idn.get("session_id") or "none", idn.get("provider") or "unknown"))
+    print("  T3 thread: %s" % (idn.get("t3_thread_id") or "none"))
+    for s in rep.steps:
+        print("[%s] %s: %s" % (s["status"], s["step"], s["summary"]))
+        out = cap(s.get("human", s.get("output")) or "").rstrip("\n")
+        if out:
+            for line in out.split("\n"):
+                print("    " + line)
+    if rep.remainder:
+        print("")
+        for line in rep.remainder:
+            print(line)
+    print("")
+    print("status: %s (exit %d)%s" % (status, code, ("; receipt " + rep.receipt) if rep.receipt else ""))
+    return code
+
+
+# --- identity -------------------------------------------------------------------
+
+def hook_identity(cwd):
+    """(key, backend, timeout program, error) from hooklib.sh, run from the
+    original cwd, so the key is the one the stamp writer computes."""
+    if not os.path.isfile(HOOKLIB):
+        return None, None, None, "hooklib.sh not found at %s" % HOOKLIB
+    # ops_backend is OPS's backend verdict (tmux, t3code or bare); a hooklib.sh
+    # without it or without work_session_key cannot give a key this file trusts.
+    script = ('. "$1" || exit 97\n'
+              'declare -F work_session_key ops_backend >/dev/null || exit 96\n'
+              'printf "%s\\n" "$(work_session_key)" "$(ops_backend)" "$(hook_timeout 2>/dev/null || true)"')
+    rc, out, err = run(["bash", "-c", script, "session-end-identity", HOOKLIB], 15, cwd=cwd, merge=False)
+    if rc == 96:
+        return None, None, None, "hooklib.sh at %s defines no work_session_key or ops_backend" % HOOKLIB
+    if rc != 0:
+        return None, None, None, "hooklib.sh failed (exit %s): %s" % (rc, (err or out).strip()[:300])
+    parts = out.split("\n")
+    key, backend, to = (parts + ["", "", ""])[:3]
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,200}", key or ""):
+        return None, backend or None, to or None, "work_session_key gave an unusable key %r" % key
+    return key, backend or None, to or None, None
+
+
+def sanitized_sid(sid):
+    return re.sub(r"[^A-Za-z0-9-]", "", sid or "")
+
+
+def identity(cwd):
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    codex = os.environ.get("CODEX_THREAD_ID", "").strip()
+    provider = "claude" if sid else ("codex" if codex else "unknown")
+    key, backend, to, err = hook_identity(cwd)
+    return {"provider": provider, "session_id": sid or codex or None,
+            "t3_thread_id": os.environ.get("T3CODE_THREAD_ID", "").strip() or None,
+            "key": key, "key_error": err, "backend": backend, "timeout_program": to,
+            "cwd": cwd}
+
+
+def billing_key_ok(idn):
+    """None when this thread's key is the per-thread key of the T3 session-id
+    branch of work_session_key, else why not. Positive check, fail closed: a
+    shared-cwd fallback key would clear another thread's unbilled-work flag."""
+    if idn["provider"] != "claude":
+        return UNSUPPORTED + "; billing stamps are not archived (archive them by hand per session-close mechanics.md)"
+    if not idn["key"]:
+        return "no stamp key: %s" % (idn["key_error"] or "unknown")
+    want = "t3-" + sanitized_sid(idn["session_id"])
+    if idn["backend"] == "t3code" and want != "t3-" and idn["key"] == want:
+        return None
+    if idn["backend"] == "tmux":  # ops_backend's one session-name backend
+        return ("the %s backend keys stamps by session name, which this version does not verify; "
+                "archive the stamps by hand per session-close mechanics.md" % idn["backend"])
+    return ("key %s is not this thread's own (the T3 session-id branch did not apply, so "
+            "work_session_key fell back to the shared cwd key); refusing to archive" % idn["key"])
+
+
+def lane_refusal():
+    """None for a main thread, else the reason this call is refused."""
+    tid = os.environ.get("T3CODE_THREAD_ID", "")
+    if tid.startswith(LANE_THREAD_PREFIXES):
+        return "%s (T3 thread %s is a delegated lane)" % (MAIN_ONLY, tid)
+    lc = sibling("lane-class")
+    if not lc:
+        return None
+    rc, out, err = run([lc, "--self"], 10, merge=False)
+    word = out.strip()
+    if rc == 0 and word == "foreman":
+        return None
+    if rc == 0 and word in ("t3-lane", "agent-lane"):
+        return "%s (lane-class --self: %s)" % (MAIN_ONLY, word)
+    return "lane-class --self gave no usable answer (exit %s, %r); refusing to write" % (rc, (out + err).strip()[:200])
+
+
+def lane_check_note():
+    if os.environ.get("T3CODE_THREAD_ID", "").startswith(LANE_THREAD_PREFIXES):
+        return "refused"
+    return "lane-class --self" if sibling("lane-class") else "lane-class not installed; T3 thread-id check only"
+
+
+# --- the transcript -------------------------------------------------------------
+
+def find_transcript(sid):
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", sid or ""):
+        return None, "the session id has unexpected characters; no transcript searched"
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    hits = sorted(glob.glob(os.path.join(glob.escape(cfg), "projects", "*", sid + ".jsonl")))
+    if not hits:
+        return None, "no transcript %s.jsonl under %s/projects" % (sid, cfg)
+    if len(hits) > 1:
+        return None, "ambiguous: %d transcripts named %s.jsonl (%s)" % (len(hits), sid, ", ".join(hits))
+    return hits[0], None
+
+
+def parse_ts(v):
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        d = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+
+
+def load_transcript(path, sid):
+    """(data, None) for a verified Claude transcript of this session, else
+    (None, why). Verified: a regular file (no symlink), every line JSON except
+    possibly a torn last one, at least one user or assistant record carrying
+    this session id, and no record carrying another."""
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        return None, "cannot read %s: %s" % (path, e.strerror)
+    if not stat.S_ISREG(st.st_mode):
+        return None, "%s is not a regular file" % path
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return None, "cannot read %s: %s" % (path, e.strerror)
+    lines = raw.split(b"\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    data = {"path": path, "uses": [], "results": {}, "first": None, "last": None, "lanes": 0}
+    own = 0
+    for i, line in enumerate(lines):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            if i == len(lines) - 1:
+                continue
+            return None, "unsupported format: line %d of %s is not JSON" % (i + 1, path)
+        if not isinstance(d, dict):
+            return None, "unsupported format: line %d of %s is not a JSON object" % (i + 1, path)
+        s = d.get("sessionId")
+        if s is not None and s != sid:
+            return None, "%s holds records of another session (%s); not this thread's evidence" % (path, s)
+        typ = d.get("type")
+        if s == sid and typ in ("user", "assistant"):
+            own += 1
+        ts = parse_ts(d.get("timestamp"))
+        if ts:
+            data["first"] = ts if data["first"] is None or ts < data["first"] else data["first"]
+            data["last"] = ts if data["last"] is None or ts > data["last"] else data["last"]
+        content = (d.get("message") or {}).get("content") if isinstance(d.get("message"), dict) else None
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if typ == "assistant" and c.get("type") == "tool_use":
+                inp = c.get("input") if isinstance(c.get("input"), dict) else {}
+                data["uses"].append({"id": c.get("id"), "name": c.get("name"), "input": inp,
+                                     "cwd": d.get("cwd")})
+                if c.get("name") in ("Agent", "Task"):
+                    data["lanes"] += 1
+            elif typ == "user" and c.get("type") == "tool_result":
+                t = c.get("content")
+                if isinstance(t, list):
+                    t = " ".join(x.get("text", "") for x in t if isinstance(x, dict))
+                data["results"][c.get("tool_use_id")] = {"error": bool(c.get("is_error")),
+                                                         "text": t if isinstance(t, str) else ""}
+    if not own:
+        return None, "unsupported format: no user or assistant record of session %s in %s" % (sid, path)
+    return data, None
+
+
+def named_paths(tx, cwd=None):
+    """Paths under $HOME named by this thread's tool calls (the candidate logic of
+    session-close mechanics.md). Transcript text is data: nothing is executed."""
+    home = os.path.expanduser("~")
+    pat = re.compile(re.escape(home) + r"/[\w.@+-]+(?:/[\w.@+-]+)*")
+    out = set()
+    for u in tx["uses"]:
+        inp = u["input"]
+        base = u.get("cwd") or cwd
+        for k in ("file_path", "path", "notebook_path"):
+            v = inp.get(k)
+            if isinstance(v, str):
+                p = expand(v, base)
+                if p:
+                    out.add(p)
+        cmd = inp.get("command")
+        if isinstance(cmd, str):
+            for words in simple_commands(cmd):
+                for w in words:
+                    if literal(w) and w.startswith(("./", "../", ".claude-config/", "SKILLS/")):
+                        p = expand(w, base)
+                        if p:
+                            out.add(p)
+        for v in (inp.get("file_path"), inp.get("path"), inp.get("notebook_path"), inp.get("command")):
+            if isinstance(v, str):
+                v = re.sub(r"(^|[\s\"'=:(])~/", lambda m: m.group(1) + home + "/", v)
+                v = v.replace("$HOME/", home + "/").replace("${HOME}/", home + "/")
+                out.update(pat.findall(v))
+    return out
+
+
+# --- repos ----------------------------------------------------------------------
+
+def toplevel(path):
+    """(toplevel realpath, None) or (None, why)."""
+    d = path if os.path.isdir(path) else os.path.dirname(path)
+    rc, out, err = git(d, "rev-parse", "--show-toplevel")
+    if rc != 0 or not out.strip():
+        return None, (err or "not in a git work tree").strip()[:200] if rc is not None else "git timed out"
+    return os.path.realpath(out.strip()), None
+
+
+def main_checkout(top):
+    """(main worktree realpath, None) or (None, why): the first entry of
+    `git worktree list --porcelain -z`, as the pre-compact hook reads it."""
+    rc, out, err = git(top, "worktree", "list", "--porcelain", "-z")
+    if rc != 0:
+        return None, "cannot list worktrees: %s" % (err.strip()[:200] if rc is not None else "git timed out")
+    first = out.split("\0", 1)[0]
+    if not first.startswith("worktree "):
+        return None, "cannot resolve the main worktree"
+    return os.path.realpath(first[len("worktree "):]), None
+
+
+def worktrees(top):
+    rc, out, err = git(top, "worktree", "list", "--porcelain", "-z")
+    if rc != 0:
+        return None
+    res, cur = [], {}
+    for field in out.split("\0"):
+        if not field:
+            if cur:
+                res.append(cur)
+            cur = {}
+            continue
+        k, _, v = field.partition(" ")
+        cur[k] = v if v else True
+    if cur:
+        res.append(cur)
+    return res
+
+
+def harness_main():
+    top, _ = toplevel(ROOT)
+    if not top:
+        return os.path.realpath(ROOT)
+    m, _ = main_checkout(top)
+    return m or top
+
+
+def harness_home():
+    """Where the box's batons live: $OPS_DIR, else ~/OPS, the directory the
+    SessionStart notifier (hooks/handoff-check.sh) reads, so a run from a
+    linked worktree or another clone names the baton that notifier finds."""
+    return os.environ.get("OPS_DIR") or os.path.join(os.path.expanduser("~"), "OPS")
+
+
+def managed(main):
+    """branch-gc's managed set, exactly as hooks/pre-compact.sh checks it before
+    it starts branch-gc --apply: ~/OPS, ~/linuxploitacious and
+    ~/OPS/PROJECTS/<org>/<repo>, the main checkout by realpath under the
+    realpath of the CURRENT $HOME. So a fixture HOME never reaches a real repo,
+    and the set is no wider than that hook's: a clone of OPS under another name,
+    or the checkout this file runs from when it is not ~/OPS, is not in it."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    ops = os.path.join(home, "OPS")
+    if main in (ops, os.path.join(home, "linuxploitacious")):
+        return True
+    proj = os.path.join(ops, "PROJECTS") + os.sep
+    if main.startswith(proj):
+        parts = main[len(proj):].split(os.sep)
+        return len(parts) == 2 and all(parts)
+    return False
+
+
+def github_origin(main):
+    """None when main has exactly one github.com origin, else why not."""
+    rc, out, err = git(main, "config", "--get-all", "remote.origin.url")
+    urls = [u for u in out.split("\n") if u.strip()] if rc == 0 else []
+    if len(urls) != 1:
+        return "no github.com origin (or multiple origins)"
+    url = urls[0].strip()
+    path = ""
+    for pre in ("git@github.com:", "ssh://git@github.com/", "https://github.com/"):
+        if url.startswith(pre):
+            path = url[len(pre):]
+            break
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
+        return "no github.com origin (or multiple origins)"
+    return None
+
+
+def snapshot(top, main, printed_mains, invoking=None, named=()):
+    """Read-only lines for one checkout, and whether a git call failed outright.
+    printed_mains collects the main checkouts whose worktree list is already out."""
+    lines, broken = [], False
+
+    def g(*a):
+        nonlocal broken
+        rc, out, err = git(top, *a)
+        if rc is None:
+            broken = True
+        return rc, out
+    rc, out = g("symbolic-ref", "--quiet", "--short", "HEAD")
+    if rc == 0:
+        branch = out.strip()
+    else:
+        rc2, out2 = g("rev-parse", "--short", "HEAD")
+        branch = ("detached at " + out2.strip()) if rc2 == 0 else "unknown"
+    rc, up = g("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    if rc == 0 and up.strip():
+        rc2, ab = g("rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+        m = re.fullmatch(r"\s*(\d+)\s+(\d+)\s*", ab) if rc2 == 0 else None
+        track = ("upstream %s, ahead %s, behind %s" % (up.strip(), m.group(1), m.group(2))) if m \
+            else "upstream %s, ahead/behind unknown" % up.strip()
+    else:
+        track = "no upstream (ahead/behind unknown)"
+    rc, st = g("status", "--short")
+    if rc == 0:
+        dirty = [l for l in st.split("\n") if l.strip()]
+        state = "clean" if not dirty else "%d changed or untracked" % len(dirty)
+    else:
+        dirty, state = [], "status unknown"
+    label = top if top == main else "%s (linked worktree of %s)" % (top, main)
+    lines.append("%s: branch %s; %s; %s" % (label, branch, track, state))
+    lines.extend("  " + l for l in dirty[:30])
+    if len(dirty) > 30:
+        lines.append("  ... %d more" % (len(dirty) - 30))
+    if top != main:
+        rc, mb = g("-C", main, "symbolic-ref", "--quiet", "--short", "HEAD")
+        lines.append("main checkout %s: branch %s" % (main, mb.strip() if rc == 0 else "unknown"))
+    rc, dref = g("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if rc == 0 and dref.strip().startswith("origin/"):
+        default = dref.strip()[len("origin/"):]
+        rc, mb = g("-C", main, "symbolic-ref", "--quiet", "--short", "HEAD")
+        off = "unknown" if rc != 0 else ("no" if mb.strip() == default else "yes, on %s" % mb.strip())
+        lines.append("main checkout off its default branch (%s): %s" % (default, off))
+    else:
+        lines.append("default branch unknown (no origin/HEAD); main checkout off default: unknown")
+    if top != main or main in printed_mains:
+        lines.append("worktrees: see main checkout %s" % main)
+    else:
+        printed_mains.add(main)
+        lines.extend(worktree_block(main, invoking, named))
+    return lines, broken
+
+
+def worktree_block(main, invoking, named):
+    """A main checkout's worktree list, printed once per main checkout and capped
+    to the invoking worktree and the ones this thread's tool calls named: one
+    main can hold dozens, and every checkout sharing it used to repeat them (a
+    real dry run printed 33 lines three times, 2026-11-17)."""
+    lines = []
+    wts = worktrees(main)
+    if wts is None:
+        return ["worktrees of main checkout %s: unknown" % main]
+    shown = 0
+    lines.append("worktrees of main checkout %s: %d" % (main, len(wts)))
+    for w in wts:
+        path = os.path.normpath(str(w.get("worktree", "")))
+        wanted = path == invoking or (path != main and any(under(n, path) for n in named))
+        if not wanted:
+            continue
+        shown += 1
+        b = w.get("branch", "")
+        b = b[len("refs/heads/"):] if isinstance(b, str) and b.startswith("refs/heads/") else ("detached" if w.get("detached") else str(b))
+        lines.append("  worktree %s [%s]%s%s" % (path, b, " locked" if w.get("locked") else "",
+                                                 " (this call's cwd)" if path == invoking else ""))
+    if len(wts) > shown:
+        lines.append("  ... and %d more (git -C %s worktree list)" % (len(wts) - shown, main))
+    return lines
+
+
+# --- creation evidence for close ------------------------------------------------
+
+def scratch_roots():
+    roots = set(SCRATCH_ROOTS_FIXED)
+    t = os.environ.get("TMPDIR")
+    if t:
+        roots.add(os.path.normpath(t))
+    return roots
+
+
+def under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def simple_commands(cmd):
+    """Literal simple commands of one Bash call, or [] for text shlex cannot read."""
+    out = []
+    for line in cmd.split("\n"):
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lex.whitespace_split = True
+            toks = list(lex)
+        except ValueError:
+            continue
+        cur = []
+        for t in toks:
+            if t and set(t) <= set(";&|()<>"):
+                if cur:
+                    out.append(cur)
+                cur = []
+            else:
+                cur.append(t)
+        if cur:
+            out.append(cur)
+    return out
+
+
+def all_commands_succeeded(cmd):
+    """A zero Bash exit proves each command succeeded only for a single command
+    or a literal && chain. A semicolon, pipeline, fallback or another line can
+    hide a failed mkdir/docker call on somebody else's existing object."""
+    if len([line for line in cmd.splitlines() if line.strip()]) != 1:
+        return False
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return all(t == "&&" or not (t and set(t) <= set(";&|()<>")) for t in lex)
+    except ValueError:
+        return False
+
+
+def literal(tok):
+    return not any(ch in tok for ch in "$`*?[{")
+
+
+def expand(tok, base=None):
+    home = os.path.expanduser("~")
+    if tok.startswith("~/"):
+        tok = home + tok[1:]
+    if not tok.startswith("/"):
+        if base and base.startswith("/"):
+            return os.path.normpath(os.path.join(base, tok))
+        return None
+    return os.path.normpath(tok)
+
+
+def creations(tx):
+    """Objects this thread's successful calls created: (kind, name, owned, how)."""
+    found = []
+    for u in tx["uses"]:
+        res = tx["results"].get(u["id"])
+        if res is None or res["error"]:
+            continue
+        inp = u["input"]
+        if u["name"] == "Write" and isinstance(inp.get("file_path"), str):
+            p = expand(inp["file_path"])
+            if p:
+                owned = res["text"].startswith("File created successfully")
+                found.append(("file", p, owned, "Write" if owned else "Write over an existing file"))
+            continue
+        if u["name"] != "Bash" or not isinstance(inp.get("command"), str):
+            continue
+        first = len(found)
+        for words in simple_commands(inp["command"]):
+            while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+                words = words[1:]
+            while words and words[0] in ("command", "sudo", "exec", "nohup"):
+                words = words[1:]
+            if not words:
+                continue
+            prog = os.path.basename(words[0])
+            if prog == "mkdir":
+                opts = [w for w in words[1:] if w.startswith("-")]
+                parents = any(o == "--parents" or (not o.startswith("--") and "p" in o) for o in opts)
+                for w in words[1:]:
+                    if w.startswith("-") or not literal(w):
+                        continue
+                    p = expand(w)
+                    if p:
+                        found.append(("dir", p, not parents,
+                                      "mkdir -p (succeeds on an existing directory)" if parents else "mkdir"))
+            elif prog == "git":
+                base, rest = None, words[1:]
+                while rest and rest[0] in ("-C", "-c"):
+                    if rest[0] == "-C" and len(rest) > 1:
+                        base = expand(rest[1])
+                    rest = rest[2:]
+                if rest[:2] != ["worktree", "add"]:
+                    continue
+                args, skip = [], False
+                for w in rest[2:]:
+                    if skip:
+                        skip = False
+                        continue
+                    if w in ("-b", "-B", "--reason"):
+                        skip = True
+                        continue
+                    if w.startswith("-"):
+                        continue
+                    args.append(w)
+                if args and literal(args[0]):
+                    p = expand(args[0], base)
+                    if p:
+                        found.append(("worktree", p, True, "git worktree add"))
+            elif prog == "docker":
+                rest = words[1:]
+                if rest[:1] in (["container"], ["image"], ["buildx"]):
+                    rest = rest[1:]
+                sub = rest[0] if rest else ""
+                if sub in ("run", "create"):
+                    for i, w in enumerate(rest):
+                        name = rest[i + 1] if w == "--name" and i + 1 < len(rest) else (w[7:] if w.startswith("--name=") else None)
+                        if name and literal(name):
+                            found.append(("container", name, True, "docker %s --name" % sub))
+                elif sub == "build":
+                    for i, w in enumerate(rest):
+                        tag = rest[i + 1] if w in ("-t", "--tag") and i + 1 < len(rest) else (w[6:] if w.startswith("--tag=") else None)
+                        if tag and literal(tag):
+                            found.append(("image", tag, False, "docker build -t (may reuse an existing tag or cached image)"))
+                elif sub in ("network", "volume") and len(rest) > 2 and rest[1] == "create":
+                    names = [w for w in rest[2:] if not w.startswith("-")]
+                    if names and literal(names[-1]):
+                        # docker volume create succeeds on an existing volume.
+                        found.append((sub, names[-1], sub == "network", "docker %s create" % sub))
+        if not all_commands_succeeded(inp["command"]):
+            for i in range(first, len(found)):
+                kind, name, _own, how = found[i]
+                found[i] = (kind, name, False, how + "; this command's success is unknown in the compound shell call")
+    seen, uniq = set(), []
+    for f in found:
+        if (f[0], f[1]) not in seen:
+            seen.add((f[0], f[1]))
+            uniq.append(f)
+    return uniq
+
+
+def docker_present(kind, name):
+    rc, out, err = run(["docker", "inspect", "--type", kind, name], 15)
+    if rc == 0:
+        return "present"
+    if rc not in (None, -1) and re.search(r"no such", out, re.I):
+        return "absent"
+    return "unknown (%s)" % ("docker not available" if rc == -1 else "docker did not answer: exit %s" % rc)
+
+
+# --- memory ---------------------------------------------------------------------
+
+def entry_modified(path):
+    """metadata.modified of a pool entry's frontmatter, as text, or None."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.read(16384)
+    except OSError:
+        return None
+    if not head.startswith("---"):
+        return None
+    block = head.split("\n---", 1)[0]
+    in_meta = False
+    for line in block.split("\n")[1:]:
+        if re.match(r"^metadata:\s*$", line):
+            in_meta = True
+            continue
+        if in_meta and re.match(r"^\S", line):
+            in_meta = False
+        m = re.match(r"^\s+modified:\s*(.+?)\s*$", line) if in_meta else None
+        if m:
+            return m.group(1).strip("'\"")
+    return None
+
+
+def entries_in_window(pool, start):
+    rows = []
+    try:
+        names = sorted(os.listdir(pool))
+    except OSError as e:
+        return None, "cannot list %s: %s" % (pool, e.strerror)
+    for n in names:
+        if not n.endswith(".md") or n == "MEMORY.md":
+            continue
+        p = os.path.join(pool, n)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        why = []
+        mod = entry_modified(p)
+        md = parse_ts(mod) if mod and "T" in mod else None
+        if md and md >= start:
+            why.append("metadata.modified %s" % mod)
+        elif mod and re.fullmatch(r"\d{4}-\d{2}-\d{2}", mod) and mod >= start.astimezone().date().isoformat() \
+                and mod <= now_local().date().isoformat():
+            why.append("metadata.modified %s" % mod)
+        if st.st_mtime >= start.timestamp():
+            why.append("file time %s" % datetime.datetime.fromtimestamp(st.st_mtime).astimezone().isoformat(timespec="seconds"))
+        if why:
+            rows.append("  - %s (%s)" % (n, "; ".join(why)))
+    return rows, None
+
+
+# --- the GC worker --------------------------------------------------------------
+
+def gc_root(state):
+    return os.path.join(state, "session-end", "gc")
+
+
+def lock_held(path):
+    """True while a worker holds the run's lock."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def read_result(run_dir):
+    p = os.path.join(run_dir, "result.json")
+    if not os.path.lexists(p):
+        return None
+    return read_json_strict(p)
+
+
+def pre_gc_record(repo):
+    rc, heads, _ = git(repo, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads", timeout=60)
+    branches = {}
+    if rc == 0:
+        for line in heads.split("\n"):
+            if " " in line:
+                b, oid = line.rsplit(" ", 1)
+                branches[b] = oid
+    wts = worktrees(repo) or []
+    return {"branches": branches if rc == 0 else None,
+            "worktrees": [w.get("worktree") for w in wts]}
+
+
+def parse_rows(out):
+    rows, on = [], False
+    for line in out.split("\n"):
+        if line.startswith("REPO\tBRANCH\tWORKTREE\tPR\tACTION\tREASON"):
+            on = True
+            continue
+        if on:
+            if not line.strip():
+                break
+            f = line.split("\t")
+            if len(f) == 6:
+                rows.append(f)
+    return rows
+
+
+def gc_worker(run_dir, lock_fd):
+    """The detached worker: branch-gc --apply on each planned repo in turn."""
+    del lock_fd  # held open until exit: the lock lives as long as this process
+    plan = read_json_strict(os.path.join(run_dir, "plan.json"))
+    log_path = os.path.join(run_dir, "run.log")
+    results = []
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write("worker started %s pid %d\n" % (stamp_text(), os.getpid()))
+        log.flush()
+        for repo in plan["repos"]:
+            pre = pre_gc_record(repo)
+            log.write("pre-GC %s: branches %s; worktrees %s\n" % (repo, json.dumps(pre["branches"]), json.dumps(pre["worktrees"])))
+            deadline = int(time.time()) + plan["timeout"] * 2 // 3
+            cmd = [plan["timeout_program"], "-k", str(plan["kill_after"]), str(plan["timeout"]),
+                   plan["branch_gc"], "--apply", "--tsv", repo]
+            env = dict(os.environ, BRANCH_GC_TRASH_DAYS="0", BRANCH_GC_DEADLINE=str(deadline))
+            log.write("run %s (BRANCH_GC_TRASH_DAYS=0 BRANCH_GC_DEADLINE=%d)\n" % (" ".join(cmd), deadline))
+            log.flush()
+            # GNU timeout bounds the call; this backstop only catches a timeout program that hangs.
+            rc, out, _ = run(cmd, plan["timeout"] + plan["kill_after"] + 60, env=env)
+            log.write(out + ("" if out.endswith("\n") else "\n"))
+            if rc is None or rc in (124, 137):
+                status = "timeout"
+            elif rc == 0:
+                status = "completed"
+            else:
+                status = "failed"
+            m = re.search(r"^Summary.*\n\s*(\S.*)$", out, re.M)
+            results.append({"repo": repo, "rc": rc, "status": status,
+                            "summary": m.group(1).strip() if m else "no summary",
+                            "rows": parse_rows(out), "pre": pre,
+                            "tail": "\n".join(out.rstrip("\n").split("\n")[-40:]), "output": out})
+            log.write("exit %s (%s)\n" % (rc, status))
+            log.flush()
+        overall = "completed" if all(r["status"] == "completed" for r in results) else "failed"
+        atomic_write(os.path.join(run_dir, "result.json"),
+                     json.dumps({"run": os.path.basename(run_dir), "finished_at": stamp_text(),
+                                 "status": overall, "repos": results}, indent=1))
+        log.write("worker finished %s: %s\n" % (stamp_text(), overall))
+    return 0
+
+
+GC_TABLE_HEAD = "REPO\tBRANCH\tWORKTREE\tPR\tACTION\tREASON"
+
+
+def trim_gc(out, named_row, full_ref):
+    """branch-gc --tsv output cut for a reader under context pressure (a real dry
+    run printed 76 report rows, 2026-11-17): the lines before the table (its
+    header line), every row whose ACTION is not `report`, report rows for a
+    branch or worktree this thread named, and everything after the table (the
+    Summary block and any error lines), then a count of the rows left out.
+    Output that is not the documented six-column TSV is returned whole, never
+    guessed at."""
+    lines = out.rstrip("\n").split("\n")
+    try:
+        h = lines.index(GC_TABLE_HEAD)
+    except ValueError:
+        return out
+    end = h + 1
+    while end < len(lines) and lines[end].strip():
+        end += 1
+    rows = [l.split("\t") for l in lines[h + 1:end]]
+    if any(len(r) != 6 for r in rows):
+        return out
+    kept, hidden = [], 0
+    for r in rows:
+        if r[4] != "report" or named_row(r[1], r[2]):
+            kept.append("\t".join(r))
+        else:
+            hidden += 1
+    res = lines[:h] + ([GC_TABLE_HEAD] + kept if kept else []) + lines[end:]
+    if hidden:
+        res.append("%d report-only rows not shown; %s" % (hidden, full_ref))
+    return "\n".join(res)
+
+
+def row_namer(tx, named_norm):
+    """named_row(branch, worktree): True when this thread's tool calls named the
+    worktree's path or the branch (as a whole word in a tool input)."""
+    texts = []
+    for u in (tx or {}).get("uses", []):
+        texts.extend(v for v in u["input"].values() if isinstance(v, str))
+    blob = "\n".join(texts)
+
+    def named_row(branch, wt):
+        if wt and wt != "-":
+            p = os.path.normpath(os.path.expanduser(wt))
+            if any(under(n, p) for n in named_norm):
+                return True
+        if branch and branch != "-" and blob:
+            return re.search(r"(?<![\w./-])%s(?![\w./-])" % re.escape(branch), blob) is not None
+        return False
+    return named_row
+
+
+def describe_result(res, run_dir, named_row=None):
+    """Lines for a finished GC run. With named_row, branch-gc's output is trimmed
+    for the human receipt (trim_gc); without it, the full output (for --json)."""
+    lines = []
+    for r in res["repos"]:
+        lines.append("%s: exit %s (%s); %s" % (r["repo"], r["rc"], r["status"], r["summary"]))
+        out = r.get("output")
+        if out is None:
+            if r["status"] != "completed":
+                lines.append("  its output (last 40 lines; all of it in %s/run.log):" % run_dir)
+                lines.extend("    " + l for l in (r.get("tail") or "(none)").split("\n"))
+        else:
+            if named_row:
+                out = trim_gc(out, named_row, "full output: %s/run.log" % run_dir)
+            lines.extend("  " + l for l in out.rstrip("\n").split("\n"))
+        tips = (r.get("pre") or {}).get("branches") or {}
+        for row in r.get("rows", []):
+            _repo, branch, wt, pr, action, reason = row
+            if action == "quarantined":
+                m = re.search(r"worktree moved to (\S+)", reason)
+                if m:
+                    entry = m.group(1).rstrip(";,")
+                    if entry.startswith("~/"):
+                        entry = os.path.expanduser("~") + entry[1:]
+                    lines.append("    restore: branch-gc --restore %s" % entry)
+            if action in ("quarantined", "removed") and branch not in ("-", "") and not branch.startswith("origin/"):
+                tip = tips.get(branch)
+                lines.append("    recreate the branch: git -C %s branch %s %s" % (r["repo"], branch, tip) if tip
+                             else "    tip of %s not recorded; see %s/run.log" % (branch, run_dir))
+    return lines
+
+
+def launch_worker(state, idn, repos, timeout_prog, bgc):
+    """(run_dir, reused, error)."""
+    root = gc_root(state)
+    mkdirs(root)
+    pointer = os.path.join(root, "%s.current" % idn["key"])
+    who = {"key": idn["key"], "session_id": idn["session_id"], "t3_thread_id": idn["t3_thread_id"]}
+    if os.path.lexists(pointer):
+        try:
+            cur = read_json_strict(pointer)
+        except (OSError, ValueError) as e:
+            return None, False, "cannot read the GC run pointer %s: %s" % (pointer, e)
+        rd = cur.get("run_dir", "")
+        if rd and os.path.dirname(rd) == root and not os.path.lexists(os.path.join(rd, "result.json")) \
+                and lock_held(os.path.join(rd, "worker.lock")):
+            if cur.get("who") == who and cur.get("repos") == repos:
+                return rd, True, None
+            return None, False, ("a pending GC run of this thread (%s) covers another repo selection; "
+                                 "not starting a conflicting copy (branch-gc holds one global lock); "
+                                 "run again once it has finished" % rd)
+    run_id = "%s-%s-%s" % (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), idn["key"][:40], os.urandom(4).hex())
+    rd = os.path.join(root, run_id)
+    os.mkdir(rd, 0o700)
+    atomic_write(os.path.join(rd, "plan.json"), json.dumps({
+        "repos": repos, "who": who, "timeout": GC_TIMEOUT, "kill_after": GC_KILL_AFTER,
+        "timeout_program": timeout_prog, "branch_gc": bgc, "created": stamp_text()}, indent=1))
+    lock_path = os.path.join(rd, "worker.lock")
+    lfd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lfd, fcntl.LOCK_EX)
+        log = open(os.path.join(rd, "run.log"), "ab")
+        try:
+            # The child inherits the locked descriptor, so the lock is held from
+            # before it starts until it exits: no window in which a second call
+            # could mistake a starting worker for a dead one.
+            subprocess.Popen([sys.executable, SCRIPT, "_gc-worker", rd, str(lfd)],
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                             pass_fds=(lfd,), start_new_session=True, cwd="/")
+        finally:
+            log.close()
+    finally:
+        os.close(lfd)
+    atomic_write(pointer, json.dumps({"run_dir": rd, "who": who, "repos": repos}, indent=1))
+    return rd, False, None
+
+
+# --- the main run ---------------------------------------------------------------
+
+def statvfs_free():
+    try:
+        s = os.statvfs("/")
+        return s.f_bavail * s.f_frsize
+    except OSError:
+        return None
+
+
+def fmt_bytes(n):
+    return "%.2f GiB" % (n / 1024 ** 3)
+
+
+# The gate's own last line, printed by verify-ops.sh's main after every check:
+# "verify-ops: 59 ok · 3 warn · 3 fail (<date -Is>)".
+GATE_SUMMARY = re.compile(r"^verify-ops: (\d+) ok · (\d+) warn · (\d+) fail \(")
+
+
+def lint_verdict(cmd, rc, out):
+    """The lint step's record. A lint that ran to its summary and reported FAIL
+    lines is `findings`, not `failed`: on a shared box the gate almost always
+    carries FAILs owned by other sessions, and whose a FAIL is stays the agent's
+    judgment (settled after the first real run made every receipt fail on other
+    work's FAILs; a closing agent already lists other sessions' FAILs in one
+    line). A lint that could not run or did
+    not finish (a start error, a timeout, an exit other than 0 or 1, or exit 1
+    without the summary line, where an empty or broken read must not pass for a
+    result) stays `failed` and fails the receipt."""
+    lines = out.split("\n")
+    fails = [l for l in lines if l.startswith("FAIL")]
+    summary = [m for m in (GATE_SUMMARY.match(l) for l in lines) if m]
+    head = "%s exited %s" % (cmd, rc)
+    if rc == 0 and summary and int(summary[-1].group(3)) == 0 and not fails:
+        return dict(name="lint", status="completed", summary="%s; %d FAIL line(s)" % (head, len(fails)),
+                    output="\n".join(fails) if fails else out[-4000:])
+    if rc == 1 and summary and int(summary[-1].group(3)) > 0 and fails:
+        return dict(name="lint", status="findings",
+                    summary="%s with %s FAIL(s) in its summary; FAIL ownership is yours to judge, not a failed run"
+                    % (head, summary[-1].group(3)),
+                    output="\n".join(fails), fail_lines=fails)
+    if rc is None:
+        why = "it did not finish"
+    elif rc == -1:
+        why = "it could not start"
+    elif rc == 0:
+        # Exit zero alone cannot prove the gate reached its final summary:
+        # an empty/truncated helper must not turn a failed check into a receipt.
+        why = "exit 0 without a clean gate summary or with contradictory FAIL lines, so no clean result could be read"
+    elif rc != 1:
+        why = "exit %s is neither a clean run nor findings" % rc
+    else:
+        why = "exit 1 without the gate's summary line and FAIL lines, so no result could be read"
+    return dict(name="lint", status="failed", summary="%s; %s" % (head, why), output=out[-4000:])
+
+
+def cmd_end(args, idn):
+    mode, dry = args.mode, args.dry_run
+    rep = Report(mode, dry)
+    cwd = idn["cwd"]
+    rep.identity = {k: idn[k] for k in ("provider", "session_id", "t3_thread_id", "key", "backend", "cwd")}
+
+    rep.step("lane check", "completed", lane_check_note() if not dry else "dry run: open to lanes, writes nothing")
+
+    # Explicit repos first: a typo is an invalid argument, refused before anything runs.
+    explicit = []
+    for r in args.repo:
+        p = os.path.abspath(os.path.expanduser(r))
+        if not os.path.isdir(p):
+            raise Usage("--repo %s: not a directory" % r)
+        top, why = toplevel(p)
+        if not top:
+            raise Usage("--repo %s: not in a git work tree (%s)" % (r, why))
+        explicit.append(top)
+
+    # 1. Identity and the transcript.
+    tx, tx_why = None, None
+    if idn["provider"] != "claude":
+        tx_why = UNSUPPORTED + "; no transcript, time or stamp step (explicit --repo values still run)"
+    else:
+        path = args.transcript
+        if path:
+            path = os.path.abspath(os.path.expanduser(path))
+        else:
+            path, tx_why = find_transcript(idn["session_id"])
+        if path:
+            tx, tx_why = load_transcript(path, idn["session_id"])
+    if tx:
+        rep.step("transcript", "completed", "verified: %s (window from %s)" % (tx["path"], tx["first"].isoformat() if tx["first"] else "unknown"))
+    else:
+        rep.step("transcript", "skipped", "not verified: %s. No inferred repos, no time figure, no memory window." % tx_why)
+    if idn["key_error"]:
+        rep.step("stamp key", "failed" if not dry else "skipped", idn["key_error"])
+
+    # 2. Repo selection.
+    hmain = harness_main()
+    current = None
+    if tx:
+        current, _ = toplevel(cwd)
+    selected = []
+    for top in ([current] if current else []) + explicit:
+        if top not in selected:
+            selected.append(top)
+    candidates = []
+    harness_named = []
+    named = set()
+    if tx:
+        named = named_paths(tx, cwd)
+        roots_seen = {}
+        main_roots = {}
+        home = os.path.expanduser("~")
+        for p in sorted(named):
+            d = p if os.path.isdir(p) else os.path.dirname(p)
+            while d and d != home and not os.path.isdir(d):
+                d = os.path.dirname(d)
+            if not d or d == home:
+                continue
+            if d not in roots_seen:
+                roots_seen[d], _ = toplevel(d)
+            top = roots_seen[d]
+            if top:
+                if top not in main_roots:
+                    main_roots[top], _ = main_checkout(top)
+                # The executable can live in the main checkout while the thread
+                # edits any linked worktree of it. Compare repo identity first.
+                if main_roots[top] == hmain:
+                    rel = os.path.relpath(p, top)
+                    if any(under(rel, root) for root in (".claude-config", "SKILLS")):
+                        harness_named.append(p)
+        for top in sorted({t for t in roots_seen.values() if t}):
+            if top not in selected:
+                candidates.append(top)
+    mains, sel_lines = {}, []
+    for top in selected:
+        m, why = main_checkout(top)
+        if not m:
+            sel_lines.append("%s: %s" % (top, why))
+            continue
+        mains.setdefault(m, []).append(top)
+    for m, tops in mains.items():
+        extra = [t for t in tops if t != m]
+        sel_lines.append("%s%s" % (m, (" (from worktree %s)" % ", ".join(extra)) if extra else ""))
+    if candidates:
+        sel_lines.append("candidates this thread's tool calls named (read-only; pass --repo for any of these you changed):")
+        sel_lines.extend("  " + c for c in candidates)
+    rep.step("repos", "completed",
+             "%d selected for GC (%s)" % (len(mains), "current repo plus --repo" if tx else "explicit --repo only"),
+             "\n".join(sel_lines))
+
+    # 3. Git snapshots, read-only.
+    snap_lines, snap_broken, printed_mains = [], False, set()
+    invoking, _ = toplevel(cwd)
+    named_norm = {os.path.normpath(p) for p in named}
+    named_row = row_namer(tx, named_norm)
+    seen_mains = []
+    for top in selected + candidates:
+        m, why = main_checkout(top)
+        lines, broken = snapshot(top, m or top, printed_mains, invoking, named_norm)
+        snap_lines.extend(lines)
+        snap_broken = snap_broken or broken
+        if (m or top) not in seen_mains:
+            seen_mains.append(m or top)
+    for m in seen_mains:
+        if m not in printed_mains:  # reached only through its linked worktrees
+            printed_mains.add(m)
+            snap_lines.extend(worktree_block(m, invoking, named_norm))
+    rep.step("git snapshot", "failed" if snap_broken else "completed",
+             "%d checkout(s), read-only%s" % (len(selected) + len(candidates), "; a git call timed out" if snap_broken else ""),
+             "\n".join(snap_lines))
+
+    # 8 (before). Disk.
+    free_before = statvfs_free()
+
+    # 4. GC.
+    state = state_dir()
+    gc_rec, gc_run, gc_deadline, gc_eligible = None, None, None, []
+    bgc = sibling("branch-gc")
+    boundary = ("GC works on the whole selected repo, including other threads' eligible idle work; "
+                "branch-gc's process and T3 checks hold live worktrees; its worker can outlive this call.")
+    if not mains:
+        gc_rec = rep.step("branch-gc", "skipped", "no repo selected for GC" + ("" if tx else " (no verified transcript and no --repo)"))
+    elif not bgc:
+        gc_rec = rep.step("branch-gc", "failed", "branch-gc not found beside session-end (%s); repo cleanup not run" % BIN)
+    else:
+        notes = []
+        for m in mains:
+            if not managed(m):
+                notes.append("not run: %s is not a repo branch-gc manages" % m)
+                continue
+            why = github_origin(m)
+            if why:
+                notes.append("not run: %s has %s" % (m, why))
+                continue
+            gc_eligible.append(m)
+        # Sorted: the selection is a set, so the same repos in another --repo order
+        # reuse a pending worker instead of meeting it as a conflicting copy.
+        gc_eligible.sort()
+        if not gc_eligible:
+            gc_rec = rep.step("branch-gc", "skipped", "no selected repo qualifies", "\n".join(notes))
+        elif dry:
+            out_lines, hum_lines = list(notes), list(notes)
+            budget_end = time.monotonic() + args.wait
+            with tempfile.TemporaryDirectory(prefix="session-end-dry-") as scratch:
+                env = dict(os.environ, BRANCH_GC_LOG=os.path.join(scratch, "branch-gc.log"), BRANCH_GC_TRASH_DAYS="0")
+                failed = False
+                for m in gc_eligible:
+                    left = budget_end - time.monotonic()
+                    if left <= 0:
+                        out_lines.append("not evaluated: %s (the --wait budget is spent)" % m)
+                        hum_lines.append(out_lines[-1])
+                        continue
+                    # TERM first through the hooks' timeout program, so branch-gc's
+                    # trap removes its own temp files; the Python bound is a backstop.
+                    cmd = [bgc, "--dry-run", "--tsv", m]
+                    if idn["timeout_program"]:
+                        cmd = [idn["timeout_program"], "-k", "5", str(max(1, int(left))), *cmd]
+                    rc, out, _ = run(cmd, left + 10, env=env)
+                    if rc is None or rc in (124, 137):
+                        out_lines.append("--dry-run %s: not finished within the --wait budget; stopped (it writes nothing)" % m)
+                    else:
+                        out_lines.append("--dry-run %s: exit %s" % (m, rc))
+                        failed = failed or rc != 0
+                    hum_lines.append(out_lines[-1])
+                    out_lines.extend("  " + l for l in out.rstrip("\n").split("\n") if l)
+                    trimmed = trim_gc(out, named_row, "they are in --json")
+                    hum_lines.extend("  " + l for l in trimmed.rstrip("\n").split("\n") if l)
+            gc_rec = rep.step("branch-gc", "failed" if failed else "completed",
+                              "report only (--dry-run; no --apply, logs and lock in a scratch dir removed after)",
+                              "\n".join(out_lines), human=cap("\n".join(hum_lines)))
+        elif not idn["timeout_program"]:
+            gc_rec = rep.step("branch-gc", "failed", "no timeout program (hook_timeout found neither gnutimeout nor timeout); GC not started",
+                              "\n".join(notes))
+        elif not state or not idn["key"]:
+            gc_rec = rep.step("branch-gc", "failed", "no state directory or stamp key; GC not started", "\n".join(notes))
+        else:
+            try:
+                gc_run, reused, err = launch_worker(state, idn, gc_eligible, idn["timeout_program"], bgc)
+            except OSError as e:
+                gc_run, reused, err = None, False, "could not start the GC worker: %s" % (e.strerror or e)
+            if err:
+                gc_rec = rep.step("branch-gc", "failed", err, "\n".join(notes))
+            else:
+                gc_deadline = time.monotonic() + args.wait
+                gc_rec = rep.step("branch-gc", "pending", ("reusing the pending worker" if reused else "worker started") + " for %d repo(s)" % len(gc_eligible),
+                                  "\n".join(notes + [boundary]), result=os.path.join(gc_run, "result.json"), log=os.path.join(gc_run, "run.log"))
+
+    # 5. Memory index.
+    pool = None
+    mi = sibling("memory-index")
+    pool_cwd = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
+    # The checkout hooks/memory-digest.sh passes as --ops ($OPS_DIR, else its own),
+    # so the pool rebuilt here is the one the digest shows.
+    ops_root = os.environ.get("OPS_DIR") or ROOT
+    if not mi:
+        rep.step("memory index", "failed", "memory-index not found beside session-end (%s)" % BIN)
+    else:
+        rc, out, err = run([mi, "--pool-for", "--cwd", pool_cwd, "--ops", ops_root], 30, merge=False)
+        if rc == 0 and out.strip() and os.path.isdir(out.strip()):
+            pool = out.strip()
+            if dry:
+                rep.step("memory index", "completed", "would rebuild %s/MEMORY.md (memory-index %s)" % (pool, pool))
+            else:
+                rc2, out2, _ = run([mi, pool], 120)
+                if rc2 == 0:
+                    rep.step("memory index", "completed", "rebuilt %s/MEMORY.md" % pool, out2)
+                elif rc2 == 2:
+                    rep.step("memory index", "completed", "rebuilt %s/MEMORY.md; WARNING: entries need backfill (exit 2), not a failed rebuild" % pool, out2)
+                else:
+                    rep.step("memory index", "failed", "memory-index %s exited %s" % (pool, rc2), out2)
+        elif rc == 4:
+            rep.step("memory index", "skipped", "no memory pool for %s; none created" % pool_cwd, out + err)
+        else:
+            rep.step("memory index", "failed", "memory-index --pool-for exited %s" % rc, out + err)
+
+    # 6. Lint.
+    gate, _ = gate_script()
+    if not tx:
+        rep.step("lint", "skipped", "no verified transcript, so no evidence of harness files; if this thread changed .claude-config/ or SKILLS/, run the gate's lint by hand")
+    elif not harness_named:
+        rep.step("lint", "skipped", "this thread named no file under .claude-config/ or SKILLS/")
+    elif not gate:
+        rep.step("lint", "failed", "this thread touched harness files but no gate script sits beside session-end")
+    else:
+        # verify-ops.sh has no lint-only mode: --quiet prints its WARN and FAIL lines
+        # and the summary line, and OPS_DIR points it at this checkout, not ~/OPS.
+        cmd = [gate, "--quiet"]
+        env = dict(os.environ, OPS_DIR=ROOT)
+        if dry:
+            rep.step("lint", "completed", "would run OPS_DIR=%s %s" % (ROOT, " ".join(cmd)))
+        else:
+            rc, out, _ = run(cmd, 600, env=env)
+            rep.step(**lint_verdict(" ".join(cmd), rc, out))
+
+    # 4 (wait). The GC result, within the --wait budget measured from launch.
+    gc_res = None
+    if gc_run:
+        res_path = os.path.join(gc_run, "result.json")
+        lock_path = os.path.join(gc_run, "worker.lock")
+        while True:
+            try:
+                gc_res = read_result(gc_run)
+            except (OSError, ValueError) as e:
+                gc_rec.update(status="failed", summary="unreadable GC result %s: %s" % (res_path, e))
+                break
+            if gc_res is not None:
+                break
+            if not lock_held(lock_path):
+                try:
+                    gc_res = read_result(gc_run)
+                except (OSError, ValueError):
+                    gc_res = None
+                if gc_res is None:
+                    gc_rec.update(status="failed", summary="the GC worker ended without a result; see %s/run.log" % gc_run)
+                break
+            left = gc_deadline - time.monotonic()
+            if left <= 0:
+                gc_rec.update(summary="%s; still running after the --wait budget; read %s before reporting cleanup as done (session-end finish does)"
+                              % (gc_rec["summary"], res_path))
+                break
+            time.sleep(min(0.1, left))
+        if gc_res is not None:
+            ok = gc_res.get("status") == "completed"
+            gc_rec.update(status="completed" if ok else "failed",
+                          summary="finished: %s" % gc_res.get("status"),
+                          output=(gc_rec.get("output") or "") + "\n" + "\n".join(describe_result(gc_res, gc_run)),
+                          human=cap((gc_rec.get("output") or "") + "\n" + "\n".join(describe_result(gc_res, gc_run, named_row))))
+
+    # 8 (after). Disk.
+    free_after = statvfs_free()
+    if free_before is None or free_after is None:
+        rep.step("disk", "skipped", "statvfs / failed")
+    else:
+        delta = free_after - free_before
+        rep.step("disk", "completed",
+                 "free on /: %s before, %s after (%+.1f MiB); a box-wide observation, not bytes this thread reclaimed%s"
+                 % (fmt_bytes(free_before), fmt_bytes(free_after), delta / 1024 ** 2,
+                    "; GC is still running, so this sample is incomplete" if gc_rec and gc_rec["status"] == "pending" else ""),
+                 "Quarantine on the same filesystem keeps a worktree's bytes.")
+
+    # 9. Close: list what this thread created; remove nothing.
+    if mode == "close":
+        if not tx:
+            rep.step("cleanup list", "skipped", "no verified transcript: no creation evidence to list")
+        else:
+            rows_by_wt = {}
+            if gc_res:
+                for r in gc_res["repos"]:
+                    for row in r.get("rows", []):
+                        wt = row[2]
+                        if wt and wt != "-":
+                            rows_by_wt[os.path.normpath(os.path.expanduser(wt))] = "%s: %s" % (row[4], row[5])
+            roots = scratch_roots()
+            owned, unknown = [], []
+            for kind, name, own, how in creations(tx):
+                if kind in ("file", "dir", "worktree"):
+                    if kind != "worktree" and not any(under(name, r) for r in roots):
+                        continue
+                    if any(under(r, name) for r in roots):
+                        continue  # a scratch root or its parent is never this thread's own
+                    if not os.path.lexists(name):
+                        continue
+                    line = "%s %s (%s)" % (kind, name, how)
+                    if kind == "worktree":
+                        line += "; GC: %s" % rows_by_wt.get(name, "GC pending/not evaluated" if not gc_res else "no row for it")
+                else:
+                    pres = docker_present(kind, name)
+                    if pres == "absent":
+                        continue
+                    line = "docker %s %s (%s; %s)" % (kind, name, how, pres)
+                    if pres != "present":
+                        unknown.append(line)
+                        continue
+                (owned if own else unknown).append(line)
+            out = ["created by this thread and still present (remove by exact path or id if disposable; never over a live-worktree hold):"]
+            out += ["  " + l for l in owned] or ["  (none found)"]
+            if unknown:
+                out.append("ownership unknown (not suggested for removal):")
+                out += ["  " + l for l in unknown]
+            out.append("check for anything else you created, by exact path or id; establish ownership before removing it")
+            rep.step("cleanup list", "completed", "%d created object(s) listed; nothing removed" % len(owned), "\n".join(out))
+
+    # 10. Box extras.
+    # OPS ships no vault renderer, so the step is an explicit skip, never a guess.
+    rep.step("vault view", "skipped", "this checkout ships no vault renderer; nothing checked or written")
+    asks = sibling("asks")
+    thread_for_asks = os.environ.get("ASKS_THREAD") or idn["t3_thread_id"]
+    if not asks:
+        rep.step("open asks", "skipped", "asks not installed on this box")
+    elif not thread_for_asks:
+        rep.step("open asks", "skipped", "no T3 thread id (and no ASKS_THREAD), so no register to read")
+    else:
+        rc, out, _ = run([asks, "list"], 30)
+        rep.step("open asks", "completed" if rc == 0 else "failed", "asks list exited %s" % rc, out)
+
+    # 11. The remainder.
+    remainder(rep, mode, idn, tx, pool)
+
+    # 7. The receipt (not on a dry run; last-closeout moves only at finish).
+    status, code = rep.status()
+    if not dry:
+        if not state or not idn["key"]:
+            rep.step("receipt", "failed", "no state directory or stamp key; no receipt written, so finish cannot run")
+        else:
+            try:
+                d = os.path.join(state, "session-end")
+                mkdirs(d)
+                path = os.path.join(d, "%s.json" % idn["key"])
+                status, code = rep.status()
+                atomic_write(path, json.dumps({
+                    "version": 1, "mode": mode, "dry_run": False, "written_at": stamp_text(),
+                    "status": status, "exit": code, "identity": rep.identity,
+                    "gc": {"run_dir": gc_run, "status": gc_rec["status"] if gc_rec else "skipped"},
+                    "lint_findings": [l for s in rep.steps if s["step"] == "lint" and s["status"] == "findings"
+                                      for l in s["fail_lines"]],
+                    "steps": rep.steps}, indent=1))
+                rep.receipt = path
+            except OSError as e:
+                rep.step("receipt", "failed", "cannot write the receipt: %s" % (e.strerror or e))
+    return print_report(rep, args.json)
+
+
+def remainder(rep, mode, idn, tx, pool):
+    out = rep.remainder
+    out.append("What only you can do now:")
+    out.append("  - Save the lessons worth keeping: one fact per file in the memory pool%s. A thread with none saves none."
+               % (" (%s)" % pool if pool else ""))
+    out.append("  - Put knowledge where the next person will look, and fix any document this thread made untrue.")
+    out.append("  - Write the resume note at the top of the anchor or baton: %s." % ", ".join(RESUME_FIELDS))
+    lint = [s for s in rep.steps if s["step"] == "lint" and s["status"] == "findings"]
+    if lint:
+        out.append("  - Lint reported %d FAIL line(s) above: fix the ones on files this thread changed, "
+                   "and name the rest as other work's in your report." % len(lint[-1]["fail_lines"]))
+    # Memory stewardship: the closing agent owns it, because only it knows what this thread learned.
+    if not pool:
+        out.append("Memory stewardship: no pool for this directory.")
+    elif not tx or not tx["first"]:
+        out.append("Memory stewardship: no verified transcript window, so entries are not listed; check %s by hand." % pool)
+    else:
+        rows, err = entries_in_window(pool, tx["first"])
+        # The pool is shared by concurrent threads, so the window list cannot say who wrote what.
+        out.append("Memory stewardship (pool %s, window from %s): entries written or changed in this pool during "
+                   "this thread's window, by this thread or another one sharing the pool:" % (pool, tx["first"].isoformat()))
+        if err:
+            out.append("  " + err)
+            rep.step("memory window", "failed", err)
+        else:
+            out.extend(rows or ["  (no entry modified or touched in this window)"])
+        out.append("  Correct an entry this thread proved wrong, merge duplicates it touched, move a lesson that belongs in a repo's docs. session-end changed no entry.")
+    tid = idn["t3_thread_id"]
+    if mode == "pause":
+        cc = sibling("compact-cycle.sh")
+        if tid and cc:
+            out.append("Pause: compact with %s --target %s" % (cc, tid))
+        else:
+            out.append("Pause: no compact line (%s)" % ("no T3 thread id" if not tid else "compact-cycle.sh not installed"))
+        out.append("  Never compact over an unanswered question.")
+    elif mode == "move":
+        if not os.path.isfile(KEY_SH):
+            out.append("Move: key.sh not found at %s; baton path unknown" % KEY_SH)
+            rep.step("baton key", "failed", "key.sh not found at %s" % KEY_SH)
+        else:
+            rc, key, err = run(["bash", KEY_SH], 15, cwd=idn["cwd"], merge=False)
+            if rc != 0 or not key.strip():
+                out.append("Move: key.sh failed (exit %s); baton path unknown" % rc)
+                rep.step("baton key", "failed", "key.sh exited %s: %s" % (rc, err.strip()[:200]))
+            else:
+                # The SessionStart notifier (hooks/handoff-check.sh) reads
+                # ${OPS_DIR:-$HOME/OPS}/.claude-handoffs; harness_home() is that directory.
+                hdir = os.path.join(harness_home(), ".claude-handoffs")
+                baton = os.path.join(hdir, "pending", key.strip() + ".md")
+                out.append("Move: the baton is %s (%s)." % (baton, "exists: read it, never overwrite an unread one" if os.path.exists(baton) else "not written yet"))
+                out.append("  One pending baton per project. Commit and push it, or the other machine never sees it.")
+    elif mode == "close":
+        time_block(rep, tx, idn)
+        out.append("Bill only if this thread worked a ticket; read what is already on the ticket first.")
+        out.append("Remove what this thread made (the cleanup list above), never another thread's.")
+    finish = "session-end finish --logged N | --declined REASON" if mode == "close" else "session-end finish"
+    out.append("When the above is done: %s%s" % (finish, " (N = time entries created and read back; 0 is valid)" if mode == "close" else ""))
+    if mode == "close":
+        out.append("Then print the receipt first, because nothing after the settle reaches the owner.")
+        if tid:
+            out.append("Settle: t3_thread_organize with action \"settle\" and threadId omitted, as the last tool call; it applies at turn end"
+                       " (a failed turn or a queued message leaves the thread active). Only if that tool is not available: "
+                       "%s settle-when-idle %s. Never both." % (sibling("t3-api.sh") or "t3-api.sh", tid))
+        else:
+            out.append("Settle: not a T3 thread; no settle step (see session-close teardown for tmux or a plain terminal).")
+
+
+def time_block(rep, tx, idn):
+    if idn["provider"] != "claude":
+        rep.step("time", "skipped", UNSUPPORTED + "; no time figure")
+        return
+    if not tx:
+        rep.step("time", "skipped", "no verified transcript; no time figure. Ask the owner for the window; never bill a guessed span.")
+        return
+    am = sibling("active-minutes")
+    if not am:
+        rep.step("time", "skipped", "active-minutes not installed on this box; no time figure")
+        return
+    base = tx["path"][:-len(".jsonl")]
+    also = sorted(glob.glob(os.path.join(glob.escape(base), "subagents", "*.jsonl"))
+                  + glob.glob(os.path.join(glob.escape(base), "subagents", "workflows", "*", "*.jsonl")))
+    also = [a for a in also if os.path.isfile(a) and not os.path.islink(a)]
+    cmd = [am, tx["path"]] + (["--also"] + also if also else [])
+    rc, out, _ = run(cmd, 120)
+    m = re.search(r"^ACTIVE \(bill this\): ([\d.]+) min", out, re.M)
+    if rc != 0 or not m:
+        rep.step("time", "failed", "active-minutes exited %s%s; no time figure" % (rc, "" if m else " without an ACTIVE line"), out)
+        return
+    caveat = ""
+    if tx["lanes"] and not also:
+        caveat = ("; NOT CONFIDENT: this thread started %d lane(s) but no lane transcript exists under %s/subagents, "
+                  "so gaps a lane worked through may be excluded" % (tx["lanes"], base))
+    rep.step("time", "completed",
+             "measured %s active minutes as evidence, not an amount to enter%s" % (m.group(1), caveat),
+             out, confident=not caveat, lane_transcripts=len(also))
+
+
+# --- finish ---------------------------------------------------------------------
+
+def lock_wait():
+    raw = os.environ.get("SESSION_END_LOCK_WAIT", "10")
+    try:
+        v = float(raw)
+    except ValueError:
+        v = 10.0
+    return v if math.isfinite(v) and v >= 0 else 10.0
+
+
+def test_hook(phase, path):
+    hook = os.environ.get("SESSION_END_TEST_HOOK")
+    if not hook:
+        return
+    rc, out, err = run([hook, phase, path], 10)
+    if rc != 0:
+        raise OSError("test hook %s %s exited %s: %s" % (phase, path, rc, out.strip()[:200]))
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+            size += len(chunk)
+    return size, h.hexdigest()
+
+
+def archive_billing(key, outcome):
+    """(ok, lines). Moves this thread's live stamps into one fresh archive
+    directory, <stamp dir>/reaped/<key>-<TS>-<hex>/, each by a single rename.
+
+    Why a rename and never a copy (a code review finding): the
+    copy, compare and unlink sequence raced the stamp writers, which take no lock
+    of ours; a writer that appended after the compare lost its unbilled bytes to
+    the unlink while finish reported success. A rename keeps the inode, so bytes
+    a writer appends through a descriptor it already holds land in the archive,
+    and a writer that opens the name afterwards creates a new live file that
+    stays live as fresh unbilled evidence. Nothing is deleted, so no byte can be
+    lost. branch-gc's quarantine moves worktrees the same way.
+
+    Order: the work-log first and the session-start stamp last, because the
+    session-start stamp is the unbilled-window flag. A work-log that appears
+    before or right after the session-start move keeps (or puts back) that flag:
+    the new segment has to be reconciled first. The outcome goes into a separate
+    reaped.meta written with O_EXCL after the moves, so the archived bytes stay
+    exactly the stamps' own."""
+    run = stamp_dir()
+    reaped = os.path.join(run, "reaped")
+    names = ["work-log-%s" % key, "session-start-%s" % key]
+    live = [n for n in names if os.path.lexists(os.path.join(run, n))]
+    if not live:
+        return True, ["no live billing stamps for key %s; nothing archived (a repeated finish is a no-op)" % key]
+    # Every source is checked before anything moves, so a refusal moves nothing.
+    for n in live:
+        src = os.path.join(run, n)
+        try:
+            mode = os.lstat(src).st_mode
+        except FileNotFoundError:
+            continue  # gone since the listing; the move loop reports it absent
+        if not stat.S_ISREG(mode):
+            return False, ["%s is not a regular file (a symlink or special file); nothing moved, originals left in place" % src]
+    try:
+        if os.path.lexists(reaped):
+            if not stat.S_ISDIR(os.lstat(reaped).st_mode):
+                return False, ["%s is not a directory (a symlink?); nothing moved, originals left in place" % reaped]
+        else:
+            os.mkdir(reaped, 0o700)
+        adir = None
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        for _ in range(100):
+            cand = os.path.join(reaped, "%s-%s-%s" % (key, ts, os.urandom(4).hex()))
+            test_hook("archive-target", cand)
+            try:
+                os.mkdir(cand, 0o700)  # exclusive: an existing directory is never reused
+                adir = cand
+                break
+            except FileExistsError:
+                continue
+        if adir is None:
+            return False, ["no free archive directory name under %s; nothing moved" % reaped]
+        fsync_dir(reaped)
+    except OSError as e:
+        return False, ["cannot prepare an archive directory under %s: %s; nothing moved, originals left in place" % (reaped, e)]
+
+    moved, lines, failure = [], [], None
+    wl_live = os.path.join(run, "work-log-%s" % key)
+    for name in names:
+        src, dest = os.path.join(run, name), os.path.join(adir, name)
+        try:
+            try:
+                st = os.lstat(src)
+            except FileNotFoundError:
+                lines.append("%s: absent" % src)
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError("%s is no longer a regular file; left in place" % src)
+            if name.startswith("session-start-") and os.path.lexists(wl_live):
+                raise OSError("a new work-log appeared at %s during archival; session-start left live, "
+                              "reconcile the new segment first" % wl_live)
+            test_hook("before-move", dest)
+            os.rename(src, dest)  # same filesystem by construction; never a copy
+            # Record a successful move before fsync or hashing can fail: losing
+            # its recovery path would strand an archived unbilled-window flag.
+            moved.append((name, src, dest, None, None))
+            lines.append("%s -> %s" % (src, dest))
+            fsync_dir(run)
+            fsync_dir(adir)
+            size, digest = sha256_file(dest)
+            moved[-1] = (name, src, dest, size, digest)
+            test_hook("archived", src)
+            if name.startswith("session-start-") and os.path.lexists(wl_live):
+                # A segment arrived right after the flag moved: put the flag back
+                # by link (fails rather than replace a newer live stamp).
+                try:
+                    os.link(dest, src)
+                    os.unlink(dest)
+                    moved.pop()
+                    lines.pop()
+                    fsync_dir(run)
+                    fsync_dir(adir)
+                    raise OSError("a new work-log appeared at %s during archival; session-start put back live, "
+                                  "reconcile the new segment first" % wl_live)
+                except FileExistsError:
+                    raise OSError("a new work-log appeared at %s and a newer session-start already exists; "
+                                  "the moved flag stays at %s, compare the two by hand" % (wl_live, dest))
+        except OSError as e:
+            failure = e
+            break
+
+    meta_ready = False
+    if moved:
+        meta = ["reaped_at=%s" % stamp_text(), "reaped_reason=session-end finish: %s" % outcome,
+                "reaped_key=%s" % key, "status=%s" % ("partial" if failure else "complete")]
+        for name, src, dest, size, digest in moved:
+            meta.append("file=%s\toriginal=%s\tsize=%s\tsha256=%s" %
+                        (name, src, size if size is not None else "unknown", digest or "unavailable"))
+        try:
+            mfd = os.open(os.path.join(adir, "reaped.meta"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(mfd, "wb") as m:
+                m.write(("\n".join(meta) + "\n").encode("utf-8"))
+                m.flush()
+                os.fsync(m.fileno())
+            fsync_dir(adir)
+            meta_ready = True
+        except OSError as e:
+            failure = failure or OSError("the stamps moved but %s/reaped.meta could not be written: %s" % (adir, e))
+    else:
+        try:
+            os.rmdir(adir)  # this call's own empty directory
+        except OSError:
+            pass
+
+    if failure:
+        # A failed finish leaves its receipt active. Keep the billing window
+        # discoverable too, even if the flag's rename succeeded before the
+        # failure. An exclusive hard link preserves the archive and cannot
+        # overwrite a newer live flag created by a writer we do not lock.
+        for name, src, dest, _s, _d in moved:
+            if not name.startswith("session-start-"):
+                continue
+            try:
+                os.link(dest, src)
+                fsync_dir(run)
+                lines.append("billing window kept live at %s (archive preserved at %s)" % (src, dest))
+            except FileExistsError:
+                lines.append("live billing flag at %s was not replaced" % src)
+            except OSError as e:
+                lines.append("FAILED to restore the live billing flag from %s to %s: %s" % (dest, src, e))
+        lines.append("FAILED: %s" % failure)
+    still = [os.path.join(run, n) for n in names if os.path.lexists(os.path.join(run, n))]
+    lines.append("still live: %s" % (", ".join(still) or "none"))
+    if moved:
+        note = ("reaped.meta holds the outcome and available sizes and sha256" if meta_ready else
+                "reaped.meta could not be completed; inspect the moved files")
+        lines.append("archive directory: %s (%s)" % (adir, note))
+        for name, src, dest, _s, _d in moved:
+            lines.append("restore %s, only while that name is free (never over a newer live stamp): mv -n %s %s" % (name, dest, src))
+    return failure is None, lines
+
+
+def cmd_finish(args, idn):
+    rep = Report("finish", False)
+    rep.identity = {k: idn[k] for k in ("provider", "session_id", "t3_thread_id", "key", "backend", "cwd")}
+    state = state_dir()
+    if not state or not idn["key"]:
+        rep.step("receipt", "failed", "no state directory or stamp key (%s); nothing done" % (idn["key_error"] or "no gate script beside session-end"))
+        return print_report(rep, args.json)
+    rpath = os.path.join(state, "session-end", "%s.json" % idn["key"])
+    try:
+        rec = read_json_strict(rpath)
+    except FileNotFoundError:
+        rep.step("receipt", "failed", "no receipt at %s: run session-end <pause|move|close> first" % rpath)
+        return print_report(rep, args.json)
+    except (OSError, ValueError) as e:
+        rep.step("receipt", "failed", "unreadable receipt %s: %s" % (rpath, e))
+        return print_report(rep, args.json)
+    got = rec.get("identity") or {}
+    for k in ("key", "provider", "session_id", "t3_thread_id"):
+        if got.get(k) != rep.identity.get(k):
+            rep.step("receipt", "failed", "the receipt at %s belongs to another thread (%s %r, this thread %r); nothing done"
+                     % (rpath, k, got.get(k), rep.identity.get(k)))
+            return print_report(rep, args.json)
+    mode = rec.get("mode")
+    if mode not in MODES or rec.get("dry_run"):
+        rep.step("receipt", "failed", "the receipt at %s is not a real pause, move or close run; nothing done" % rpath)
+        return print_report(rep, args.json)
+    if mode == "close":
+        if (args.logged is None) == (args.declined is None):
+            raise Usage("after a close, finish needs exactly one of --logged N or --declined REASON")
+    elif args.logged is not None or args.declined is not None:
+        raise Usage("--logged and --declined apply only after a close; this receipt is a %s" % mode)
+    rep.mode = "finish (%s)" % mode
+    if rec.get("status") == "failed":
+        rep.step("receipt", "failed", "the %s run failed (%s); fix it and run session-end %s again; no stamp" % (mode, rpath, mode))
+        return print_report(rep, args.json)
+    rep.step("receipt", "completed", "%s run of %s" % (mode, rec.get("written_at")))
+    findings = rec.get("lint_findings") or []
+    if findings:
+        # Reported, never a refusal: whose FAIL each is was the agent's call at the start.
+        rep.step("lint findings", "completed", "lint findings were reported at the start: %d" % len(findings),
+                 "\n".join(findings))
+    gc = rec.get("gc") or {}
+    if gc.get("status") == "pending":
+        rd = gc.get("run_dir") or ""
+        if os.path.dirname(rd) != gc_root(state):
+            rep.step("branch-gc", "failed", "the receipt names an unexpected GC run directory %r" % rd)
+            return print_report(rep, args.json)
+        try:
+            res = read_result(rd)
+        except (OSError, ValueError) as e:
+            rep.step("branch-gc", "failed", "unreadable GC result in %s: %s" % (rd, e))
+            return print_report(rep, args.json)
+        if res is None:
+            if lock_held(os.path.join(rd, "worker.lock")):
+                rep.step("branch-gc", "failed", "GC is still running (%s); run finish again once %s/result.json exists; no stamp" % (rd, rd))
+            else:
+                rep.step("branch-gc", "failed", "the GC worker ended without a result; see %s/run.log; no stamp" % rd)
+            return print_report(rep, args.json)
+        if res.get("status") != "completed":
+            rep.step("branch-gc", "failed", "GC finished with a failure; no stamp", "\n".join(describe_result(res, rd)),
+                     human="\n".join(describe_result(res, rd, row_namer(None, set()))))
+            return print_report(rep, args.json)
+        rep.step("branch-gc", "completed", "the pending GC run finished cleanly", "\n".join(describe_result(res, rd)),
+                 human="\n".join(describe_result(res, rd, row_namer(None, set()))))
+    if mode == "close":
+        if args.logged is not None:
+            outcome = "logged=%s time entries created and read back" % args.logged
+        else:
+            outcome = "declined: %s" % args.declined
+        why = billing_key_ok(idn)
+        if why and idn["provider"] != "claude":
+            rep.step("billing stamps", "skipped", why)
+        elif why:
+            rep.step("billing stamps", "failed", why + "; originals left in place; no stamp")
+            return print_report(rep, args.json)
+        else:
+            ok, lines = archive_billing(idn["key"], outcome)
+            rep.step("billing stamps", "completed" if ok else "failed",
+                     "%s: %s" % ("recorded outcome" if ok else "archive failed for outcome", outcome), "\n".join(lines))
+            if not ok:
+                return print_report(rep, args.json)
+    try:
+        atomic_write(os.path.join(state, "last-closeout"), stamp_text() + "\n", mode=0o644)
+        done = os.path.join(state, "session-end", "done")
+        mkdirs(done)
+        os.replace(rpath, os.path.join(done, "%s-%s.json" % (idn["key"], time.strftime("%Y%m%dT%H%M%S"))))
+    except OSError as e:
+        rep.step("closeout stamp", "failed", "cannot write %s/last-closeout or retire the receipt: %s" % (state, e.strerror or e))
+        return print_report(rep, args.json)
+    rep.step("closeout stamp", "completed", "advanced %s/last-closeout; receipt moved to %s" % (state, done))
+    return print_report(rep, args.json)
+
+
+def run_ending(args):
+    """Serialize the entire read/act/retire cycle per receipt key. Locking just
+    archive_billing let an overlapping start replace the receipt a finish then
+    retired, and let two starts both launch a worker before either set the run
+    pointer. The lock must cover the receipt read through its retirement."""
+    idn = identity(os.getcwd())
+    if args.cmd == "end" and args.dry_run:
+        return cmd_end(args, idn)
+    rep = Report("finish" if args.cmd == "finish" else args.mode, False)
+    rep.identity = {k: idn[k] for k in ("provider", "session_id", "t3_thread_id", "key", "backend", "cwd")}
+    why = lane_refusal()
+    if why:
+        rep.step("lane check", "failed", why)
+        return print_report(rep, args.json)
+    state = state_dir()
+    if not state or not idn["key"]:
+        rep.step("receipt", "failed", "no state directory or stamp key (%s); nothing done" %
+                 (idn["key_error"] or "no gate script beside session-end"))
+        return print_report(rep, args.json)
+    try:
+        lock_dir = os.path.join(state, "session-end", "locks")
+        mkdirs(lock_dir)
+        lfd = os.open(os.path.join(lock_dir, "billing-%s.lock" % idn["key"]),
+                      os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        rep.step("receipt lock", "failed", "cannot acquire the receipt/billing lock: %s; nothing done" % e)
+        return print_report(rep, args.json)
+    try:
+        end = time.monotonic() + lock_wait()
+        while True:
+            try:
+                fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    rep.step("receipt lock", "failed", "another ending for this key holds the billing lock; nothing done")
+                    return print_report(rep, args.json)
+                time.sleep(min(0.1, max(0, end - time.monotonic())))
+        return cmd_finish(args, idn) if args.cmd == "finish" else cmd_end(args, idn)
+    finally:
+        os.close(lfd)
+
+
+# --- arguments ------------------------------------------------------------------
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Usage(message)
+
+
+def wait_seconds(v):
+    try:
+        f = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--wait takes seconds, got %r" % v)
+    if not math.isfinite(f) or f < 0:
+        raise argparse.ArgumentTypeError("--wait takes a finite nonnegative number of seconds, got %r" % v)
+    return f
+
+
+def logged_count(v):
+    if not re.fullmatch(r"[0-9]+", v or ""):
+        raise argparse.ArgumentTypeError("--logged takes a nonnegative whole number of time entries, got %r" % v)
+    return int(v)
+
+
+def reason_text(v):
+    v = (v or "").strip()
+    if not v or any(ord(ch) < 32 for ch in v):
+        raise argparse.ArgumentTypeError("--declined needs a nonempty one-line reason")
+    return v
+
+
+def parse(argv):
+    if argv[:1] == ["finish"]:
+        p = Parser(prog="session-end finish", description="Finish an ending after knowledge capture (see the header).")
+        g = p.add_mutually_exclusive_group()
+        g.add_argument("--logged", type=logged_count, metavar="N")
+        g.add_argument("--declined", type=reason_text, metavar="REASON")
+        p.add_argument("--json", action="store_true")
+        a = p.parse_args(argv[1:])
+        a.cmd = "finish"
+        return a
+    p = Parser(prog="session-end", description="The mechanical half of ending a thread (see the header). "
+               "Also: session-end finish [--logged N | --declined REASON] [--json].")
+    p.add_argument("mode", choices=MODES)
+    p.add_argument("--repo", action="append", default=[], metavar="PATH")
+    p.add_argument("--transcript", metavar="FILE")
+    p.add_argument("--wait", type=wait_seconds, default=90.0, metavar="SECONDS")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(argv)
+    a.cmd = "end"
+    return a
+
+
+def main(argv):
+    if argv[:1] == ["_gc-worker"] and len(argv) == 3:
+        return gc_worker(argv[1], int(argv[2]))
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
+    try:
+        args = parse(argv)
+        return run_ending(args)
+    except Usage as e:
+        sys.stderr.write("session-end: %s\n(session-end <pause|move|close> [--repo PATH]... [--transcript FILE] "
+                         "[--wait SECONDS] [--dry-run] [--json] | session-end finish [--logged N | --declined REASON] [--json])\n" % e)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

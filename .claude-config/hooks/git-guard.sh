@@ -17,6 +17,8 @@
 #     git push from an OPS copy whose origin    (would publish the Operator's
 #       origin-private-check cannot prove private   memory and notes; see the
 #       or to a remote other than origin           push gate at the end)
+#     session-end other than --dry-run from      (the main thread's; neither
+#       a payload with an agent_id                 GIT_GUARD=off hatch lifts it)
 #
 #   WARNED (exit 0, the warning goes to Claude as additionalContext):
 #     a commit that would record merge conflict  (see "Conflict markers" for
@@ -30,13 +32,18 @@
 # and export for the one call). Read-only otherwise; exit 0 = allow.
 set -uo pipefail
 
-[ "${GIT_GUARD:-on}" = "off" ] && exit 0
+# The session-wide hatch is read now and applied after the session-end rule
+# below, which neither hatch lifts.
+GUARD_OFF=0; [ "${GIT_GUARD:-on}" = "off" ] && GUARD_OFF=1
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HOOK_DIR/hooklib.sh"
 
 RAW_INPUT="$(cat)"
 if ! TOOL="$(printf '%s' "$RAW_INPUT" | hook_field tool_name)"; then
+  # The session-wide hatch keeps its old meaning here: with nothing to inspect,
+  # an exported GIT_GUARD=off still allows the call.
+  [ "$GUARD_OFF" = 1 ] && exit 0
   # No JSON parser (jq/python) available: cannot inspect the command. Fail
   # CLOSED: these are doctrine hard gates (P3/P6) that must NEVER silently
   # disable. On Windows the old `python3 -c` resolved to 127 and `|| exit 0`
@@ -48,6 +55,77 @@ fi
 [ "$TOOL" = "Bash" ] || exit 0
 CMD="$(printf '%s' "$RAW_INPUT" | hook_field tool_input.command)"
 [ -n "$CMD" ] || exit 0
+
+# session-end belongs to the main thread. An in-process helper agent's shell
+# carries its main thread's environment and ids, so session-end cannot tell
+# itself from that helper; this payload can (agent_id). A run of session-end
+# other than --dry-run from a payload with a non-empty agent_id is blocked. A quoted
+# executable path is a real run, including one containing spaces; the name must
+# sit at a command position, so an argument that only
+# names it (grep session-end, a commit subject "feat(session-end): ...") is not
+# blocked. It sits before both GIT_GUARD=off hatches: those approve one git
+# action, and a lane ending its main thread's session is not one.
+# Limits: the rule reads command text, so a wrapper script that calls
+# session-end is unseen, and a pattern argument whose alternation puts the name
+# after a | (grep "x\|session-end") reads as a run; with the session-wide hatch
+# exported on a box with no JSON parser, nothing is inspected at all (above).
+# Shared with the git rules below: an rtk proxy must not hide the actual command.
+RTKPRE='(([^[:space:]|;&]*/)?rtk[[:space:]]+(-[^[:space:]]*[[:space:]]+)*((run|err|summary|test|bypass|proxy)[[:space:]]+(-[^[:space:]]*[[:space:]]+)*)?)?'
+gg_session_end_run() {  # <command>: 0 when it runs session-end without --dry-run
+  local seg py program
+  program="(\"[^\"]*/session-end\"|'[^']*/session-end'|[\"']?session-end[\"']?|([^[:space:]|;&()\`]*/)?session-end)"
+  while IFS= read -r seg; do
+    [ -n "$seg" ] || continue
+    py="$(hook_python 2>/dev/null)" || return 0
+    # Keep argument boundaries: --dry-run inside a quoted path, a comment or
+    # a redirection target is not permission to run the main thread's real close.
+    # No shell text is evaluated. If parsing fails, the candidate stays blocked.
+    if "$py" - "$seg" <<'PY'
+import os, shlex, sys
+try:
+    lexer = shlex.shlex(sys.argv[1], posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    words, target = [], False
+    for word in lexer:
+        if target:
+            target = False
+        elif word in ("<", ">", "<<", ">>", "<<<", "<>"):
+            target = True
+        else:
+            words.append(word)
+except ValueError:
+    sys.exit(0)
+at = next((i for i, word in enumerate(words) if os.path.basename(word) == "session-end"), None)
+if at is None:
+    sys.exit(0)
+args = words[at + 1:]
+# finish never accepts --dry-run: it can be text inside --declined's reason.
+sys.exit(0 if not args or args[0] == "finish" or "--dry-run" not in args else 1)
+PY
+    then return 0; fi
+  done < <(printf '%s\n' "$1" \
+    | sed 's/[|;&`]/&&/g' \
+    | grep -oE '(^|[|;&`]|\$\()[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|command|exec|env|nohup|python3?|bash|sh)[[:space:]]+)*'"$RTKPRE$program"'([[:space:]][^|;&)`]*)?([|;&)`]|$)' \
+    | sed 's/[|;&)`]$//')
+  # Duplicate separators before matching: grep consumes a match's trailing
+  # separator, so the following command otherwise loses its command position.
+  return 1
+}
+case "$CMD" in
+  *session-end*)
+    if gg_session_end_run "$CMD"; then
+      if ! SE_AID="$(printf '%s' "$RAW_INPUT" | hook_field agent_id)"; then
+        echo "git-guard: BLOCKED: cannot read agent_id to tell a lane from the main thread; session-end is refused" >&2
+        exit 2
+      fi
+      if [ -n "$SE_AID" ]; then
+        echo "git-guard: BLOCKED: session-end belongs to the main thread; return your result instead" >&2
+        exit 2
+      fi
+    fi ;;
+esac
+
+[ "$GUARD_OFF" = 1 ] && exit 0
 
 # The documented escape hatch is an inline prefix on the approved command
 # (`GIT_GUARD=off <command>`). Hooks run in their OWN process and never
@@ -91,7 +169,6 @@ deny() {
 # parses rtk itself, including the -c/--shell string forms. (The rtk string
 # forms carry their command in quotes, which the git checks strip like any
 # quoted span, the same known limit as `bash -c '<git command>'`.)
-RTKPRE='(([^[:space:]|;&]*/)?rtk[[:space:]]+(-[^[:space:]]*[[:space:]]+)*((run|err|summary|test|bypass|proxy)[[:space:]]+(-[^[:space:]]*[[:space:]]+)*)?)?'
 GITPOS='(^|[|;&][|&]?)[[:space:]]*([A-Z_]+=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?'"$RTKPRE"'git[[:space:]]'
 CMD_RAW="$CMD"
 CMD="$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g')"
