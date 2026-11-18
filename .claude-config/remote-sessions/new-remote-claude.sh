@@ -19,7 +19,7 @@ NAME="$(rc_normalize_name "$RAW_NAME")"
 [ -n "$NAME" ] || { echo "ERR_NAME: name '$RAW_NAME' normalized to empty" >&2; exit 2; }
 
 if tmux has-session -t "=$NAME" 2>/dev/null; then
-  echo "ERR_EXISTS: a tmux session named '$NAME' is already running (cwd: $(tmux display-message -p -t "=$NAME" -F '#{pane_current_path}' 2>/dev/null))" >&2
+  echo "ERR_EXISTS: a tmux session named '$NAME' is already running (cwd: $(tmux display-message -p -t "=$NAME:" -F '#{pane_current_path}' 2>/dev/null))" >&2
   exit 3
 fi
 

@@ -32,6 +32,30 @@ refuses to run and says what is missing):
                         key, when it is not OPS_MCP_API_KEY.
   OPS_MCP_CLIENT_NAME   clientInfo.name sent at initialize (default mcp-http-call);
                         a server-side audit log groups calls by it.
+  OPS_MCP_REFUSAL_CODES comma-separated refusal codes ([a-z][a-z0-9_]*) that mean the
+                        server refused THIS caller (bin/await-approval passes its
+                        terminal_refusals here). Unset or empty: no notes, as before.
+  OPS_MCP_CONNECTOR     the connector name a refusal note names (default "unknown").
+  OPS_MCP_KEY_SOURCE    the label a note gives a key that is in the environment
+                        (default "env:<variable>"; bin/await-approval sets
+                        "claude.json:<entry>" when it supplied the key).
+  A malformed value of the last three is refused before any request.
+
+Refusal notes: when an answer carries one of OPS_MCP_REFUSAL_CODES in a structured
+field (error, code or error_code, on the answer or its "error" or "context" object;
+the envelope is read before its "result"; for isError, the structured content and
+each JSON text block; for a JSON-RPC error, the error and its data), `call` (and
+`batch`, on the call that stops it) adds exactly one stderr line, "NOTE: the gateway
+answered <code>: ...", on a line of its own after any ERROR line, that
+names where the key came from (env:<variable>, dotenv:<file>, or the label above),
+its last four characters when it is at least 16 long, and the connector; never the
+key. Free text is never read for it. Exit codes and out files are unchanged.
+
+Server text this client shows (an error body, a tool answer, the call preview, the
+list output) has every form of the key redacted first (raw and JSON-escaped), then
+each line break escaped so it stays on one line, and only then is it clipped. WHY
+the order: clipping first leaves the start of a key that straddles the cut, and a
+line break in a body could start a line that reads as the client's own NOTE.
 
 Exit status: 0 ok, 1 any failure (a message on stderr starting "ERROR: "), 128+N
 when SIGTERM or SIGHUP stopped it.
@@ -70,19 +94,89 @@ CLOSE_TIMEOUT = 10
 # The key, once read, so die() can scrub it from server text it prints (a 401
 # body or a proxy error page can echo the Authorization header back).
 _SECRETS = []
+# Where the key came from (a label such as "env:OPS_MCP_API_KEY" or "dotenv:<file>")
+# and its last four characters when it is long enough that four give little away.
+# api_key() captures both when it reads the credential.
+KEY_ORIGIN = {"source": None, "tail": None}
+MIN_TAIL_KEY_LEN = 16
+# The refusal codes that get a note (OPS_MCP_REFUSAL_CODES), set by refusal_settings().
+REFUSAL_CODES = frozenset()
+CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+NOTE_PREFIX = "NOTE: the gateway answered "
+# Every character str.splitlines() breaks on. bin/await-approval splits this client's
+# stderr into lines and trusts one that starts with NOTE_PREFIX, so server text must
+# never contain one raw.
+LINE_BREAKS = re.compile("[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _key_forms(secret):
+    """The secret as it can appear in text: raw, and JSON-escaped once and twice (a key
+    inside a JSON string, and a JSON text carried inside another JSON string), each also
+    with "/" escaped as some servers write it. Longest first, so no form is cut short."""
+    forms, level = {secret}, {secret}
+    for _ in range(2):
+        escaped = set()
+        for form in level:
+            for ascii_only in (True, False):
+                quoted = json.dumps(form, ensure_ascii=ascii_only)[1:-1]
+                escaped.update((quoted, quoted.replace("/", "\\/")))
+        forms |= escaped
+        level = escaped
+    return sorted(forms, key=len, reverse=True)
 
 
 def scrub(text):
     text = str(text)
     for s in _SECRETS:
         if s:
-            text = text.replace(s, "<redacted>")
+            for form in _key_forms(s):
+                text = text.replace(form, "<redacted>")
     return text
 
 
-def die(msg):
+def _escape_break(match):
+    char = match.group(0)
+    return {"\n": "\\n", "\r": "\\r"}.get(char) or "\\u%04x" % ord(char)
+
+
+def shown(text, limit=None):
+    """Server text as this client may display it: every form of the key redacted, then
+    each line break escaped (so it stays on one line), then clipped to limit.
+
+    The one place server text is clipped. WHY this order: clipping before redacting
+    leaves the start of a key that straddles the cut, and an escaped form of the key
+    is a different string from the key. The escapes are valid inside a JSON string,
+    so a JSON text stays valid JSON.
+    """
+    text = LINE_BREAKS.sub(_escape_break, scrub(text))
+    return text if limit is None else text[:limit]
+
+
+def die(msg, code=None):
     print("ERROR: %s" % scrub(msg), file=sys.stderr)
+    print_refusal_note(code)
     sys.exit(1)
+
+
+def is_label(value):
+    """A connector or key-source label: one printable line of at most 200 characters."""
+    return isinstance(value, str) and 0 < len(value) <= 200 and value.isprintable() and value.strip() == value
+
+
+def refusal_settings():
+    """Read and check OPS_MCP_REFUSAL_CODES, OPS_MCP_CONNECTOR and OPS_MCP_KEY_SOURCE before
+    any request; a malformed value is refused (and not printed), never guessed at."""
+    global REFUSAL_CODES
+    raw = os.environ.get("OPS_MCP_REFUSAL_CODES") or ""
+    codes = [c.strip() for c in raw.split(",") if c.strip()]
+    if not all(CODE_RE.fullmatch(c) for c in codes):
+        die("OPS_MCP_REFUSAL_CODES must be comma-separated codes of lowercase letters, digits and '_' "
+            "(the value is not printed)")
+    REFUSAL_CODES = frozenset(codes)
+    for var in ("OPS_MCP_CONNECTOR", "OPS_MCP_KEY_SOURCE"):
+        value = os.environ.get(var)
+        if value and not is_label(value):
+            die("%s must be one printable line of at most 200 characters (the value is not printed)" % var)
 
 
 class UnknownOutcome(SystemExit):
@@ -96,7 +190,9 @@ def env_file():
 def api_key():
     k = os.environ.get(KEY_VAR)
     path = env_file()
+    source = os.environ.get("OPS_MCP_KEY_SOURCE") or "env:%s" % KEY_VAR
     if not k:
+        source = "dotenv:%s" % path
         try:
             with open(path) as fh:
                 for line in fh:
@@ -114,7 +210,85 @@ def api_key():
     if re.search(r"\s", k):
         die("%s contains whitespace; fix the value (not printed)" % KEY_VAR)
     _SECRETS.append(k)
+    KEY_ORIGIN["source"] = source
+    KEY_ORIGIN["tail"] = k[-4:] if len(k) >= MIN_TAIL_KEY_LEN else None
     return k
+
+
+def refusal_code(obj):
+    """The configured refusal code a tool answer carries, or None.
+
+    Reads only structured fields: error, code and error_code, on the object and on its
+    "error" and "context" objects, the envelope first and then its "result" (a refusal
+    around an OPEN-looking result is still a refusal). Free text is never read, so a
+    command's output that merely quotes a code is not a refusal.
+    """
+    if not REFUSAL_CODES:
+        return None
+    layers = [obj]
+    if isinstance(obj, dict) and isinstance(obj.get("result"), dict):
+        layers.append(obj["result"])
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        for holder in (layer, layer.get("error"), layer.get("context")):
+            if not isinstance(holder, dict):
+                continue
+            for field in ("error", "code", "error_code"):
+                value = holder.get(field)
+                if isinstance(value, str) and value in REFUSAL_CODES:
+                    return value
+    return None
+
+
+def first_refusal(candidates):
+    for obj in candidates:
+        code = refusal_code(obj)
+        if code:
+            return code
+    return None
+
+
+def iserror_code(res):
+    """The refusal code in an isError result: the result, its structured content, then each
+    text block that holds JSON (a block with no text is skipped, not a crash)."""
+    if not REFUSAL_CODES:
+        return None
+    code = first_refusal((res, res.get("structuredContent")))
+    if code:
+        return code
+    content = res.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            try:
+                payload = json.loads(block.get("text"))
+            except (TypeError, ValueError, RecursionError):
+                continue
+            code = refusal_code(payload)
+            if code:
+                return code
+    return None
+
+
+def print_refusal_note(code):
+    """Print one NOTE line for a configured refusal code.
+
+    Keep the provenance that api_key() captured in a JSON suffix for await-approval.
+    The dotenv file can change while a long poll is waiting for its answer.
+    """
+    if not code or code not in REFUSAL_CODES:
+        return
+    source = shown(KEY_ORIGIN["source"] or "unknown")
+    tail = shown(KEY_ORIGIN["tail"]) if KEY_ORIGIN["tail"] else None
+    connector = shown(os.environ.get("OPS_MCP_CONNECTOR") or "unknown")
+    used = f"the key from {source}"
+    if tail:
+        used += f" (ends {tail})"
+    origin = json.dumps({"key_source": source, "key_tail": tail}, separators=(",", ":"))
+    print(f"{NOTE_PREFIX}{shown(code)}: the server refused this caller. This call used {used}, "
+          f"connector {connector}. Use the key or login that made the request.\t{origin}", file=sys.stderr)
 
 
 class Response:
@@ -212,14 +386,14 @@ class Client:
                     if isinstance(obj, dict) and ("result" in obj or "error" in obj):
                         out = obj
             if out is None:
-                die("no JSON-RPC payload in SSE body: %s" % body[:500])
+                die("no JSON-RPC payload in SSE body: %s" % shown(body, 500))
             return out
         if not body.strip():
             return None
         try:
             return json.loads(body)
         except json.JSONDecodeError:
-            die("non-JSON response (HTTP %s, %s): %s" % (resp.status_code, ctype, body[:500]))
+            die("non-JSON response (HTTP %s, %s): %s" % (resp.status_code, shown(ctype, 200), shown(body, 500)))
 
     def rpc(self, method, params=None, notify=False):
         payload = {"jsonrpc": "2.0", "method": method}
@@ -236,7 +410,7 @@ class Client:
             self.mcp_session_id = sid
         try:
             if resp.status_code >= 300:
-                die("HTTP %s on %s: %s" % (resp.status_code, method, resp.content.decode("utf-8", "replace")[:500]))
+                die("HTTP %s on %s: %s" % (resp.status_code, method, shown(resp.content.decode("utf-8", "replace"), 500)))
             if notify:
                 return None
             msg = self._parse(resp)
@@ -249,7 +423,10 @@ class Client:
                 raise UnknownOutcome(exc.code) from None
             raise
         if "error" in msg:
-            die("JSON-RPC error on %s: %s" % (method, json.dumps(msg["error"])[:800]))
+            err = msg["error"]
+            data = err.get("data") if isinstance(err, dict) else None
+            die(f"JSON-RPC error on {method}: {shown(json.dumps(err), 800)}",
+                first_refusal((msg, err, data)))
         return msg["result"]
 
     def initialize(self):
@@ -309,14 +486,14 @@ class Client:
         if len(hits) == 1:
             return hits[0]
         if not hits:
-            die("no tool matching %r; available: %s" % (suffix, names))
-        die("ambiguous tool suffix %r: %s" % (suffix, hits))
+            die(f"no tool matching {suffix!r}; available: {shown(json.dumps(names))}")
+        die(f"ambiguous tool suffix {suffix!r}: {shown(json.dumps(hits))}")
 
     def call(self, suffix, args):
         name = self.resolve(suffix)
         res = self.rpc("tools/call", {"name": name, "arguments": args})
         if res.get("isError"):
-            die("tool %s returned isError: %s" % (name, json.dumps(res)[:800]))
+            die(f"tool {shown(name)} returned isError: {shown(json.dumps(res), 800)}", iserror_code(res))
         return res
 
 
@@ -466,7 +643,8 @@ def run_batch(c, calls, out_path):
     with private_open(out_path) as out:
         for n, tool, args in calls:
             try:
-                res = unwrap(c.call(tool, args))
+                reply = c.call(tool, args)
+                res = unwrap(reply)
             except (Interrupted, UnknownOutcome) as exc:
                 why = "terminated by signal" if isinstance(exc, Interrupted) else "unconfirmed response"
                 out.write(json.dumps({"line": n, "tool": tool, "ok": False, "state": "unknown",
@@ -493,7 +671,8 @@ def run_batch(c, calls, out_path):
             if why:
                 out.write(json.dumps({"line": n, "tool": tool, "ok": False, "refused": why, "result": res},
                                      ensure_ascii=False) + "\n")
-                die("line %d (%s) refused in-band (%s); stopped after %d ok" % (n, tool, why, done))
+                die(f"line {n} ({tool}) refused in-band ({shown(why)}); stopped after {done} ok",
+                    first_refusal((reply, res)))
             out.write(json.dumps({"line": n, "tool": tool, "ok": True, "result": res}, ensure_ascii=False) + "\n")
             out.flush()
             done += 1
@@ -522,6 +701,7 @@ def main():
         if len(sys.argv) < 4:
             die("batch <calls.jsonl> <out.jsonl>")
         calls = load_calls(sys.argv[2], sys.argv[3])
+    refusal_settings()  # before any session opens: a malformed setting sends nothing
     # SIGHUP does not exist on Windows; install what the platform has.
     for name in ("SIGTERM", "SIGHUP"):
         sig = getattr(signal, name, None)
@@ -536,8 +716,8 @@ def main():
 
             if cmd == "list":
                 for t in c.tools():
-                    print(t["name"])
-                    print("   inputSchema: %s" % json.dumps(t.get("inputSchema", {})))
+                    print(shown(t["name"]))
+                    print("   inputSchema: %s" % shown(json.dumps(t.get("inputSchema", {}))))
                 return
 
             if cmd == "call":
@@ -548,14 +728,18 @@ def main():
                         args = json.load(fh)
                 except (OSError, ValueError) as exc:
                     die("cannot read the args file %s: %s" % (sys.argv[3], exc))
-                res = unwrap(c.call(sys.argv[2], args))
+                reply = c.call(sys.argv[2], args)
+                res = unwrap(reply)
                 out = sys.argv[4] if len(sys.argv) > 4 else None
                 if out:
                     with private_open(out) as fh:
                         json.dump(res, fh, ensure_ascii=False, indent=1)
                     print("wrote %s" % out)
                 else:
-                    print(json.dumps(res, ensure_ascii=False)[:4000])
+                    print(shown(json.dumps(res, ensure_ascii=False), 4000))
+                # Read the tool wrapper first. Unwrap can discard a refusal alongside
+                # structuredContent, which may contain a status from another caller.
+                print_refusal_note(first_refusal((reply, res)))
                 return
 
             if cmd == "batch":
@@ -566,7 +750,7 @@ def main():
         except OSError as exc:
             # A refused, reset or timed-out connection. A batch has already marked
             # the call in flight "unknown" before this point.
-            die("network error: %s" % exc)
+            die("network error: %s" % shown(exc))
     finally:
         c.close()
 

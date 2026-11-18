@@ -6,16 +6,17 @@
 # the lane-class answer). Run after deploying the
 # hooks and any time by hand. Companion to guard-selftest.sh, with one
 # deliberate difference: context-watch is fail-OPEN (a dead nag costs a manual
-# compact, not a security hole), so a missing python3 SKIPS with exit 0 here
-# instead of failing: the hook itself is documented to go silent there.
+# compact, not a security hole), so a missing python3 is not a failure of the hook: the
+# hook itself is documented to go silent there. It is not a pass of this suite either,
+# which then proved nothing, so it reports "did not run" with exit 77 and a runner fails.
 #
-# Exit 0 = every case behaves (or python3 absent => skip); 1 = ladder defect.
+# Exit 0 = every case behaves; 1 = ladder defect; 77 = did not run (no python3).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "context-watch-selftest: SKIP (no python3: hook is documented fail-open without it)"
-  exit 0
+  echo "context-watch-selftest: did not run: no python3 (the hook is documented fail-open without it)"
+  exit 77
 fi
 
 WORK="$(mktemp -d)"

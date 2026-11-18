@@ -148,6 +148,21 @@ run_hook "$(compact_payload "$T/t1.jsonl")"
   && ok "with no snapshot the no-snapshot notice prints and the block follows it" || bad "no-snapshot case" "$out"
 printf '# Pre-compact snapshot\n' > "$SNAP"
 
+# --- 5b. the resume text tells the agent to verify a DO NOT / HOLD line before trusting it ---
+# A snapshot written before a compaction carries the previous session's DO NOT and HOLD
+# lines, and an uncited one can be a guess that the next session would treat as a ruling.
+# The text names the check (the cited operator message or doctrine, else the newest
+# operator direction) and keeps the exceptions (standing instructions, real holds).
+printf '# Pre-compact snapshot\n\nDO NOT touch the config.\n' > "$SNAP"
+run_hook "$(compact_payload "$T/t1.jsonl")"
+{ [ "$rc" -eq 0 ] && has 'verify a DO NOT' && has 'HOLD line against the operator message or doctrine it cites' \
+    && has "the operator's newest direction" && has 'standing instructions and real operator holds'; } \
+  && ok "with a snapshot the resume text asks for a DO NOT / HOLD line to be verified, and keeps standing instructions and real holds" \
+  || bad "DO NOT / HOLD verification sentence missing" "$out"
+run_hook "{\"source\":\"resume\",\"session_id\":\"s\",\"transcript_path\":\"$T/t1.jsonl\"}"
+{ [ -z "$out" ] && [ "$rc" -eq 0 ]; } && ok "source=resume stays silent: no resume text, no guidance" || bad "resume source printed" "$out"
+printf '# Pre-compact snapshot\n' > "$SNAP"
+
 # --- 6. the cap, name hygiene, garbage lines --------------------------------------
 names="$(python3 -I -c 'print(",".join("mcp__bulk__tool_%02d" % i for i in range(45)))')"
 tx "$T/t6.jsonl" "boundary 2 $names"

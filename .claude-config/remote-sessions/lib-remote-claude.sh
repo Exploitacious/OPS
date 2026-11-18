@@ -67,9 +67,14 @@ rc_deregister() {  # arg: name  (forget it: no resume or park by name afterwards
 
 # Launch (or resume) ONE session in a fresh detached tmux session.
 # args: name workdir session_id [config_dir] ; echoes an OK/ERR/SKIP status line.
-# All tmux -t targets in this lib use "=$name" (exact match): bare names
-# unique-prefix-match in tmux, so with prefix families like Dev/Dev2 or
-# Ops/Opswork a bare -t can hit (or kill) the WRONG session.
+# Every tmux -t target in this lib is an exact match: bare names unique-prefix-match
+# in tmux, so with prefix families like Dev/Dev2 or Ops/Opswork a bare -t can hit (or
+# kill) the WRONG session. Two forms, because tmux resolves them differently:
+#   session-level commands (has-session, kill-session) take "=$name";
+#   pane-level commands (send-keys, display-message) take "=$name:" (exact session,
+#   current window). Measured on tmux 3.6: send-keys with a bare "=$name" fails with
+#   "can't find pane", which silently dropped the launch line and left a bare shell;
+#   display-message with it prints an empty value. tests/remote-claude-targets-test.sh pins both.
 # A non-default config_dir launches the in-tmux command under CLAUDE_CONFIG_DIR=<dir> so a secondary
 # profile resumes its OWN transcript instead of silently starting fresh under the default profile.
 rc_launch() {
@@ -95,14 +100,33 @@ rc_launch() {
     profile="$(basename "$cfgdir")"
   fi
 
-  tmux new-session -d -s "$name" -c "$workdir"
-  tmux send-keys -t "=$name" "set -a; source '$ENVFILE' 2>/dev/null; set +a; ${cfgprefix}claude --remote-control '$name' $launchflag" Enter
+  if ! tmux new-session -d -s "$name" -c "$workdir"; then
+    echo "ERR_TMUX name=$name (could not create the session)" >&2
+    return 1
+  fi
+  # new-session -d can return before the pane is ready for input, and a send-keys fired
+  # too early misses it and loses the launch line. Wait (bounded, about 5 s) for the pane.
+  local ready=0
+  until tmux list-panes -t "=$name:" >/dev/null 2>&1; do
+    if [ "$ready" -ge 50 ]; then
+      echo "ERR_TMUX name=$name (pane did not become ready)" >&2
+      return 1
+    fi
+    sleep 0.1; ready=$((ready+1))
+  done
+  if ! tmux send-keys -t "=$name:" "set -a; source '$ENVFILE' 2>/dev/null; set +a; ${cfgprefix}claude --remote-control '$name' $launchflag" Enter; then
+    echo "ERR_TMUX name=$name (could not send the launch command)" >&2
+    return 1
+  fi
   # First-run "enable project MCP servers?" prompt (create only); Enter accepts it. No-op on resume.
   sleep 10
-  tmux send-keys -t "=$name" Enter
+  if ! tmux send-keys -t "=$name:" Enter; then
+    echo "ERR_TMUX name=$name (could not send the confirmation keystroke)" >&2
+    return 1
+  fi
   sleep 2
 
-  local cwd; cwd="$(tmux display-message -p -t "=$name" -F '#{pane_current_path}' 2>/dev/null)"
+  local cwd; cwd="$(tmux display-message -p -t "=$name:" -F '#{pane_current_path}' 2>/dev/null)"
   echo "OK name=$name cwd=${cwd:-unknown} session_id=$sid mode=$mode profile=$profile remote_control=on"
 }
 
@@ -217,7 +241,7 @@ rc_sweep() {
         mt="$now"; age_days=0; age="-"
       fi
       if tmux has-session -t "=$name" 2>/dev/null; then
-        if [ "$(tmux display-message -p -t "=$name" '#{session_attached}' 2>/dev/null)" = "1" ]; then
+        if [ "$(tmux display-message -p -t "=$name:" '#{session_attached}' 2>/dev/null)" = "1" ]; then
           tmuxstate="live*"   # attached
         else
           tmuxstate="live"

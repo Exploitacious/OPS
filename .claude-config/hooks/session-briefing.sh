@@ -33,7 +33,7 @@ SETTINGS="$CFG/settings.json"
 # `C--Users-...`, which left SNAP_DIR + the memory-health path wrong there.
 # _src is the SessionStart `source` (startup|resume|compact|clear), read from the
 # stdin payload the same way post-compact-resume.sh does; drives the Boot line.
-_src=""
+_src=""; _model=""
 ENCODED_CWD="$(pwd | sed 's|/|-|g')"
 if [[ ! -t 0 ]]; then
   _payload="$(cat 2>/dev/null || true)"
@@ -41,6 +41,9 @@ if [[ ! -t 0 ]]; then
     _tp="$(printf '%s' "$_payload" | hook_field transcript_path 2>/dev/null)" || _tp=""
     [[ -n "$_tp" ]] && ENCODED_CWD="$(basename "$(hook_pathnorm "$(dirname "$_tp")")")"
     _src="$(printf '%s' "$_payload" | hook_field source 2>/dev/null)" || _src=""
+    # SessionStart carries the session's model only sometimes; the effort line below
+    # uses it when it is there and says so when it had to estimate.
+    _model="$(printf '%s' "$_payload" | hook_field model 2>/dev/null)" || _model=""
   fi
 fi
 
@@ -71,13 +74,105 @@ gate="Sonnet 5.5 default lane · Opus 5.5 foreman and high-criticality lanes"
 # --- config posture (parse flat keys from the resolved settings.json) ---
 val() { grep -iE "\"$1\"[[:space:]]*:" "$SETTINGS" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*//; s/[",]//g; s/[[:space:]]*$//'; }
 ac="$(val autoCompactEnabled)"; if [ "$ac" = "false" ]; then acs="OFF (manual /compact)"; else acs="ON"; fi
-eff="$(val effortLevel)"; [ -n "$eff" ] || eff="default"
 # Main-session (foreman) pin read from the shared stage-1 settings.json, not
 # from $CFG/$SETTINGS: that file is the same for every profile, while the
 # fallback below is a distinct env var rather than a settings.json key.
 main_model="$(jq -r '.model // "default"' "$HOME/.claude/settings.json" 2>/dev/null)"
 [ -n "$main_model" ] || main_model="default"
 fallback_model="${ANTHROPIC_DEFAULT_OPUS_MODEL:-default}"
+
+# --- effort: what this session really runs ---
+# The line used to print the first effortLevel key found anywhere in the settings file,
+# which can be another model's saved level. Claude Code resolves the env
+# CLAUDE_CODE_EFFORT_LEVEL, then --effort at launch, then the saved level for the model
+# (modelSettings.<model>.effortLevel in the active profile's settings), then the
+# model's own default. This prints the highest of those the hook can see and labels the
+# source, so a reader knows whether it is a fact or an estimate.
+# The launch flag comes from the nearest ancestor process whose comm is `claude`
+# (Linux /proc only; any other platform, or any read error, falls through to the saved
+# level). The walk follows at most 16 actual parents and stops at PID 1. That command
+# line can hold a prompt or a credential, so only the --effort value is matched: it is
+# checked against a short alphanumeric pattern the moment it is read, and no other
+# argument is stored or printed, nor is an invalid value (it is reported as invalid).
+# BRIEFING_PROC_ROOT (a test seam) names a directory laid out like /proc.
+# Limits: a session started with a model override and no --effort is not seen (the
+# override is deliberately not read), and when SessionStart omits the model the saved
+# level is looked up for the settings pin, which the line labels as an estimate.
+_eff_norm() {  # $1: a candidate level; prints it lowercased when it is a short alphanumeric word, else "?"
+  local LC_ALL=C v="$1"
+  case "$v" in ''|*[!A-Za-z0-9]*) printf '?'; return ;; esac
+  [ "${#v}" -le 12 ] || { printf '?'; return; }
+  printf '%s' "$v" | tr 'A-Z' 'a-z'
+}
+_eff_ok() { case "$1" in low|medium|high|xhigh|max) return 0 ;; esac; return 1; }  # a level a launch or the env can carry
+_effort_from_argv() {  # stdin: NUL-separated argv; prints the last --effort value, normalized
+  local a prev="" v=""
+  while IFS= read -r -d '' a || [ -n "$a" ]; do
+    [ "$a" != "--" ] || break
+    if [ "$prev" = "--effort" ]; then v="$(_eff_norm "$a")"; prev=""; continue; fi
+    prev=""
+    case "$a" in
+      --effort) prev="--effort" ;;
+      --effort=*) v="$(_eff_norm "${a#--effort=}")" ;;
+    esac
+  done
+  printf '%s' "$v"
+}
+_LAUNCH=""
+_launch_effort() {  # sets _LAUNCH; returns 1 when no claude ancestor could be read
+  local root="${BRIEFING_PROC_ROOT:-/proc}" pid=$$ hops=0 stat rest ppid comm
+  [ -d "$root" ] || return 1
+  while [ "$hops" -lt 16 ]; do
+    stat="$(cat "$root/$pid/stat" 2>/dev/null)" || return 1
+    rest="${stat##*) }"; read -r _ ppid _ <<< "$rest"   # comm is parenthesised and may hold spaces: split after the last ") "
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ppid" -gt 1 ] || return 1
+    pid="$ppid"; hops=$((hops + 1))
+    comm="$(cat "$root/$pid/comm" 2>/dev/null)" || return 1
+    # 2>/dev/null comes before the <: a failed redirection prints its error before a later 2> applies.
+    if [ "$comm" = claude ]; then _LAUNCH="$(_effort_from_argv 2>/dev/null < "$root/$pid/cmdline")"; return 0; fi
+  done
+  return 1
+}
+_eff_label() {  # <text> <note>...: "text (note; note)", leaving out empty notes
+  local t="$1" n="" x; shift
+  for x in "$@"; do [ -z "$x" ] || n="${n:+$n; }$x"; done
+  printf '%s%s' "$t" "${n:+ ($n)}"
+}
+_saved_effort() {  # $1: a note about an ignored launch value, or empty; prints the saved-level text
+  local m="${_model:-}" est="" v
+  if [ ! -f "$SETTINGS" ]; then _eff_label "model default" "no settings file" "$1"; return; fi
+  command -v jq >/dev/null 2>&1 || { _eff_label "unknown" "jq not installed" "$1"; return; }
+  if [ -z "$m" ]; then
+    m="$(jq -r '.model // empty' "$SETTINGS" 2>/dev/null)" \
+      || { _eff_label "unknown" "settings unreadable" "$1"; return; }
+    est="session model unknown, estimated from the settings pin"
+  fi
+  m="${m%%\[*}"   # Claude Code keys a saved level by the model id without a [1m] suffix
+  if [ -z "$m" ] || [ "$m" = default ]; then _eff_label "model default" "session model unknown" "$1"; return; fi
+  v="$(jq -r --arg m "$m" '(.modelSettings // {})[$m].effortLevel // empty' "$SETTINGS" 2>/dev/null)" \
+    || { _eff_label "unknown" "settings unreadable" "$1"; return; }
+  case "$v" in
+    '') _eff_label "model default" "$est" "$1" ;;
+    low|medium|high|xhigh) _eff_label "$v" "saved default" "$est" "$1" ;;
+    # Claude Code ignores an invalid saved level without a word; the value is not echoed.
+    *) _eff_label "model default" "saved level is not valid and ignored" "$est" "$1" ;;
+  esac
+}
+eff=""
+if [ -n "${CLAUDE_CODE_EFFORT_LEVEL:-}" ]; then
+  v="$(_eff_norm "$CLAUDE_CODE_EFFORT_LEVEL")"
+  if _eff_ok "$v"; then eff="$v (env CLAUDE_CODE_EFFORT_LEVEL)"; else eff="set in env (not a recognized level)"; fi
+else
+  _launch_effort || _LAUNCH=""
+  if _eff_ok "$_LAUNCH"; then
+    eff="$_LAUNCH (launch flag)"
+  elif [ -n "$_LAUNCH" ]; then
+    eff="$(_saved_effort "launch --effort value not recognized and ignored")"
+  else
+    eff="$(_saved_effort "")"
+  fi
+fi
 
 printf '============================================================\n'
 printf ' SESSION BRIEFING\n'

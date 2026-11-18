@@ -461,7 +461,7 @@ Stage 2 deploy scripts.
 - **Hooks:** the scripts in `.claude-config/hooks/` (SessionStart briefing,
   foreman-context, lane-rules, pre-compact snapshot, post-compact resume with
   the deferred-tool re-select list, handoff-check, memory-index, memory-digest,
-  memory-hint, report-lint, askuser-cancel, the context-watch ladder and
+  memory-hint, report-lint, askuser-cancel, model-fallback-watch, the context-watch ladder and
   readout, and the secrets/git guards) are registered
   in `settings.json`, a **Level 1 file owned by Stage 1**. Its hook entries
   point at these scripts by path, so they come alive once Stage 1 has deployed

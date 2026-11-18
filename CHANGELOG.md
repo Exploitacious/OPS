@@ -4,6 +4,41 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-18: a key-safe client, a caller-bound waiter, the model-fallback flag, and honest suites
+
+- **`mcp-http-call.py` redacts before it clips.** Five error paths sliced server text first and
+  scrubbed after, so a key that straddled the cut survived as a prefix. Every piece of server
+  text the client shows (error bodies, tool answers, the call preview, `list` output) now has
+  every form of the key redacted (raw, and JSON-escaped once or twice), then each line break
+  escaped so it stays on one line, and only then is it clipped.
+- **Terminal refusals in `await-approval`, opt-in.** A server that binds each request to the
+  credential that made it answers "not this caller" when the waiter polls with another key, and
+  the waiter used to retry that five times as a gateway blip. A copy that lists those codes in
+  the new `terminal_refusals` config ends the wait on the first such answer (exit 2,
+  `state=<code>`), naming the connector, where its key came from and at most the last four
+  characters, and never offers another key. A refusal is read only from structured fields (the
+  envelope before its result) or from the one `NOTE:` line the client prints for it; quoted text
+  never counts. The client captures the key source and suffix when it loads the credential,
+  so a rotation during a poll leaves the provenance accurate. A kind's new `key_connector`
+  limits the `~/.claude.json` fallback to that one entry, so one kind never lends its key to
+  another. Omitted or empty `terminal_refusals` keeps
+  the old behavior. The client and the waiter must ship and roll back together.
+- **`hooks/model-fallback-watch.sh`, new.** When Claude Code moves a refused request to another
+  model, the hook flags it once at Stop so the agent tells the Operator which work ran on the
+  fallback model. It restarts a scan on a replaced transcript and repairs an unfinished ledger
+  row under the lock. The Stage-1 settings already register it behind `test -x`, so a copy picks it
+  up with this release. `MODEL_FALLBACK_WATCH=0` turns it off.
+- **The briefing's effort line** reported the first `effortLevel` anywhere in the settings file,
+  which since the Stage-1 per-model levels can be another model's. It now follows Claude Code's
+  own order (env, launch flag, the saved level for this model, the model default) and labels the
+  source.
+- **"Did not run" is never green.** Five suites printed SKIP and exited 0 when a prerequisite was
+  missing; they now exit 77 with the reason, which CI and the contributing loop count as a failure.
+- **Resume text**: a DO NOT or HOLD line in a snapshot is verified against what it cites before it
+  is treated as settled.
+- **Remote sessions**: pane-level tmux commands target `=NAME:` instead of `=NAME`; on tmux 3.6 the
+  bare form missed the pane, so the launch line was dropped and a bare shell was left. The launcher
+  waits (about 5 s at most) for the new pane and reports failed tmux commands with a nonzero exit.
 ## 2026-11-18: effort defaults, Fable 5.2 as the second mind, and the November doctrine pass
 
 The template's doctrine caught up with the shared Stage-1 settings and the owner's November

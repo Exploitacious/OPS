@@ -4,7 +4,8 @@
 # itself (stop_hook_active), lanes, the same message twice, deferral language, garbage in.
 # Offline: every path the hook reads (HOME, the state dir, the transcript) is under a temp
 # dir. The shape rules have their own unit tests in report-lint-regression-test.py, run at
-# the end. Exit 0 = every case passes; 1 = a case fails.
+# the end. Exit 0 = every case passes; 1 = a case fails; 77 = did not run (a prerequisite is
+# missing: the suite proved nothing, so a runner must not count it as a pass).
 # shellcheck disable=SC2015
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,7 +15,7 @@ pass(){ printf '  PASS  %s\n' "$1"; }
 fail(){ printf '  FAIL  %s\n' "$1"; [ $# -gt 1 ] && printf '        %s\n' "$2"; fails=$((fails + 1)); }
 
 echo "report-lint-selftest:"
-command -v python3 >/dev/null 2>&1 || { echo "report-lint-selftest: SKIP (no python3; the hook is silent without it)"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "report-lint-selftest: did not run: no python3 (the hook is silent without it)"; exit 77; }
 command -v jq >/dev/null 2>&1 || { echo "report-lint-selftest: FAIL (jq required for the assertions)"; exit 1; }
 export PYTHONDONTWRITEBYTECODE=1
 
