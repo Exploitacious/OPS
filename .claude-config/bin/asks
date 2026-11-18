@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""asks: the per-thread register of what is waiting on the box's owner.
+
+An Operator who runs several threads at once should not have to poll each one
+for status and decisions. Each thread writes what it needs from the Operator
+here, one line per ask, and anything that reads the register shows every
+thread's open asks in one place.
+
+  asks add "<one-line ask>" [--thread ID] [--why TEXT] [--rec TEXT]
+           [--default TEXT] [--kind decision|console|action] [--title TEXT]
+           [--owner TEXT] [--deadline YYYY-MM-DD] [--client NAME]
+           console asks (steps only a person can do in a vendor's web console):
+           [--tool NAME] [--step TEXT]... [--paste TEXT|@FILE|-]
+           [--expect TEXT] [--link URL]
+  asks list [--all | --thread ID] [--json] [--resolved]
+  asks resolve <n | THREAD#n> [--thread ID] [--note TEXT]
+  asks prune [--days N]
+
+Who reads it: `asks list` (with --json for a script) and `session-end`, which
+lists the thread's open asks at every ending. Nothing else in OPS reads these files.
+
+Where it lives: one JSON file per thread under
+${OPS_STATE_DIR:-~/.local/state/ops}/asks/. The thread defaults to
+$ASKS_THREAD, else $T3CODE_THREAD_ID (a lane inherits its foreman's id, so a
+lane's asks land on the thread the Operator actually reads). Files are mode
+0600 in a 0700 directory: an ask can name a client.
+
+Kinds. `decision` (default) is a question with a recommendation; `action` is
+something only the Operator can click or send; `console` is a step that only a
+person can take in a vendor's own web console because the vendor offers no
+write API for it. Console asks carry their steps and the full paste text, so
+the Operator can do every console step in one sitting instead of one script per
+chat message.
+
+Why a file and not a hook: a thread may stop without ever running a closing
+step, so a register written only at the end of a session would be empty for
+the threads the Operator most needs to see. Each thread writes as it goes.
+
+An ask with the same text, kind and thread as an open one updates it instead
+of adding a duplicate, so a thread that re-runs its closing step after a
+compaction stays idempotent. Resolved asks are kept 14 days, then pruned.
+
+Platform: the register is locked with fcntl, which only POSIX Python has. On a
+platform without it (native Windows) the command prints one line and exits 1
+rather than crash; run it under WSL or on a Linux or macOS box.
+
+Exit 0 ok; 1 a register file could not be read or written, or the platform has
+no fcntl; 2 usage error or a refused input (a secret-shaped value is never
+stored: the ask, every add field, --title, --thread and resolve --note are all
+checked).
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+
+try:
+    import fcntl
+except ImportError:
+    print("asks: this platform's Python has no fcntl, which the register lock needs; "
+          "run asks on Linux, macOS or WSL", file=sys.stderr)
+    sys.exit(1)
+
+VERSION = 1
+KINDS = ("decision", "action", "console")
+KEEP_RESOLVED_DAYS = 14
+MAX_ASK = 400
+MAX_FIELD = 1200
+MAX_STEP = 600
+MAX_PASTE = 64 * 1024
+MAX_ASKS_PER_THREAD = 200
+
+UUID = re.compile(r"^(?:mcp:)?([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+REF = re.compile(r"^(.+)#(\d+)$")
+
+# High-precision credential shapes only. A paste kit legitimately names
+# parameters such as "password", so a keyword match would refuse real scripts;
+# these match the value shapes that should never reach a register (the register
+# is shown in chats and may be synced).
+SECRET_SHAPES = (
+    ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("GitHub token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}")),
+    ("Anthropic or OpenAI key", re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{24,}")),
+    ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("JSON web token", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+)
+
+
+class AsksError(Exception):
+    """A refused input or an unreadable register; main turns it into an exit code."""
+
+    def __init__(self, message, code=2):
+        super().__init__(message)
+        self.code = code
+
+
+# --- paths and time -----------------------------------------------------------
+
+def asks_dir():
+    base = os.environ.get("OPS_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".local", "state", "ops")
+    return os.path.join(base, "asks")
+
+
+def now():
+    # ASKS_NOW is a test seam: the suite pins the clock to prove the retention rule.
+    raw = os.environ.get("ASKS_NOW")
+    if raw:
+        return datetime.datetime.fromisoformat(raw)
+    return datetime.datetime.now().astimezone()
+
+
+def current_thread():
+    return (os.environ.get("ASKS_THREAD") or os.environ.get("T3CODE_THREAD_ID") or "").strip()
+
+
+def file_name(thread):
+    """A filename for any thread id. Subagent ids carry ':' and '%' and can be
+    longer than a filesystem allows, so anything that is not a plain safe id
+    gets a hash suffix; the full id is stored inside the file."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", thread)
+    if safe != thread or len(safe) > 80 or safe.startswith("."):
+        digest = hashlib.sha1(thread.encode("utf-8")).hexdigest()[:12]
+        safe = "%s-%s" % (safe.lstrip(".")[:40] or "thread", digest)
+    return safe + ".json"
+
+
+def short_id(thread):
+    m = UUID.match(thread)
+    if m:
+        return ("mcp:" if thread.startswith("mcp:") else "") + m.group(1)
+    if thread.startswith("thread:"):
+        return "lane:" + hashlib.sha1(thread.encode("utf-8")).hexdigest()[:8]
+    return thread[:12]
+
+
+# --- text hygiene -------------------------------------------------------------
+
+def one_line(value, limit, label):
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if len(text) > limit:
+        raise AsksError("%s is %d characters; the limit is %d (keep an ask to one line, put detail in --why)"
+                        % (label, len(text), limit))
+    return text
+
+
+def refuse_secrets(label, value):
+    for name, pattern in SECRET_SHAPES:
+        if pattern.search(value or ""):
+            raise AsksError("%s looks like it holds a %s; the register is shown in chats and may be synced, "
+                            "so put the value in your secrets store or the console and name it instead" % (label, name))
+
+
+def read_paste(spec):
+    if spec is None:
+        return None
+    if spec == "-":
+        data = sys.stdin.read()
+    elif spec.startswith("@"):
+        try:
+            with open(spec[1:], encoding="utf-8") as fh:
+                data = fh.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AsksError("cannot read paste file %s: %s" % (spec[1:], getattr(exc, "strerror", None) or exc))
+    else:
+        data = spec
+    data = data.replace("\r\n", "\n").strip("\n")
+    if len(data.encode("utf-8")) > MAX_PASTE:
+        raise AsksError("the paste text is over %d KB; split it into one console ask per script" % (MAX_PASTE // 1024))
+    return data or None
+
+
+# --- storage ------------------------------------------------------------------
+
+class Store:
+    """The asks directory with one lock for every read-modify-write."""
+
+    def __init__(self, path=None):
+        self.path = path or asks_dir()
+
+    def _ensure(self):
+        try:
+            os.makedirs(self.path, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise AsksError("cannot create %s: %s" % (self.path, exc.strerror or exc), 1)
+
+    def locked(self):
+        store = self
+
+        class _Lock:
+            def __enter__(self):
+                store._ensure()
+                self.fd = os.open(os.path.join(store.path, ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(self.fd, fcntl.LOCK_EX)
+                return store
+
+            def __exit__(self, *exc):
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(self.fd)
+
+        return _Lock()
+
+    def read_all(self):
+        """(docs, errors). A missing directory is an empty register; a file that
+        cannot be read or parsed is an error that names it, never an empty list."""
+        docs, errors = [], []
+        try:
+            names = sorted(os.listdir(self.path))
+        except FileNotFoundError:
+            return docs, errors
+        except OSError as exc:
+            return docs, ["cannot list %s: %s" % (self.path, exc.strerror or exc)]
+        for name in names:
+            if name.startswith(".") or not name.endswith(".json"):
+                continue
+            doc, err = self._read_one(os.path.join(self.path, name), name)
+            if err:
+                errors.append(err)
+            else:
+                docs.append(doc)
+        return docs, errors
+
+    @staticmethod
+    def _read_one(path, name):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except OSError as exc:
+            return None, "cannot read asks/%s: %s" % (name, exc.strerror or exc)
+        except (ValueError, UnicodeDecodeError) as exc:
+            return None, "asks/%s is not valid JSON: %s" % (name, exc)
+        if (not isinstance(doc, dict) or not isinstance(doc.get("thread"), str) or not doc["thread"]
+                or not isinstance(doc.get("asks"), list)):
+            return None, "asks/%s has no thread id or asks list" % name
+        for ask in doc["asks"]:
+            if not isinstance(ask, dict) or not isinstance(ask.get("n"), int) or not isinstance(ask.get("text"), str):
+                return None, "asks/%s holds an ask without a number and text" % name
+        doc["_file"] = name
+        return doc, None
+
+    def load(self, thread):
+        """The document for THREAD (a fresh one when none exists yet)."""
+        path = os.path.join(self.path, file_name(thread))
+        if not os.path.lexists(path):
+            return {"version": VERSION, "thread": thread, "title": "", "next": 1, "asks": [], "_file": file_name(thread)}
+        doc, err = self._read_one(path, file_name(thread))
+        if err:
+            raise AsksError(err, 1)
+        return doc
+
+    def save(self, doc):
+        self._ensure()
+        out = {k: v for k, v in doc.items() if not k.startswith("_")}
+        out["version"] = VERSION
+        text = json.dumps(out, indent=1, ensure_ascii=False) + "\n"
+        path = os.path.join(self.path, file_name(doc["thread"]))
+        fd, tmp = tempfile.mkstemp(prefix=".ask.", suffix=".tmp", dir=self.path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def prune(self, moment, days=KEEP_RESOLVED_DAYS):
+        """Drop resolved asks older than DAYS, retaining each thread's next number.
+        Returns the number of asks dropped. Caller holds the lock."""
+        dropped = 0
+        docs, errors = self.read_all()
+        if errors:
+            # A failed read cannot stand in for an empty register, including
+            # during the automatic prune an add performs.
+            raise AsksError("; ".join(errors), 1)
+        for doc in docs:
+            keep = []
+            for ask in doc["asks"]:
+                when = parse_stamp(ask.get("resolved"))
+                if when is not None and (moment - when).days >= days:
+                    dropped += 1
+                else:
+                    keep.append(ask)
+            if len(keep) == len(doc["asks"]):
+                continue
+            # Keep the counter even after the last ask expires: reusing #1
+            # would let an old reference resolve a different, new question.
+            doc["asks"] = keep
+            self.save(doc)
+        return dropped
+
+
+def parse_stamp(value):
+    if not value:
+        return None
+    try:
+        d = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo is not None else d.astimezone()
+
+
+def open_asks(docs):
+    """Every unresolved ask of every document, each with its thread attached."""
+    out = []
+    for doc in docs:
+        for ask in doc["asks"]:
+            if ask.get("resolved"):
+                continue
+            item = dict(ask)
+            item["thread"] = doc["thread"]
+            item["thread_title"] = doc.get("title") or ""
+            item["ref"] = "%s#%d" % (short_id(doc["thread"]), ask["n"])
+            out.append(item)
+    return out
+
+
+# --- commands -----------------------------------------------------------------
+
+def cmd_add(args):
+    thread = (args.thread or current_thread()).strip()
+    fallback = False
+    if not thread:
+        thread, fallback = "adhoc", True
+    text = one_line(args.text, MAX_ASK, "the ask")
+    if not text:
+        raise AsksError("the ask is empty")
+    fields = {
+        "why": one_line(args.why, MAX_FIELD, "--why"),
+        "rec": one_line(args.rec, MAX_FIELD, "--rec"),
+        "default": one_line(args.default, MAX_FIELD, "--default"),
+        "owner": one_line(args.owner, MAX_FIELD, "--owner"),
+        "client": one_line(args.client, 200, "--client"),
+        "tool": one_line(args.tool, 200, "--tool"),
+        "expect": one_line(args.expect, MAX_FIELD, "--expect"),
+        "link": one_line(args.link, 1000, "--link"),
+    }
+    if fields["link"] and not re.match(r"^https?://", fields["link"]):
+        raise AsksError("--link must be an http or https URL")
+    steps = [one_line(s, MAX_STEP, "--step") for s in (args.step or [])]
+    steps = [s for s in steps if s]
+    paste = read_paste(args.paste)
+    deadline = None
+    if args.deadline:
+        try:
+            deadline = datetime.date.fromisoformat(args.deadline).isoformat()
+        except ValueError:
+            raise AsksError("--deadline must be YYYY-MM-DD")
+    kind = args.kind or ("console" if (fields["tool"] or steps or paste) else "decision")
+    if kind == "console" and not (fields["tool"] or steps or paste):
+        raise AsksError("a console ask needs --tool, at least one --step or a --paste text")
+    title = one_line(args.title, 200, "--title")
+    # Every text input is checked before the lock or any write. The thread id is
+    # included because it becomes the file name, and the title because a page that
+    # lists the register shows it when the thread has no other title.
+    for label, value in [("the ask", text), ("--thread", thread), ("--title", title)] + \
+            [("--" + k, v) for k, v in fields.items()] + \
+            [("--step", s) for s in steps] + [("--paste", paste or "")]:
+        refuse_secrets(label, value)
+
+    moment = now()
+    stamp = moment.isoformat(timespec="seconds")
+    with Store().locked() as store:
+        store.prune(moment)
+        doc = store.load(thread)
+        if title:
+            doc["title"] = title
+        existing = next((a for a in doc["asks"]
+                         if not a.get("resolved") and a["text"] == text and a.get("kind", "decision") == kind), None)
+        values = dict(fields, kind=kind, text=text, steps=steps, paste=paste, deadline=deadline)
+        if existing is not None:
+            # A re-add refreshes the detail, but a field the re-add leaves empty keeps its value.
+            for key, value in values.items():
+                if value not in (None, "", []):
+                    existing[key] = value
+            existing["updated"] = stamp
+            n, verb = existing["n"], "updated"
+        else:
+            open_count = sum(1 for a in doc["asks"] if not a.get("resolved"))
+            if open_count >= MAX_ASKS_PER_THREAD:
+                raise AsksError("this thread already has %d open asks; resolve some first" % open_count)
+            n = doc.get("next", 1)
+            if any(a["n"] >= n for a in doc["asks"]):
+                n = max(a["n"] for a in doc["asks"]) + 1
+            ask = dict(values, n=n, created=stamp, updated=stamp, resolved=None, note=None)
+            doc["asks"].append(ask)
+            doc["next"] = n + 1
+            verb = "added"
+        doc["updated"] = stamp
+        store.save(doc)
+    where = "thread %s" % short_id(thread)
+    if fallback:
+        print("asks: no thread id (T3CODE_THREAD_ID is unset); filed under 'adhoc'", file=sys.stderr)
+    print("asks: %s #%d (%s) for %s" % (verb, n, kind, where))
+    return 0
+
+
+def select_docs(docs, args):
+    if args.thread:
+        want = args.thread.strip()
+        picked = [d for d in docs if d["thread"] == want or d["thread"].startswith(want) or short_id(d["thread"]) == want]
+        return picked
+    if args.all:
+        return docs
+    thread = current_thread()
+    if not thread:
+        return docs
+    return [d for d in docs if d["thread"] == thread]
+
+
+def cmd_list(args):
+    store = Store()
+    docs, errors = store.read_all()
+    for err in errors:
+        print("asks: " + err, file=sys.stderr)
+    chosen = select_docs(docs, args)
+    items = []
+    for doc in chosen:
+        for ask in doc["asks"]:
+            if bool(ask.get("resolved")) != bool(args.resolved):
+                continue
+            item = dict(ask)
+            item["thread"] = doc["thread"]
+            item["thread_title"] = doc.get("title") or ""
+            item["ref"] = "%s#%d" % (short_id(doc["thread"]), ask["n"])
+            items.append(item)
+    items.sort(key=lambda i: (i.get("created") or "", i["thread"], i["n"]))
+    if args.json:
+        sys.stdout.write(json.dumps(items, indent=1, ensure_ascii=False) + "\n")
+        return 1 if errors else 0
+    if not items:
+        scope = "this thread" if not (args.all or args.thread) and current_thread() else "the register"
+        print("asks: nothing %s in %s" % ("resolved" if args.resolved else "open", scope))
+        return 1 if errors else 0
+    last = None
+    for item in items:
+        if item["thread"] != last:
+            last = item["thread"]
+            title = " (%s)" % item["thread_title"] if item["thread_title"] else ""
+            print("thread %s%s" % (short_id(last), title))
+        stamp = (item.get("created") or "")[:10]
+        print("  %s  %-8s %s  %s" % (item["ref"], item.get("kind", "decision"), stamp, item["text"]))
+        for label, key in (("why", "why"), ("recommend", "rec"), ("if no answer", "default"),
+                           ("owner", "owner"), ("client", "client"), ("deadline", "deadline"),
+                           ("tool", "tool"), ("expect", "expect"), ("link", "link")):
+            if item.get(key):
+                print("      %s: %s" % (label, item[key]))
+        for i, step in enumerate(item.get("steps") or [], 1):
+            print("      step %d: %s" % (i, step))
+        if item.get("paste"):
+            print("      paste: %d lines (use --json to read the text)" % (item["paste"].count("\n") + 1))
+        if item.get("resolved"):
+            print("      resolved: %s%s" % (item["resolved"], " (%s)" % item["note"] if item.get("note") else ""))
+    return 1 if errors else 0
+
+
+def find_ref(docs, ref, thread_flag):
+    """(doc, ask) for a ref: 'N' on the current or --thread thread, or 'THREAD#N'."""
+    m = REF.match(ref)
+    if m:
+        want, n = m.group(1), int(m.group(2))
+        pool = [d for d in docs if d["thread"] == want or d["thread"].startswith(want) or short_id(d["thread"]) == want]
+    elif ref.isdigit():
+        n = int(ref)
+        want = (thread_flag or current_thread()).strip()
+        if not want:
+            raise AsksError("no thread: pass THREAD#N, --thread, or run it where T3CODE_THREAD_ID is set")
+        pool = [d for d in docs if d["thread"] == want or d["thread"].startswith(want) or short_id(d["thread"]) == want]
+    else:
+        raise AsksError("an ask is named N or THREAD#N, not '%s'" % ref)
+    if len(pool) > 1:
+        raise AsksError("'%s' matches %d threads; use more of the thread id" % (ref, len(pool)))
+    if not pool:
+        raise AsksError("no thread matches '%s'" % ref, 1)
+    for ask in pool[0]["asks"]:
+        if ask["n"] == n:
+            return pool[0], ask
+    raise AsksError("thread %s has no ask #%d" % (short_id(pool[0]["thread"]), n), 1)
+
+
+def cmd_resolve(args):
+    moment = now()
+    note = one_line(args.note, MAX_FIELD, "--note") or None
+    refuse_secrets("--note", note)   # shown by `asks list --resolved`, so it gets the same refusal as an ask
+    with Store().locked() as store:
+        docs, errors = store.read_all()
+        if errors:
+            raise AsksError("; ".join(errors), 1)
+        doc, ask = find_ref(docs, args.ref, args.thread)
+        if ask.get("resolved"):
+            print("asks: %s#%d was already resolved %s" % (short_id(doc["thread"]), ask["n"], ask["resolved"]))
+            return 0
+        ask["resolved"] = moment.isoformat(timespec="seconds")
+        ask["note"] = note
+        doc["updated"] = ask["resolved"]
+        store.save(doc)
+        store.prune(moment)
+    print("asks: resolved %s#%d" % (short_id(doc["thread"]), ask["n"]))
+    return 0
+
+
+def cmd_prune(args):
+    with Store().locked() as store:
+        dropped = store.prune(now(), args.days)
+    print("asks: pruned %d resolved ask%s older than %d days" % (dropped, "" if dropped == 1 else "s", args.days))
+    return 0
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(prog="asks", description="The per-thread register of what is waiting on the box's owner.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    add = sub.add_parser("add", help="record one ask")
+    add.add_argument("text", help="the ask, one line")
+    add.add_argument("--thread")
+    add.add_argument("--title", help="the thread's title, shown when nothing else names the thread")
+    add.add_argument("--why", help="why it matters, one line")
+    add.add_argument("--rec", help="your recommendation")
+    add.add_argument("--default", help="what happens if the Operator says nothing")
+    add.add_argument("--kind", choices=KINDS)
+    add.add_argument("--owner", help="the owning lane and scope")
+    add.add_argument("--deadline", metavar="YYYY-MM-DD")
+    add.add_argument("--client")
+    add.add_argument("--tool", help="console asks: the vendor console or the page in it, for example 'Example vendor script library'")
+    add.add_argument("--step", action="append", help="console asks: one action per --step, in order")
+    add.add_argument("--paste", help="console asks: the text to paste (TEXT, @FILE or - for stdin)")
+    add.add_argument("--expect", help="console asks: what the Operator should see when it worked")
+    add.add_argument("--link", help="console asks: a direct link to the console page")
+    ls = sub.add_parser("list", help="show asks")
+    scope = ls.add_mutually_exclusive_group()
+    scope.add_argument("--all", action="store_true")
+    scope.add_argument("--thread")
+    ls.add_argument("--json", action="store_true")
+    ls.add_argument("--resolved", action="store_true", help="show resolved asks instead of open ones")
+    res = sub.add_parser("resolve", help="mark one ask done")
+    res.add_argument("ref", metavar="n|THREAD#n")
+    res.add_argument("--thread")
+    res.add_argument("--note")
+    pr = sub.add_parser("prune", help="drop resolved asks past their retention")
+    pr.add_argument("--days", type=int, default=KEEP_RESOLVED_DAYS)
+    return ap
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    try:
+        # --thread names a file on add and is matched on list and resolve; none of them
+        # should ever carry a credential, so the flag is refused on every subcommand.
+        refuse_secrets("--thread", getattr(args, "thread", None))
+        return {"add": cmd_add, "list": cmd_list, "resolve": cmd_resolve, "prune": cmd_prune}[args.cmd](args)
+    except AsksError as exc:
+        print("asks: %s" % exc, file=sys.stderr)
+        return exc.code
+    except OSError as exc:
+        print("asks: %s" % (exc.strerror or exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

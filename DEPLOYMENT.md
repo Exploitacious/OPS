@@ -489,7 +489,7 @@ Stage 2 deploy scripts.
   `/compact` (T3 Code's composer, or the terminal).
 
 - **Destructive-tool tests run in a sandbox:** every suite that runs a tool
-  that deletes or moves files (branch-gc, pre-compact, memory-init, deploy,
+  that deletes or moves files (branch-gc, pre-compact, memory-init, deploy, session-end,
   skills-vendor) refuses to start outside `.claude-config/bin/sandbox-run`,
   which needs `bwrap` (bubblewrap; `apt install bubblewrap`).
   `verify-ops.sh` check 24 fails a suite that names one of those tools

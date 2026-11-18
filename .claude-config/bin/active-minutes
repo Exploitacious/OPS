@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""Billable working minutes from a Claude session transcript.
+
+Two rules set the measure, and the code follows both.
+
+  A silent stretch of 30 minutes or less between transcript events is working
+  time (the operator reads, takes a portal step, works the same task outside
+  the chat). A longer one is a candidate break, so it is classified, never
+  silently dropped.
+
+  An interactive session counts its whole span, pauses included. A real break
+  needs evidence: the operator says so, or a long gap shows no work trace
+  anywhere. Unattended agent time counts like attended time. An unattended hold
+  (a usage limit, an overnight stop) is not work and needs evidence too:
+  counting a limit hold as work would bill hours in which nothing happened.
+
+So every gap over --gap seconds (default 1800) is classified by its evidence and
+printed with its cause, COUNTED or EXCLUDED:
+
+  COUNTED   attended pause: the gap ends with a prompt the operator typed, and
+            lasted no longer than --attended-max hours (default 4).
+  COUNTED   background task: the gap ends with a task notification whose task was
+            launched before the gap began, so agent work ran through it, and the
+            gap lasted no longer than --attended-max hours (default 4).
+  EXCLUDED  usage-limit hold or other provider error: an API error record sits
+            just before the gap.
+  EXCLUDED  operator-stated break: the last prompt before the gap, or the one
+            that ends it, says the operator was away ("brb", "going to lunch",
+            "I'm back").
+  EXCLUDED  idle until a harness message: a scheduled check, fleet notice,
+            context handoff, resume message, compact command or cross-thread
+            message ended the gap, so nobody is shown present.
+  EXCLUDED  long attended pause: over --attended-max hours with no other
+            evidence (overnight, away). The 4 hours sit between the pauses
+            seen in practice (an hour or two while the operator works a console
+            or a report) and the stops that mean overnight or a weekend. The
+            line only decides counted versus listed; --keep overrides it with
+            evidence.
+  EXCLUDED  long background-task gap: the same task notification, but the gap
+            is over --attended-max hours and nothing shows work inside it. A
+            launch record is not work: a watcher or an idle poll that exits the
+            next morning would otherwise bill the night (the measure bills work
+            that ran, not elapsed time). Work trace inside the gap (--also lane
+            transcripts, which fill the gap) or --keep with evidence counts it.
+  EXCLUDED  no prompt evidence: nothing in the transcript says who ended it, or
+            the agent resumed with no prompt after the gap. A foreground tool
+            call that ran long, a permission wait and an unrecorded hold look the
+            same in a transcript and only the first is work, so the gap is
+            listed (with that said in its cause) until --also lane transcripts
+            or --keep give evidence.
+
+--also FILE... adds other transcripts (a thread's subagent and workflow lane
+files) as work trace: an event in any of them inside a gap means work was
+running, so the gap is not one. --keep ISO / --drop ISO force one gap (matched
+by its UTC start, any prefix such as 2026-11-06T22:10) to COUNTED or EXCLUDED
+when the operator gives evidence the transcript cannot see. --strict drops every
+gap over --gap with no classification, for a session with no operator in it.
+
+Bill to the minute as decimal hours, two places; never round.
+
+The contiguous work blocks print in one display zone, each timestamp converted
+on its own, so a block that spans a daylight-saving change prints each end with
+that day's offset and a zone tag (EDT and EST, for example). The zone is
+--zone NAME (an IANA name such as America/Chicago); without it, the TZ
+environment variable if it names a valid zone, else the machine's own zone
+(/etc/localtime), else UTC. A fixed offset read every block an hour late once the
+zone changed its offset, and the windows go onto a time entry's Time line, so
+they must be right. --tz-offset H is the explicit fixed-offset override; it
+prints plain times with no zone tag and cannot be combined with --zone. If a
+named zone cannot be loaded (a machine with no time zone database and no tzdata
+package) the run prints one line and exits 2: pass --tz-offset H instead. The
+ACTIVE total and the gap rule never depend on the display zone.
+
+--time-tool NAME says which tool call is the ticketing system's time-entry tool:
+any tool whose name ends with NAME (default time_manage, so a namespaced name
+such as mcp__server__group__time_manage matches) and whose input carries
+mode "create" and the ticket it was filed against. --since-last-entry
+--brief reads those calls.
+
+--since-last-entry --brief is the hook mode: one key=value line with the
+unlogged minutes since this transcript's last time-entry create, the age of the
+last create for --ticket (ticket_entry_age_min), and the age of the last create
+naming a ticket in the other form, ticket number versus numeric id
+(other_form_entry_age_min): it may be the same ticket, so a hook stays silent.
+
+Usage:
+  active-minutes <transcript.jsonl> [--gap SECONDS] [--attended-max HOURS]
+      [--since ISO] [--until ISO] [--zone NAME | --tz-offset H] [--also FILE ...]
+      [--keep ISO ...] [--drop ISO ...] [--strict] [--time-tool NAME]
+      [--since-last-entry [--ticket T] [--now ISO] --brief]
+
+Exit 0 ok; 1 too few timestamped events to measure; 2 a usage error or a zone
+that cannot be loaded.
+"""
+import argparse, json, os, re, sys, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+p = argparse.ArgumentParser()
+p.add_argument("transcript")
+p.add_argument("--gap", type=float, default=1800.0, help="seconds of silence above which a gap is classified instead of counted (default 1800 = 30 min)")
+p.add_argument("--attended-max", type=float, default=4.0, help="hours an attended pause may last and still count without other evidence (default 4)")
+p.add_argument("--since", default=None, help="ignore events before this ISO time (no offset = UTC)")
+p.add_argument("--until", default=None, help="ignore events after this ISO time (no offset = UTC)")
+zone_group = p.add_mutually_exclusive_group()
+zone_group.add_argument("--zone", default=None, metavar="NAME", help="IANA time zone for the block display, converted per timestamp so it follows daylight saving (default: $TZ if it names a valid zone, else the machine's zone, else UTC)")
+zone_group.add_argument("--tz-offset", type=float, default=None, help="fixed hours from UTC for the block display (e.g. -5), no zone tag; overrides the zone default")
+p.add_argument("--also", nargs="*", default=[], metavar="FILE", help="other transcripts (subagent and workflow lanes) whose events count as work trace; put after the transcript")
+p.add_argument("--keep", action="append", default=[], metavar="ISO", help="count the gap whose UTC start begins with this text (evidence the transcript cannot see)")
+p.add_argument("--drop", action="append", default=[], metavar="ISO", help="exclude the gap whose UTC start begins with this text (the operator said it was a break)")
+p.add_argument("--strict", action="store_true", help="exclude every gap over --gap with no classification (no operator in the session)")
+p.add_argument("--time-tool", default="time_manage", metavar="NAME", help="the ticketing system's time-entry tool: any tool name ending with NAME (default time_manage)")
+p.add_argument("--since-last-entry", action="store_true", help="measure from this transcript's last time-entry create (hook mode)")
+p.add_argument("--ticket", default=None, help="with --since-last-entry: report the age of the last time create for this ticket")
+p.add_argument("--now", default=None, help="with --since-last-entry: the clock to age entries against (ISO, default the real clock)")
+p.add_argument("--brief", action="store_true", help="with --since-last-entry: print one key=value line only")
+# Transcript pool directories are named after the working directory path, like
+# -home-user-project, so a path relative to ~/.claude/projects starts with "-"
+# and argparse reads it as an option (usage error). Pin any argument that is an
+# existing file to ./ first.
+a = p.parse_args(["./" + x if x.startswith("-") and os.path.isfile(x) else x
+                  for x in sys.argv[1:]])
+if a.brief and not a.since_last_entry:
+    p.error("--brief needs --since-last-entry")
+# An empty name ends every tool name, so every call would read as a time entry.
+if not a.time_tool.strip():
+    p.error("--time-tool: need a tool name, got an empty one")
+TIME_TOOL = a.time_tool.strip()
+
+def parse(t):
+    # Transcript stamps are UTC. A naive time is read as UTC too, because
+    # comparing naive with aware datetimes raises TypeError.
+    try: dt = datetime.datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+    except Exception: return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+def bound(name, value):
+    # An unparseable bound must stop the run: silently dropping it would
+    # measure the whole transcript and bill the wrong window.
+    if not value: return None
+    dt = parse(value)
+    if dt is None: p.error(f"--{name}: not an ISO time: {value!r}")
+    return dt
+
+since = bound("since", a.since)
+until = bound("until", a.until)
+now = bound("now", a.now) or datetime.datetime.now(datetime.timezone.utc)
+
+# Display zone. Default: --zone, else the TZ variable when it names a loadable
+# zone, else the machine's own zone, else UTC, converted per timestamp. An
+# explicit --tz-offset is a fixed zone with no tag. Every failure stops the run
+# with one line: printing blocks in some other zone would put wrong windows on a
+# time entry. Checked before the transcript is read, so a bad option exits 2
+# whatever the transcript holds.
+def stop(message):
+    print("active-minutes: " + message, file=sys.stderr)
+    sys.exit(2)
+
+def tz_database_missing():
+    """True when the machine has no IANA zone data at all (no system database and
+    no tzdata package), so no named zone can load. UTC is in every database."""
+    try: ZoneInfo("UTC")
+    except (ZoneInfoNotFoundError, ValueError, OSError): return True
+    return False
+
+def named_zone(name, source):
+    try: return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError) as e:
+        if tz_database_missing():
+            stop("no time zone database on this machine, so %s %r cannot load (%s); install the tzdata package, or pass --tz-offset H for a fixed offset" % (source, name, e))
+        return None
+
+def machine_zone():
+    """(zone, label) of the machine's own zone from /etc/localtime, or None."""
+    try:
+        with open("/etc/localtime", "rb") as fh: zone = ZoneInfo.from_file(fh)
+    except (OSError, ValueError): return None
+    label = "system local time"
+    try:
+        target = os.readlink("/etc/localtime")
+        if "zoneinfo/" in target: label = target.split("zoneinfo/", 1)[1]
+    except OSError: pass
+    return zone, label
+
+if a.tz_offset is not None:
+    try: zone = datetime.timezone(datetime.timedelta(hours=a.tz_offset))
+    except (ValueError, OverflowError): p.error("--tz-offset: need hours strictly between -24 and 24, got %r" % a.tz_offset)
+    zone_label, stamp = "tz-offset %+g" % a.tz_offset, "%m-%d %H:%M"
+else:
+    zone = zone_label = None
+    if a.zone is not None:
+        zone = named_zone(a.zone, "--zone")
+        if zone is None: stop("--zone: no such time zone %r" % a.zone)
+        zone_label = a.zone
+    else:
+        env_tz = os.environ.get("TZ", "").strip().lstrip(":")
+        if env_tz:
+            zone = named_zone(env_tz, "TZ")
+            if zone is not None: zone_label = env_tz
+        if zone is None:
+            found = machine_zone()
+            if found is not None: zone, zone_label = found
+        if zone is None: zone, zone_label = datetime.timezone.utc, "UTC"
+    stamp = "%m-%d %H:%M %Z"
+# The %Z tag also tells apart the two 01:xx hours of a fall-back night, which
+# print the same wall-clock time an hour apart.
+def loc(t): return t.astimezone(zone).strftime(stamp)
+
+# --- classifying one record -------------------------------------------------
+
+# Prompts the harness sends into a thread as if the operator typed them. The
+# list is deliberately short: an unknown prompt is read as the operator's, and
+# every gap line quotes the prompt that ended it, so a miss shows on the Time
+# line instead of hiding. Each shape is one OPS or T3 itself produces or its
+# prompt filter (memory-index) already names.
+HARNESS = [
+    (re.compile(r"^\s*<task-notification", re.I), "task notification"),
+    (re.compile(r"^\s*(scheduled|one-shot)\b.{0,60}\bcheck\b", re.I), "scheduled check"),
+    (re.compile(r"^\s*Automated fleet notice", re.I), "fleet notice"),
+    (re.compile(r"^\s*Context handoff \(", re.I), "context handoff"),
+    (re.compile(r"^\s*Delegated tasks? ", re.I), "delegated-task notice"),
+    (re.compile(r"^\s*This session is being continued", re.I), "session continuation"),
+    (re.compile(r"^\s*(#{1,3}\s*RESUME PROTOCOL\b|Continue the standing work\b)", re.I), "resume baton"),
+    (re.compile(r"^\s*/compact\s*$", re.I), "compact command"),
+    (re.compile(r"^\s*FYI from the\b.{0,80}\b(foreman|thread)", re.I), "cross-thread message"),
+]
+# Evidence the operator was away. Only the last prompt before a gap (within an
+# hour of it) and the prompt that ends it are read; a morning remark about
+# lunch does not excuse the afternoon.
+BREAK_BEFORE = re.compile(
+    r"\b(brb|afk|be right back|be back|back in \d|back after|back later|stepping away|step away|stepped away"
+    r"|going to (lunch|bed|sleep|the gym|dinner)|off to (lunch|bed|sleep)|heading out|signing off|logging off"
+    r"|good ?night|done for (the day|today|tonight)|lunch break|taking a break|at lunch|going offline)\b", re.I)
+BREAK_AFTER = re.compile(
+    r"\b(i'?m back|im back|i am back|back from|just got back|sorry for the delay"
+    r"|sorry,? (i )?was (away|out|at)|was (away|out|at lunch|at a meeting|in a meeting)|stepped away)\b", re.I)
+BREAK_BEFORE_WINDOW = 3600.0
+LIMIT = re.compile(r"limit|resets|quota", re.I)
+TOOL_USE_ID = re.compile(r"<tool-use-id>\s*(toolu_[A-Za-z0-9_]+)\s*</tool-use-id>")
+
+def content_text(d):
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str): return c
+    if isinstance(c, list):
+        return " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+    return ""
+
+def prompt_text(d):
+    """Text of a prompt-like record (None for anything else). A prompt arrives as
+    a queue-operation enqueue (T3), a user message, or both."""
+    t = d.get("type")
+    if t == "queue-operation":
+        if d.get("operation") == "enqueue" and str(d.get("content") or "").strip(): return str(d["content"])
+        return None
+    if t != "user" or d.get("isSidechain") or d.get("isMeta") or "toolUseResult" in d: return None
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, list):
+        if any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c): return None
+        txt = content_text(d).strip()
+        if txt: return txt
+        return "[attachment]" if any(isinstance(x, dict) and x.get("type") in ("image", "document") for x in c) else None
+    txt = content_text(d).strip()
+    return txt or None
+
+def harness_kind(text, d):
+    # A compaction summary is written by the harness into the user role.
+    if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"): return "compaction summary"
+    for rx, label in HARNESS:
+        if rx.search(text): return label
+    if d.get("promptSource") == "system": return "system message"
+    return None
+
+def one_line(s, n=70):
+    s = " ".join(str(s).split())
+    return (s[:n - 1] + "...") if len(s) > n else s
+
+class Ev:
+    __slots__ = ("ts", "kind", "text", "label", "err", "tool_ids", "launches")
+    def __init__(self, ts, kind="event", text="", label="", err="", tool_ids=(), launches=()):
+        self.ts, self.kind, self.text, self.label, self.err = ts, kind, text, label, err
+        self.tool_ids, self.launches = tool_ids, launches
+
+def read_events(path, main):
+    """Every timestamped record. In the main transcript each is classified (human
+    prompt, harness prompt, API error, assistant, plain); an --also file only
+    adds trace."""
+    out = []
+    failed_creates = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line: continue
+            try: d = json.loads(line)
+            except Exception: continue
+            if not isinstance(d, dict): continue
+            t = d.get("timestamp") or d.get("ts")
+            if not t: continue
+            dt = parse(t)
+            if dt is None: continue
+            if since and dt < since: continue
+            if until and dt > until: continue
+            if not main:
+                out.append(Ev(dt, "trace")); continue
+            pt = prompt_text(d)
+            if pt is not None:
+                hk = harness_kind(pt, d)
+                out.append(Ev(dt, "harness" if hk else "human", pt, hk or ""))
+            elif d.get("isApiErrorMessage"):
+                out.append(Ev(dt, "api_error", content_text(d), err=str(d.get("error") or "")))
+            else:
+                tids, launches = [], []
+                c = (d.get("message") or {}).get("content")
+                if d.get("type") == "user" and isinstance(c, list):
+                    failed_creates.update(x.get("tool_use_id") for x in c
+                                          if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("is_error"))
+                if d.get("type") == "assistant" and isinstance(c, list):
+                    for x in c:
+                        if isinstance(x, dict) and x.get("type") == "tool_use":
+                            tids.append(x.get("id"))
+                            if str(x.get("name", "")).endswith(TIME_TOOL) and isinstance(x.get("input"), dict) and x["input"].get("mode") == "create":
+                                ticket = str(x["input"].get("ticket") or "").strip()
+                                if ticket:
+                                    launches.append((x.get("id"), ticket))
+                out.append(Ev(dt, "assistant" if d.get("type") == "assistant" else "event", tool_ids=tuple(tids), launches=tuple(launches)))
+    # An explicitly failed create is not logged time. Keep that work in the
+    # unlogged window instead of suppressing the reminder that it still needs billing.
+    for e in out:
+        e.launches = tuple(ticket for tool_id, ticket in e.launches if tool_id not in failed_creates)
+    return out
+
+ev = read_events(a.transcript, True)
+for extra in a.also:
+    try: ev += read_events(extra, False)
+    except OSError as e: p.error("--also %s: %s" % (extra, e))
+
+def ticket_form(t):
+    """How a ticket is named: the ticket number (the letter T, eight digits, a dot, then digits) or the numeric
+    id (12345). A ticketing tool may accept either, so one ticket can appear in
+    both forms in one thread and a string compare cannot tell they are the same."""
+    t = str(t).strip()
+    if re.fullmatch(r"T\d{8}\.\d+", t, re.I): return "number"
+    return "id" if t.isdigit() else "other"
+
+def same_ticket(x, y): return str(x).strip().upper() == str(y).strip().upper()
+
+# Hook mode: measure from the last time create in this transcript.
+# ticket_entry: the latest create naming this ticket in the same form.
+# other_form_entry: the latest create naming a ticket in the OTHER form. It might
+# be the same ticket, which this script cannot tell (it makes no ticketing
+# lookup), so a hook reads it as "may already be logged" and stays silent
+# instead of claiming no entry exists.
+last_entry = ticket_entry = other_form_entry = None
+if a.since_last_entry:
+    for e in ev:
+        if e.launches:
+            last_entry = e.ts if last_entry is None or e.ts > last_entry else last_entry
+            if a.ticket is not None and str(a.ticket).strip():
+                if any(same_ticket(a.ticket, l) for l in e.launches):
+                    ticket_entry = e.ts if ticket_entry is None or e.ts > ticket_entry else ticket_entry
+                elif any(l.strip() and ticket_form(l) != ticket_form(a.ticket) for l in e.launches):
+                    other_form_entry = e.ts if other_form_entry is None or e.ts > other_form_entry else other_form_entry
+    if last_entry is not None:
+        ev = [e for e in ev if e.ts >= last_entry]
+
+def age_min(t): return "%.1f" % ((now - t).total_seconds() / 60) if t else "none"
+
+if len(ev) < 2:
+    if a.brief:
+        print("unlogged_min=0.0 window_start=none last_entry=%s ticket_entry_age_min=%s other_form_entry_age_min=%s" % (
+            last_entry.isoformat() if last_entry else "none", age_min(ticket_entry), age_min(other_form_entry)))
+        sys.exit(0)
+    print("not enough timestamped events to measure", file=sys.stderr)
+    sys.exit(1)
+
+ev.sort(key=lambda e: e.ts)
+ts = [e.ts for e in ev]
+span = (ts[-1] - ts[0]).total_seconds()
+
+# Fast lookups the gap rules need.
+launch_ts = {}      # tool_use id -> when this transcript recorded the call
+last_human = []     # per event index: the latest human prompt at or before it
+cur = None
+for i, e in enumerate(ev):
+    for tid in e.tool_ids: launch_ts.setdefault(tid, e.ts)
+    if e.kind == "human": cur = e
+    last_human.append(cur)
+
+def ending_prompt(i):
+    """The first prompt, or an unprompted assistant record, within two minutes
+    after the gap ends (hook and queue records can sit between the two)."""
+    start = ev[i + 1].ts
+    for j in range(i + 1, len(ev)):
+        if (ev[j].ts - start).total_seconds() > 120: break
+        if ev[j].kind in ("human", "harness", "assistant"): return ev[j]
+    return None
+
+def api_error_before(i):
+    """The API error that ended the turn before the gap, if the last substantive
+    record at or before ev[i] is one. An error followed by any prompt or agent
+    output is a retry, not a hold, so older errors never excuse a later gap."""
+    for j in range(i, -1, -1):
+        if ev[j].kind == "api_error": return ev[j]
+        if ev[j].kind in ("human", "harness", "assistant"): return None
+    return None
+
+def classify(i):
+    """(counted, cause) for the gap between ev[i] and ev[i+1]."""
+    x, y = ev[i], ev[i + 1]
+    d = (y.ts - x.ts).total_seconds()
+    iso = x.ts.astimezone(datetime.timezone.utc).isoformat()
+    for k in a.keep:
+        if iso.startswith(k): return True, "kept: the operator gave evidence of work (--keep %s)" % k
+    for k in a.drop:
+        if iso.startswith(k): return False, "dropped: the operator gave evidence of a break (--drop %s)" % k
+    err = api_error_before(i)
+    if err is not None:
+        if err.err == "rate_limit" or LIMIT.search(err.text):
+            return False, 'usage-limit hold: "%s" ended the turn before the gap' % one_line(err.text)
+        return False, "provider error hold (%s) ended the turn before the gap" % (err.err or "api error")
+    end = ending_prompt(i)
+    h = last_human[i]
+    if h is not None and (x.ts - h.ts).total_seconds() <= BREAK_BEFORE_WINDOW:
+        m = BREAK_BEFORE.search(h.text.replace("’", "'"))
+        if m: return False, 'operator-stated break before the gap: "%s"' % one_line(h.text)
+    if end is not None and end.kind == "human":
+        if BREAK_AFTER.search(end.text.replace("’", "'")):
+            return False, 'operator-stated break, said when the operator returned: "%s"' % one_line(end.text)
+    if end is None:
+        return False, "no prompt evidence: nothing in the transcript says who ended the gap"
+    if end.kind == "assistant":
+        # A foreground tool call that ran past 30 minutes, a permission wait and
+        # an unrecorded hold all leave this same shape (a call, then its result,
+        # nothing between), and only the first is work. Counting it would bill
+        # holds, which the measure forbids, so it stays listed; the cause names
+        # what it could be so the Time line is not misleading, and --also or
+        # --keep settles it.
+        return False, "no prompt evidence: the agent resumed with no prompt after the gap (a long tool call, a permission wait or an unrecorded hold look the same here): pass the lane transcripts with --also, or --keep with evidence"
+    if end.kind == "harness":
+        if end.label == "task notification":
+            m = TOOL_USE_ID.search(end.text)
+            launched = launch_ts.get(m.group(1)) if m else None
+            if launched is not None and launched <= x.ts:
+                # A launch record proves a task started, not that it worked all
+                # night. Past the attended ceiling the gap needs work trace inside
+                # it (--also lane files fill the gap, so it never gets here) or
+                # the operator's --keep; the measure bills work that ran, not
+                # elapsed time.
+                if d > a.attended_max * 3600:
+                    return False, "background task launched %s, but the gap is over %g h and nothing in the transcript shows work inside it (a launch record is not work): pass the lane transcripts with --also, or --keep with evidence" % (loc(launched), a.attended_max)
+                return True, "background task: launched %s, still running through the gap, finished at its end (unattended agent work counts)" % loc(launched)
+            return False, "task notification ended the gap but its launch is not in this transcript: pass the lane transcripts with --also, or --keep with evidence"
+        return False, "idle until %s (nobody shown present): \"%s\"" % (end.label, one_line(end.text, 50))
+    if d > a.attended_max * 3600:
+        return False, 'attended pause over %g h with no other evidence (overnight or away): next prompt "%s"' % (a.attended_max, one_line(end.text, 50))
+    return True, 'attended pause: the operator typed next ("%s"), assumed working' % one_line(end.text, 50)
+
+active = 0.0
+gaps = []   # (start, end, seconds, counted, cause)
+for i, (x, y) in enumerate(zip(ev, ev[1:])):
+    d = (y.ts - x.ts).total_seconds()
+    if d <= a.gap:
+        active += d
+        continue
+    if a.strict:
+        counted, cause = False, "--strict: every gap over %d min is excluded" % (a.gap // 60)
+    else:
+        counted, cause = classify(i)
+    if counted: active += d
+    gaps.append((x.ts, y.ts, d, counted, cause))
+excluded = [g for g in gaps if not g[3]]
+counted = [g for g in gaps if g[3]]
+
+if a.brief:
+    print("unlogged_min=%.1f window_start=%s last_entry=%s ticket_entry_age_min=%s other_form_entry_age_min=%s" % (
+        active / 60, ts[0].isoformat(), last_entry.isoformat() if last_entry else "none",
+        age_min(ticket_entry), age_min(other_form_entry)))
+    sys.exit(0)
+
+print("events            : %d" % len(ts))
+print("first (UTC)       : %s" % ts[0].isoformat())
+print("last  (UTC)       : %s" % ts[-1].isoformat())
+print("raw span          : %.1f min (%.2f h)" % (span/60, span/3600))
+# Truncate the billing display: %.2f alone rounds 40 minutes up to 0.67 hours.
+# Keep the measured minutes and higher-precision hours beside it as evidence.
+billable_hundredths = int(active // 36)
+print("ACTIVE (bill this): %.1f min = %.4f h -> %.2f h" % (active/60, active/3600, billable_hundredths/100))
+print("counted gaps      : %d, total %.1f min" % (len(counted), sum(g[2] for g in counted)/60))
+print("excluded gaps     : %d, total %.1f min" % (len(excluded), sum(g[2] for g in excluded)/60))
+
+if gaps:
+    print("\ngaps over %d min, each with its cause (UTC start for --keep and --drop):" % (a.gap // 60))
+    for s, e, d, c, cause in gaps:
+        print("  %-8s %7.1f min  %s -> %s  [%s]  %s" % ("COUNTED" if c else "EXCLUDED", d/60, loc(s), loc(e), s.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M"), cause))
+
+print("\ncontiguous work blocks (%s):" % zone_label)
+segstart = ts[0]
+for s, e, d, c, cause in excluded:
+    print("  %s -> %s  (%.1f min)" % (loc(segstart), loc(s), (s-segstart).total_seconds()/60))
+    segstart = e
+print("  %s -> %s  (%.1f min)" % (loc(segstart), loc(ts[-1]), (ts[-1]-segstart).total_seconds()/60))

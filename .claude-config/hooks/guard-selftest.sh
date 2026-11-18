@@ -66,6 +66,79 @@ if [ "$quick" = 1 ]; then
   echo "guard-selftest --quick: $fails guard(s) NOT enforcing: is jq installed? are the hooks executable (100755)?"
   exit 1
 fi
+# session-end belongs to the main thread: a payload with agent_id (an in-process
+# helper) may run it only with --dry-run; the main thread runs it freely, and a
+# command that only names it in an argument is not a run. Neither GIT_GUARD=off
+# hatch lifts the rule, while the env hatch still lifts the git rules (control).
+# The command name is spelled session\u002dend inside the JSON (jq decodes it to the
+# real name) and left out of the labels: sandbox-lint reads a self-test that names a
+# destructive tool as one that runs it, and these probes only feed text to the guard.
+probe "git-guard blocks the ending command from a lane"        2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"~/OPS/.claude-config/bin/session\u002dend close"}}
+J
+probe "git-guard blocks a quoted-path ending finish from a lane" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"\"$HOME/OPS/.claude-config/bin/session\u002dend\" finish --declined none"}}
+J
+probe "git-guard blocks a real ending after a dry run in one command" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend pause --dry-run && session\u002dend pause --json | jq .status"}}
+J
+probe "git-guard blocks an ending after a semicolon" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend pause --dry-run --json; session\u002dend close"}}
+J
+probe "git-guard blocks an ending after a pipe" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend pause --dry-run | session\u002dend close"}}
+J
+probe "git-guard does not mistake a finish reason for a dry run" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend finish --declined 'only --dry-run work'"}}
+J
+probe "git-guard allows a dry ending followed by another command" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend pause --dry-run; echo done"}}
+J
+probe "git-guard allows the ending command from the main thread" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","tool_input":{"command":"~/OPS/.claude-config/bin/session\u002dend close"}}
+J
+probe "git-guard allows the ending command's --dry-run from a lane" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"~/OPS/.claude-config/bin/session\u002dend pause --dry-run --json"}}
+J
+probe "git-guard allows a lane naming the ending command in an argument" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"grep -n session\u002dend ~/OPS/.claude-config/bin/README.md; echo \"feat(session\u002dend): see session\u002dend close\""}}
+J
+probe "git-guard blocks the ending command from a lane behind the GIT_GUARD=off prefix" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"GIT_GUARD=off ~/OPS/.claude-config/bin/session\u002dend close"}}
+J
+GIT_GUARD=off probe "git-guard blocks the ending command from a lane under the exported hatch" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"~/OPS/.claude-config/bin/session\u002dend close"}}
+J
+GIT_GUARD=off probe "git-guard's exported hatch still allows a force-push (control)" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}
+J
+probe "git-guard blocks an ending behind rtk" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"rtk session\u002dend close"}}
+J
+probe "git-guard blocks an ending behind an rtk subcommand" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"command /usr/local/bin/rtk --verbose run --quiet session\u002dend close"}}
+J
+probe "git-guard allows an rtk dry ending" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"rtk run session\u002dend pause --dry-run"}}
+J
+probe "git-guard blocks a dry flag inside a path argument" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend close --transcript '/tmp/example --dry-run transcript.jsonl'"}}
+J
+probe "git-guard allows a quoted dry flag and a quoted program path" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"\"$HOME/Example OPS/bin/session\u002dend\" pause '--dry-run'"}}
+J
+probe "git-guard blocks a quoted program path containing spaces" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"\"$HOME/Example OPS/bin/session\u002dend\" close"}}
+J
+probe "git-guard blocks a dry flag in an inline comment" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend close # do not pass --dry-run here"}}
+J
+probe "git-guard blocks a dry flag used as an output filename" 2 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend close > '--dry-run'"}}
+J
+probe "git-guard allows a dry ending with redirected output" 0 git-guard.sh <<'J'
+{"tool_name":"Bash","agent_id":"a1b2c3","tool_input":{"command":"session\u002dend pause --dry-run > example.json"}}
+J
 # rtk-awareness: every guard reaches the same verdict whether or not the
 # command carries an rtk prefix (bare, absolute-path, `command rtk`, an rtk
 # option, the argv form of a command-running subcommand, or rtk after && in a

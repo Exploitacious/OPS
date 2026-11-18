@@ -196,7 +196,7 @@ under `~/.local/state/ops/` (`branch-gc.log`, `branch-gc-trash/`).
 Who runs it: `../backup/daily-sync.sh` nightly (`--apply`, after the project
 pull), the PreCompact hook for the repo holding the cwd (detached, with a
 soft deadline and the purge off), and closeout on each repo a session
-touched. Tests (all inside `sandbox-run`): `tests/branch-gc-test.sh`,
+touched (`session-end`, with the hook's numbers and managed set). Tests (all inside `sandbox-run`): `tests/branch-gc-test.sh`,
 `tests/branch-gc-safety-test.py`, `tests/branch-gc-t3v2-test.py`,
 `tests/branch-gc-deadline-test.py`, `tests/branch-gc-late-writer-test.py`;
 the hook's half: `tests/pre-compact-test.sh`.
@@ -232,6 +232,189 @@ reads Claude Code transcripts under each root (`~/.claude/projects`) and
 prints one row per session or lane: calls, input, cache writes and reads,
 output, idle gaps and the cache re-writes after them. Metadata only, never
 message text. Test: `tests/transcript-usage-test.py`.
+
+## `asks`: the register of what is waiting on the box's owner
+
+An Operator running several threads at once should not poll each one for status.
+`asks` is the register each thread writes to, one line per open ask, so everything
+waiting on the Operator can be read in one place. Python standard library only.
+
+```
+asks add "<one-line ask>" [--thread ID] [--why TEXT] [--rec TEXT] [--default TEXT]
+         [--kind decision|console|action] [--title TEXT] [--owner TEXT]
+         [--deadline YYYY-MM-DD] [--client NAME]
+         [--tool NAME] [--step TEXT]... [--paste TEXT|@FILE|-] [--expect TEXT] [--link URL]
+asks list [--all | --thread ID] [--json] [--resolved]
+asks resolve <n | THREAD#n> [--thread ID] [--note TEXT]
+asks prune [--days N]
+```
+
+- **Storage.** One JSON file per thread under `${OPS_STATE_DIR:-~/.local/state/ops}/asks/`,
+  mode 0600 in a 0700 directory (an ask can name a client). The thread is `--thread`,
+  else `$ASKS_THREAD`, else `$T3CODE_THREAD_ID` (a lane inherits its foreman's id, so its asks
+  land on the thread the Operator reads); with none, asks file under `adhoc` and say so.
+  A write takes one lock for the whole directory, so concurrent threads do not lose asks.
+- **Kinds.** `decision` (the default: a question with a recommendation), `action` (something
+  only the Operator can click or send) and `console` (a step only a person can take in a
+  vendor's web console, carrying its steps and the full paste text; `--tool`, `--step` or
+  `--paste` makes an ask a console ask by itself).
+- **Idempotent.** An ask with the same text, kind and thread as an open one updates it
+  (fields the re-add leaves empty keep their value), so a closing step re-run after a
+  compaction adds no duplicate. Numbers are per thread and never reused. Resolved asks are kept
+  14 days, then pruned. The empty thread record keeps its next number so an old reference
+  cannot resolve a new ask. An unreadable register file stops pruning and new adds before
+  they change any asks.
+- **Limits.** The ask 400 characters, a field 1200, a step 600, a paste 64 KB, 200 open asks
+  per thread. Over a limit is a refusal, never a silent cut.
+- **Secrets.** A secret-shaped value (private key block, GitHub, Anthropic or OpenAI, AWS or
+  Slack token, JSON web token) is refused in the ask, every add field, `--title`, `--thread`
+  and `resolve --note`; the refusal names the shape and never echoes the value.
+- **Who reads it.** `asks list` (`--json` for a script) and `session-end`, which lists the
+  thread's open asks at every ending. Nothing else in OPS reads the register.
+- **Exit codes.** 0 ok; 1 a register file could not be read or written (a corrupt file is
+  named, never read as an empty register), or the platform has no `fcntl`; 2 a usage error or
+  a refused input.
+- **Platform.** POSIX only (it locks with `fcntl`). On native Windows it prints one line and
+  exits 1; use WSL.
+
+Test: `tests/asks-test.py` (unittest, runs in the sandbox against a throwaway
+`OPS_STATE_DIR`).
+
+## `active-minutes`: working minutes from a session transcript
+
+`active-minutes <transcript.jsonl>` measures a thread's working time from its Claude Code
+transcript, before that time is billed to a ticket. Python standard library only.
+
+- **The rule.** A silent stretch of 30 minutes or less between events is working time. A longer
+  gap is classified from its evidence and printed with its cause, COUNTED or EXCLUDED: an
+  attended pause (the Operator typed next) counts up to `--attended-max` hours (default 4);
+  unattended agent time (a background task that ran through the gap) counts to the same
+  limit; a usage-limit or provider-error hold, a stated break, a wait ended by a harness message
+  (scheduled check, context handoff, resume message, `/compact`), a gap with no prompt
+  evidence and a gap past the limit are excluded. `--keep ISO` and `--drop ISO` settle one
+  gap on evidence the transcript cannot show; `--also FILE...` adds lane transcripts as work
+  trace; `--strict` excludes every gap over `--gap` seconds (default 1800). The figure to bill
+  is the `ACTIVE (bill this)` line, decimal hours to two places, never rounded.
+- **Options.** `--gap SECONDS`, `--attended-max HOURS`, `--since ISO`, `--until ISO` (no offset
+  means UTC), `--zone NAME`, `--tz-offset H`, `--also FILE...`, `--keep ISO`, `--drop ISO`,
+  `--strict`, `--time-tool NAME`, and the hook mode `--since-last-entry [--ticket T] [--now ISO]
+  --brief`, which prints one `key=value` line (unlogged minutes since the transcript's last
+  time-entry create, and the age of the last create for the ticket).
+- **Display zone.** The work blocks print in one zone, converted per timestamp so a block across
+  a daylight-saving change is right at each end: `--zone NAME` (an IANA name), else `$TZ` if
+  it names a valid zone, else the machine's own zone, else UTC. `--tz-offset H` prints a fixed
+  offset with no zone tag and cannot be combined with `--zone`. A named zone that cannot load
+  (no zone database and no `tzdata` package) prints one line and exits 2. The total and the gap
+  rule never depend on the display zone.
+- **`--time-tool NAME`.** Which tool call is the ticketing system's time-entry tool: any tool
+  whose name ends with `NAME` (default `time_manage`) and whose input carries `mode` `create`
+  and a `ticket`. Only the hook mode reads it. A ticketing system whose tool has another
+  input shape is not read as a time entry. A call without a ticket, or with an explicit
+  error result, does not reset the unlogged window.
+- **Exit codes.** 0 ok; 1 too few timestamped events to measure; 2 a usage error or a zone that
+  cannot be loaded.
+
+Test: `tests/active-minutes-test.py` (unittest; builds synthetic transcripts, never reads a
+real one).
+
+## `session-end`: the mechanical half of ending a thread
+
+```
+session-end <pause|move|close> [--repo PATH]... [--transcript FILE] [--wait SECONDS] [--dry-run] [--json]
+session-end finish [--logged N | --declined REASON] [--json]
+```
+
+Every ending (pause, move, close) starts with it, so the steps a close used to assemble by
+hand from three skills run the same way every time. Python standard library only.
+
+- **What the first call does.** It snapshots git read-only, starts `branch-gc --apply` on the
+  thread's repos, rebuilds this directory's memory index (the pool comes from `memory-index
+  --pool-for --cwd <dir> --ops <checkout>`, the digest's own lookup, with the checkout the
+  memory-digest hook passes), lints when the thread named a file under `.claude-config/` or
+  `SKILLS/`, lists the thread's open asks (`asks list`), and prints what is left for the agent:
+  lessons, documents, the five-field resume note, the memory entries touched in the thread's
+  window, and by mode the compact line (`compact-cycle.sh --target <thread>`), the baton path
+  (`.claude-handoffs/key.sh` under `${OPS_DIR:-~/OPS}/.claude-handoffs/pending/`, where
+  `hooks/handoff-check.sh` looks), or, for a close, the measured time as evidence
+  (`active-minutes`), the scratch files, worktrees and named Docker objects the thread created
+  (listed, never removed), and the settle route. OPS ships no vault renderer, so that step
+  prints an explicit skip.
+- **What it never does.** It never commits, pushes, edits a ticket, logs time, writes a baton,
+  compacts, settles or deletes scratch. Its writes are branch-gc's own mechanic on the selected
+  repos, the memory index, its receipt and GC run files, and (`finish` only) the closeout stamp
+  and the archive of this thread's billing stamps.
+- **Which repos GC reaches.** The current repo plus each `--repo` when the thread's Claude
+  transcript is verified, else only explicit `--repo` values; other repos the transcript names
+  are printed as candidates with read-only snapshots. Of those, only the repos the PreCompact
+  hook would hand to branch-gc (`~/OPS`, `~/OPS/PROJECTS/<org>/<repo>` and `~/linuxploitacious`,
+  by realpath under the current `$HOME`; a clone of OPS under another name is not one) with
+  exactly one github.com origin. One detached worker per call runs them serially, each under
+  the hooks' timeout program with the hook's numbers: 900 s, a soft deadline
+  (`BRANCH_GC_DEADLINE`) at two thirds, 30 s from TERM to KILL, and `BRANCH_GC_TRASH_DAYS=0`.
+  GC works on the whole repo, including other threads' eligible idle work; branch-gc's own
+  process and T3 checks hold live worktrees. `--wait` (default 90) is the total time to wait
+  for the result; past it the call exits 3 with the result path, and a repeat call for the
+  same thread and repos reuses the pending worker. The output prints `branch-gc --restore` for
+  each quarantined worktree and the recorded tip of each deleted branch.
+- **Lint.** `verify-ops.sh --quiet` with `OPS_DIR` set to this checkout (the gate has no
+  lint-only mode). Its FAIL lines are findings, not a failed run: on a shared box the gate
+  almost always carries FAILs owned by other sessions, and whose a FAIL is stays the agent's
+  call. A lint that exits 1 with the gate's summary line (`verify-ops: N ok · N warn · N fail
+  (...)`) and FAIL lines gets the status `findings` (`fail_lines` in `--json`): every FAIL line
+  is printed, the receipt records them and stays passing, `finish` names their count and still
+  stamps, and the remainder asks the agent to fix the ones on its own files and name the rest.
+  Exit 0 also requires the gate's summary line with zero failures and no FAIL lines. A lint
+  that could not run or finish (no gate beside the command, a start error, a timeout,
+  another exit status, or no usable summary line) is `failed` and fails the receipt.
+- **Settle (close).** The remainder names T3's own settle tool first (`t3_thread_organize`
+  with action `settle`, as the last tool call of the turn) and `t3-api.sh settle-when-idle
+  <thread>` only as the fallback when that tool is not available, never both. Outside T3 there
+  is no settle step.
+- **`finish`.** Runs after the agent has saved lessons, fixed documents and written the resume
+  note. It reads the receipt `<state>/session-end/<key>.json`, refuses a receipt of another
+  thread, a failed run, or a GC run still going or failed, and then advances
+  `<state>/last-closeout` (the stamp `session-briefing.sh` reads) in `date -Is` format and
+  moves the receipt to `<state>/session-end/done/`. The first call never moves the stamp: it is
+  the lower bound of transcript knowledge mining. `<state>` is `$OPS_STATE_DIR`, else
+  `~/.local/state/ops`; GC runs keep `plan.json`, `run.log`, `result.json` and the worker lock
+  under `<state>/session-end/gc/<run>/`.
+- **The billing archive (close).** `finish` then needs exactly one of `--logged N` (time
+  entries created and read back; 0 is valid) or `--declined REASON`, and moves this thread's
+  `~/.claude-compact-cycle/session-start-<key>` and `work-log-<key>` (the stamps
+  `hooks/session-work-init.sh` and the PreCompact hook write; key from `hooklib.sh`'s
+  `work_session_key`) into one fresh `~/.claude-compact-cycle/reaped/<key>-<stamp>-<hex>/`
+  (exclusive `mkdir`, mode 0700, never reused), each by a single rename, the work-log first and
+  the session-start flag last. A rename keeps the file, so bytes a writer appends through a
+  descriptor it already holds land in the archive, and a writer that opens the name afterwards
+  creates a new live stamp that stays live; nothing is copied or deleted. `reaped.meta` beside
+  them holds `reaped_at`, `reaped_reason`, `reaped_key` and, per file, its original path, size
+  and sha256. The report prints the `mv -n <archived> <live>` that restores a file while its
+  live name is free. It archives only a key from the T3 session-id branch (`t3-<session id>`,
+  with `ops_backend` saying t3code): a shared-cwd key or a tmux key is refused, and the stamps
+  are then handled by hand per `SKILLS/session-close/mechanics.md`. If a new work-log appears
+  during archival, or a step fails after a move, the session-start flag stays live.
+- **Scope.** Claude sessions only: under Codex or OpenCode the transcript, time and billing
+  steps print "unsupported provider" and `finish` archives nothing. Main thread only: a
+  T3-delegated lane (thread id `thread:delegated-task:` or `thread:provider:`, or `lane-class
+  --self` saying `t3-lane` or `agent-lane`) is refused every writing mode, and
+  `hooks/git-guard.sh` blocks a run other than `--dry-run` from a payload with an `agent_id`
+  (an in-process helper shares its main thread's environment), under either `GIT_GUARD=off`
+  hatch too. The guard reads command text, so a wrapper script that calls the command is not
+  seen. Linux only (`fcntl` locks, `setsid` through `start_new_session`).
+- **`--dry-run`** writes nothing: branch-gc runs in report mode with its log and lock in a
+  scratch directory, and the writing helpers are only named. The human output is cut for an
+  agent under context pressure (one worktree list per main checkout; branch-gc's report-only
+  rows only for branches and worktrees the thread named, with a count of the rest); `--json`
+  keeps every child's full output.
+- **Exit codes.** 0 the requested steps completed; 1 a step failed or the call was refused; 2
+  invalid arguments; 3 GC still pending after the wait budget. All writing modes hold one
+  per-key lock through receipt creation or retirement (`SESSION_END_LOCK_WAIT`, default 10
+  seconds).
+
+Test: `tests/session-end-test.py` (unittest, runs only in the sandbox; every tool it calls is
+a recording stub beside a copy of the command in a fixture tree, git runs through a wrapper
+that fails the case on any writing subcommand, and a sentinel tree outside the fixture must
+be byte-identical after every case). The guard rule's probes are in `hooks/guard-selftest.sh`.
 
 ## `memory-index`, `memory-init`, `memory-init.ps1`: auto-memory
 
@@ -298,7 +481,10 @@ frontmatter for three more jobs, all read-only:
   settings decide. A failure prints one notice line naming the indexes, never
   a partial block. It never writes anything and creates no pool.
   `--digest-fit <pool>...` prints one row per pool (entries, described, by name
-  only, not shown) for a gate or an inventory script.
+  only, not shown) for a gate or an inventory script. `--pool-for [--cwd DIR]
+  [--ops DIR]` prints the existing pool the digest would show for a directory
+  (the same lookup, so `session-end` rebuilds the index the digest reads), exits
+  4 with nothing on stdout when there is none, and creates nothing.
 - `--hint` reads a UserPromptSubmit payload on stdin and prints at most three
   `Relevant memory: <name>: <description>` lines when the prompt strongly
   matches the names and descriptions of this directory's pool and the root
