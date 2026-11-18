@@ -24,9 +24,11 @@ delivered separately by that organization.
   mount cases; CI no longer installs rsync, which only the mount tests used.
 - **An existing copy keeps its leftovers**, since neither deploy nor a template sync
   deletes files: the clone under `PROJECTS/`, the mirrored `SKILLS/<name>/` folders,
-  `SKILLS/.vendored-state.tsv`. `DEPLOYMENT.md`, "Leftovers from the skill mounts",
-  says how to recognise them; all are safe to remove by hand, and `verify-ops.sh`
-  warns that the clone is missing from `projects-map.md` until it is gone.
+  `SKILLS/.vendored-state.tsv`, and any interrupted staging under `SKILLS/.vendor.*/`.
+  `DEPLOYMENT.md`, "Leftovers from the skill mounts", says how to inspect them and
+  preserve local work before optional removal. Staging remains gitignored so the
+  daily backup does not commit it, and `verify-ops.sh` warns that the clone is
+  missing from `projects-map.md` until it is gone.
 
 ## 2026-11-17: skills hold facts, not procedure; twelve template skills retire
 

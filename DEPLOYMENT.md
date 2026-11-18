@@ -562,11 +562,25 @@ Stage 2 is idempotent: it no-ops where state is already correct.
 Before 2026-11-17, deploy cloned a public skill source into
 `PROJECTS/Exploitacious/agent-skills` and mirrored skills from it into
 `SKILLS/`. Neither deploy nor a template sync deletes files, so an older copy
-keeps them, and all are safe to remove by hand: the clone (`verify-ops.sh`
-warns that it is absent from `projects-map.md` until it is gone); each
-`SKILLS/<name>/` folder in the first column of `SKILLS/.vendored-state.tsv`,
-then that file (keep any folder from a mount row you added yourself); and any
-`SKILLS/.vendor.XXXXXX` staging folder.
+keeps them. Inspect them before choosing what to remove; keep skills and
+sources you added yourself.
+
+- `SKILLS/.vendored-state.tsv` lists old mirror names in its first column.
+  A listed `SKILLS/<name>/` folder can have changed since its digest was
+  recorded. Compare it with its source and preserve any local edits and
+  GUI-only files (`00_System_Prompt.md`, `05_gui_dual_track.md`, `SETUP.md`)
+  before removing an unwanted mirror. Keep the ledger until that review is done.
+- `SKILLS/.vendor.XXXXXX` is staging from an interrupted sync. Its `previous/`
+  or `tree/` can hold the only copy of local or GUI files, including a mirror
+  that is missing from `SKILLS/`. Recover or save those files before removing
+  staging. These directories remain gitignored so the daily backup does not
+  commit them while they await review.
+- Check `PROJECTS/Exploitacious/agent-skills` for uncommitted work and unpushed
+  commits before removing the clone, after reviewing its mirrors.
+  `verify-ops.sh` warns that it is absent from `projects-map.md` until it is gone.
+
+Once you have preserved the files you want and removed unwanted mirrors, the
+old ledger can be removed too.
 
 ### Upgrading from a copy older than 2026-11-07
 

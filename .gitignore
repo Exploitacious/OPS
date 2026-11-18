@@ -30,6 +30,9 @@ desktop.ini
 
 # --- OPS machine-local churn ---
 .claude-config/backup/sync.log
+# Retired skill mounts can leave staging with the only copy of local files.
+# Keep it out of the daily backup until the owner recovers and removes it.
+SKILLS/.vendor.*/
 # Claude Code syncs claude.ai org and Anthropic skills into ~/.claude/skills/synced, and
 # deploy.sh links ~/.claude/skills to SKILLS/. Those skills belong to the org and refresh at
 # every session start; the daily backup's `git add -A` would commit them into this repo.

@@ -9,7 +9,7 @@
 # against current Stage-1-shaped settings, and fail on each class they exist to
 # catch. It also pins the shipped .gitattributes rule that merges pool
 # MEMORY.md indexes with the union driver, and the shipped .gitignore rules
-# that keep SKILLS/synced and SKILLS/.trash out of the repo.
+# that keep SKILLS/synced, SKILLS/.trash and retired mount staging out of the repo.
 #
 # Sources verify-ops.sh (its main runs only when executed) and drives single
 # checks against fixture trees under a throwaway HOME made by mktemp. It never
@@ -445,6 +445,14 @@ run check_skills_index
 chk "untracked synced and .trash dirs -> no WARN" "$([ "$WARNS" = 0 ]; echo $?)"
 chk "the shipped .gitignore ignores SKILLS/synced" "$(git -C "$OPS" check-ignore -q SKILLS/synced/org-skill/SKILL.md; echo $?)"
 chk "the shipped .gitignore ignores SKILLS/.trash" "$(git -C "$OPS" check-ignore -q SKILLS/.trash/old-org-skill/SKILL.md; echo $?)"
+# An interrupted mount can leave the only copy of local files in previous/.
+# Retiring its writer must not make the daily backup commit that staging tree.
+mkdir -p "$OPS/SKILLS/.vendor.Ab12Cd/previous"
+printf 'local setup\n' > "$OPS/SKILLS/.vendor.Ab12Cd/previous/SETUP.md"
+chk "the shipped .gitignore ignores retired mount staging" \
+  "$(git -C "$OPS" check-ignore -q SKILLS/.vendor.Ab12Cd/previous/SETUP.md; echo $?)"
+chk "ordinary local skills remain trackable" \
+  "$(git -C "$OPS" check-ignore -q SKILLS/local-skill/SKILL.md; [ "$?" = 1 ]; echo $?)"
 git -C "$OPS" add -f SKILLS/synced/org-skill/SKILL.md
 git -C "$OPS" -c user.name=selftest -c user.email=selftest@example.invalid commit -q -m fixture
 run check_skills_index
@@ -567,7 +575,7 @@ run memory_checks
 chk "the shipped memory-index on a small pool -> no FAIL, no WARN" "$([ "$FAILS" = 0 ] && [ "$WARNS" = 0 ]; echo $?)"
 
 # 29. Skill size (9b): 16,384 bytes and 1,500 characters a line, both
-# inclusive; WARN only. Mounted, synced and symlinked skills are skipped, and the
+# inclusive; WARN only. Synced and symlinked skills are skipped, and the
 # shipped skills pass.
 mk_skill() {  # name bytes [longest_line_chars]
   local d="$OPS/SKILLS/$1"; mkdir -p "$d"
