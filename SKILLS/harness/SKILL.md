@@ -1,6 +1,6 @@
 ---
 name: harness
-description: "Must always apply when working in a T3 Code thread on an OPS harness box. Facts about the box and T3 that an agent cannot work out: how a thread pauses, moves and closes, how to reach the owner, how waiting and helper agents behave, and the commands the box provides."
+description: "Must always apply when working in a T3 Code thread on an OPS harness box. Facts about the box and T3 that an agent cannot work out: how a thread pauses, moves and closes, how to reach the owner and get a file to them, how waiting and helper agents behave, and the commands the box provides."
 ---
 
 # Harness
@@ -35,7 +35,16 @@ Three endings. Pause: the same thread continues after a compact. Move: the work 
 - At most three asks in a reply, each with your recommendation and what happens if they say nothing. A hook checks this.
 - They read cold. Say what a thing is before using its name; give a link beside every id.
 - Data, comparisons and decisions read better as an inline page: build one HTML file from `assets/starter.html`, check it with `html_preview` at 728 and 390 wide (zero console errors), show it with `html_render`. Colors: `references/palette.md`. One page per reply.
-- To put a real file on their computer: `grabit FILE`. An image they attach in T3 is already a saved path: read it.
+
+## Getting a file to them
+
+Pick by what they need:
+
+- To read or look at it: show it in the thread, as an inline page or a link to its absolute path (T3 opens it in its files viewer). Nothing is transferred.
+- On their computer: `grabit`, over Tailscale. It works only when `tailscale status` on this box shows it signed in and their computer online; Taildrop lands the file in their Downloads on Windows. A T3 thread has no SSH connection to find their machine from, so name it: `grabit --list`, then `grabit --to <their computer> FILE...`. Plain `grabit FILE` picks the right machine only from an SSH shell. Named files only, never a folder. "Permission denied" means the box never ran `sudo tailscale set --operator=<owner>`: tell them, do not work around it.
+- Large or many files, or they want a link: `grabit --serve PATH...` prints a link that works only on their tailnet; it needs sudo and stays up until `grabit --serve-off`. Where the box's own doctrine names another delivery command, use that.
+- Tailscale signed out, or none of their devices online: say so and link the path in T3. Do not paste the file into chat or invent another route.
+- They sent you something: an image attached in T3 is already a saved path, read it. A file they Taildropped: `grabit --queue` pulls it into `~/grabit-inbox`; an empty queue means nothing arrived.
 
 ## Waiting
 

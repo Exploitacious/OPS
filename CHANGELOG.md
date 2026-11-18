@@ -77,6 +77,16 @@ rulings. Where the docs said one thing and the settings did another, the setting
   never moves), the `--repo` candidates, the open asks, the close listing, and what
   `session-end` never does.
 
+## 2026-11-18: the harness skill says how to get a file to the person
+
+The `harness` skill's one line on `grabit` becomes a short section that picks the route by
+need: show it in the thread when they only need to read it; `grabit` over Tailscale when it
+must land on their computer, naming the machine with `--to` because a T3 thread has no SSH
+connection for grabit to detect it from; `--serve` for large or many files; and, when
+Tailscale is signed out or none of their devices is online, a link to the path in T3 rather
+than another route. Receiving is covered too (an image attached in T3 is a saved path;
+`grabit --queue` for a file they Taildropped).
+
 ## 2026-11-18: memory saves only what has no other home
 
 The save rule changes from "write memory as you learn" to "memory holds only a trap with no
