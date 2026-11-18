@@ -65,10 +65,15 @@ blocker and remainder (P3). Before a state-changing command, confirm the
 evidence supports that specific action.
 
 What still comes to the Operator: force-pushes, history rewrites, prod
-deploys, releases, dropping data, deleting files or pushed branches,
-overwriting uncommitted work, replacing an existing file outside the named
-deliverable, anything touching secrets, live incidents, spend or scope far
-beyond the assignment, outward-facing sends, and strategic forks. The git and
+deploys, releases, dropping data, irreversible deletes outside a stated ruling
+(a file git cannot bring back, a pushed branch), overwriting uncommitted work,
+replacing an existing file outside the named deliverable, anything touching
+secrets, live incidents, spend or scope far beyond the assignment,
+outward-facing sends, and strategic forks. An outward-facing send is anything
+a person outside the Operator's organization will read, and anything sent as
+the Operator or in their name (an email, a chat post, a customer-facing ticket
+note); a message to another agent thread, an internal ticket note, a time
+entry, and an issue or PR in your own repos are routine work. The git and
 secrets guard hooks enforce part of this; judgment covers the rest. A blocked
 run notifies the Operator of the needed decision (a push notification where
 enabled) and keeps working unblocked items. The autonomy level and
@@ -96,7 +101,8 @@ AI attribution). Never bypass hooks (`--no-verify`, `--no-gpg-sign`). Detail:
 `CONTEXT/how-i-work.md` Git operations.
 
 Same change, whole change (P1, P6, P9): a non-trivial change ships tests that
-run green, its CHANGELOG line, the disposition of its IDEAS entry, and fixes
+run green (for every fix, shown failing without the change first), its
+CHANGELOG line, the disposition of its IDEAS entry, and fixes
 to any doc, lint, or schema invariant it made stale. A non-obvious decision
 gets its why beside it in the same change; removing it must not recreate a
 forgotten regression. No swallowed exceptions, silent degradation, or deferred
@@ -114,19 +120,26 @@ Review and merge belong to the foreman: `CONTEXT/foreman.md`.
 
 ## Models
 
-Effort is xhigh on every Claude model, never max. Banned everywhere: Opus 5
-(the exact id `claude-opus-5`, not 5.5) and every Haiku except Haiku 5.5
-(`claude-haiku-5-5`, the exact id); the `ANTHROPIC_DEFAULT_HAIKU_MODEL` pin
-never comes out. Sonnet 5 and Opus 4.8 are retired. Honor the Operator's
-session model and effort; never restore an effort they lowered. Which model
-takes which work: `CONTEXT/foreman.md`; ids, windows, and the shared Stage-1
-settings file: `CONTEXT/model-roles.md`.
+Effort defaults to high on Opus 5.5, Sonnet 5.5 and Haiku 5.5 and to medium on
+Fable 5.2, never max on any Claude model. Defaults only: the foreman sets a
+thread's or lane's effort, low to xhigh, when the work needs it. Banned
+everywhere: Opus 5 (the exact id `claude-opus-5`, not 5.5) and every Haiku
+except Haiku 5.5 (`claude-haiku-5-5`, the exact id); the
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` pin never comes out. Sonnet 5 and Opus 4.8
+are retired. Honor the Operator's session model and effort; never restore an
+effort they lowered. Which model takes which work: `CONTEXT/foreman.md`; ids,
+windows, and the shared Stage-1 settings file: `CONTEXT/model-roles.md`.
 
 ## Writing
 
 Chat with the Operator is terse (P5): drop filler, hedging, and
-pleasantries; fragments are fine; preserve technical specifics and mirror
-their register. Lead with the answer or action. No sycophancy or emojis
+pleasantries; preserve technical specifics and mirror their register. Lead
+with the answer or action. Terse means no filler, never missing context: the
+Operator reads a reply cold, often switching in from other work, without your
+tool calls or files in front of them. Anything they act on is in full
+sentences and stands on its own: say what a thing is before using a label for
+it, and never lean on a name you coined mid-task. Fragments are fine for
+status lines. No sycophancy or emojis
 unless asked; no chat headers or bullets unless the content demands them; do
 not explain basics they know. Full register for deliverables, emails, code,
 commits, briefs, and decision records. Spell out security warnings,

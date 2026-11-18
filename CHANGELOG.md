@@ -4,6 +4,44 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-18: effort defaults, Fable 5.2 as the second mind, and the November doctrine pass
+
+The template's doctrine caught up with the shared Stage-1 settings and the owner's November
+rulings. Where the docs said one thing and the settings did another, the settings were right.
+
+- **Effort defaults.** `CONTEXT/core.md`, `CONTEXT/model-roles.md` and `README.md` said effort
+  was `xhigh` on every model, held by a `CLAUDE_CODE_EFFORT_LEVEL` variable. The Stage-1
+  settings have saved one level per model since 2026-11-16 (`high` on Opus 5.5, Sonnet 5.5 and
+  Haiku 5.5, `medium` on Fable 5.2) and set no variable, because the variable outranks every
+  pick, T3's picker included. The docs now say so, give Claude Code's resolution order and what
+  follows for T3 threads, `delegate_task` children and native lanes, and state that the levels
+  are defaults the foreman raises or lowers per lane. A Stage-1 checkout from before that date
+  keeps the old values until it is updated.
+- **Fable 5.2, the second mind.** Fable 5.1 (`claude-fable-5-1`, "rare") becomes Fable 5.2
+  (`claude-fable-5-2`), an optional consult the foreman calls at three moments: before a
+  multi-lane plan or options go out, after a miss, and for security design and conclusions.
+  Advice to verify, never a reviewer or a volume worker. Its list price and the wider
+  safety-refusal fallback on Fable requests are recorded in `model-roles.md`.
+- **Foreman rules** (`CONTEXT/foreman.md`, still under the 8,192-byte hook limit): close loops
+  in the session instead of scheduling them; a written plan review before a risky or big
+  build; low-impact review findings go to Follow-ups, high ones are always fixed; every ID the
+  Operator reads carries its display name and a link. Two lines that pointed at retired
+  closeout skills are gone; `session-end` does that work.
+- **Core** (`CONTEXT/core.md`): terse chat never drops context the Operator needs to act; what
+  counts as an outward-facing send; deletes that come to the Operator are the irreversible
+  ones outside a stated ruling; a fix's test is shown failing without the fix first.
+- **Principles** (`CONTEXT/how-i-work.md`): the close-loops rule with its why; plan review in
+  Review pickup; what a lane cannot know unless its brief says so; test count and coverage are
+  never targets; a recorded real response or a dated probe for reads, parsers, error
+  classifiers and security controls.
+- **`AGENTS.md`**: the shared-checkout and kill-by-pattern hazards, and an "Every surface" list
+  (both deployers, copies, Stage-1, T3 versions, tests, docs and the way back).
+- **`ops-worker`**: an ordinary obstacle is diagnosed and worked through, and a fix shows its
+  test failing first.
+- **`harness` skill**: the missing `session-end finish` step (without it the closeout stamp
+  never moves), the `--repo` candidates, the open asks, the close listing, and what
+  `session-end` never does.
+
 ## 2026-11-18: memory saves only what has no other home
 
 The save rule changes from "write memory as you learn" to "memory holds only a trap with no

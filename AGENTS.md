@@ -102,6 +102,38 @@ current task allows.
   the main thread would fall back to reading it by hand.
 - No root `CLAUDE.md`. With one present, Claude Code reads it instead of this
   file and skips every `AGENTS.md` in the repos under `PROJECTS/`.
+- Never race the shared checkout. `~/OPS` is one working tree that every
+  session on the box uses, and memory and batons are committed to its trunk
+  all day. A `git checkout`, `stash`, `reset` or rebase there rewrites files
+  under another session. Branch work goes in a worktree; in the shared tree you
+  only add, commit your own paths, and fast-forward.
+- Never kill by pattern. No `pkill -f`, `pgrep -f` or `killall` on a name:
+  your own shell and sibling lanes carry the same strings in their arguments,
+  and in the harness OPS is ported from this killed the caller over a hundred
+  times. Kill a PID you recorded, or use `.claude-config/bin/safe-pkill`.
+
+## Every surface
+
+The most common harness defect is a change that works in the session that
+made it and is missing everywhere else. Before calling a harness change done,
+say which of these applied:
+
+- **Deployers.** `deploy.sh` and `deploy.ps1` install the same harness; a
+  deploy change lands in both, or says why one host type is out.
+- **Copies.** A template change reaches each copy only at its next template
+  sync, and the sync never overwrites a file the owner changed. A change that
+  needs every copy to move says so in `CHANGELOG.md` and `DEPLOYMENT.md`.
+- **The Stage-1 settings.** They live in the shared linuxploitacious checkout
+  and nothing here writes them; a hook or model change that needs a settings
+  entry is not done until Stage-1 carries it.
+- **T3 versions.** T3 moves between stable and nightly builds; a version
+  pattern or a schema read written for one line needs the other in its tests.
+- **Tests and the gate.** A hook or script change ships its selftest, and CI
+  picks it up by glob; a check that passes only on a quiet box is a flaky
+  check.
+- **Docs and the way back.** `DEPLOYMENT.md`, `.claude-config/bin/README.md`,
+  and the skill that names the changed thing; and if you added a way to turn
+  something on, the way to turn it off.
 
 ## Where to look
 
