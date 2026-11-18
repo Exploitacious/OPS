@@ -7,7 +7,7 @@ origin, 900 s, two-thirds deadline, 30 s kill, BRANCH_GC_TRASH_DAYS=0),
 hooks/session-work-init.sh and hooks/hooklib.sh (the stamp names, the key and
 ops_backend), hooks/handoff-check.sh (the baton directory),
 hooks/memory-digest.sh (the --ops checkout), verify-ops.sh (its summary line
-and --quiet) and SKILLS/session-close/mechanics.md (the stamps a close owns).
+and --quiet) and .claude-config/bin/README.md, session-end (the stamps a close owns).
 
 Every tool session-end calls (branch-gc, memory-index, verify-ops.sh, asks,
 active-minutes, lane-class, compact-cycle.sh, t3-api.sh, docker, the timeout

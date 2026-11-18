@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # session-work-selftest.sh: prove the session-start-stamp invariants the
-# session-close WIP/work-tracking gate depends on. Run by hand or after deploy
+# close's WIP/work-tracking reconciliation depends on. Run by hand or after deploy
 # alongside guard-selftest.sh. Uses an isolated $HOME so it never touches the
 # real ~/.claude-compact-cycle.
 #

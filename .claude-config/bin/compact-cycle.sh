@@ -6,9 +6,9 @@
 # idle, requests native compaction through t3-api.sh (T3's orchestration API, V1
 # over HTTP or V2 over a WebSocket: t3-api.sh picks the protocol), verifies it
 # finished, then dispatches a resume message (the baton) so the session continues
-# autonomously. Plain bash, no Claude tokens, no nondeterminism. Pairs with the
-# pre-compact-synthesis skill (which does the thoughtful synthesis and writes the
-# baton BEFORE spawning this).
+# autonomously. Plain bash, no Claude tokens, no nondeterminism. Pairs with
+# `session-end pause` and the agent's own work (lessons, documents, the resume
+# baton), all done BEFORE spawning this (the harness skill, "Ending a thread").
 #
 # T3 is the only backend. The tmux, herdr and pane backends were removed: those sessions
 # are run by hand and compacted with a manual /compact, so nothing needs to type into a pane.

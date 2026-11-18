@@ -350,10 +350,10 @@ class ActiveMinutesTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--tz-offset: need hours strictly between -24 and 24", proc.stderr)
 
-    def test_billable_hours_never_round_up(self):
+    def test_billable_hours_round_to_the_nearest_hundredth(self):
         proc = self.run_stamps(["2026-11-06T10:00:00Z", "2026-11-06T10:20:00Z", "2026-11-06T10:40:00Z"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("40.0 min = 0.6667 h -> 0.66 h", active_line(proc))
+        self.assertIn("40.0 min = 0.6667 h -> 0.67 h", active_line(proc))
         boundary = self.run_stamps(["2026-11-06T10:00:00Z", "2026-11-06T10:06:00Z"])
         self.assertIn("6.0 min = 0.1000 h -> 0.10 h", active_line(boundary))
 

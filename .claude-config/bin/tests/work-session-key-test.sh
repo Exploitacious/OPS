@@ -6,7 +6,7 @@
 # The defect: under T3 the key fell back to the encoded cwd, so every thread in
 # one directory shared one session-start-* stamp and one work-log-*. A thread
 # opened within 7 days inherited the old t0, the work-log mixed several threads
-# (an elapsed time of a week), and one thread's session-close deleted its
+# (an elapsed time of a week), and one thread's close deleted its
 # siblings' stamp.
 #
 # The invariants:
@@ -103,7 +103,7 @@ eq "ops_backend: t3code over bare" t3code "$(backendin "${T3ENV[@]}")"
 eq "ops_backend: a T3 thread id alone marks T3" t3code "$(backendin T3CODE_THREAD_ID=x)"
 eq "ops_backend: bare" bare "$(backendin)"
 
-# --- 3b. zsh parity: session-close sources hooklib.sh in the zsh Bash tool ------
+# --- 3b. zsh parity: a close sources hooklib.sh in the zsh Bash tool -----------
 if command -v zsh >/dev/null 2>&1; then
   zk="$( cd "$WORK" && env "${CLEAR[@]}" "${T3ENV[@]}" CLAUDE_CODE_SESSION_ID="$SID_A" \
          zsh -c '. "$1"; work_session_key' _ "$HOOKS/hooklib.sh" )"
@@ -162,7 +162,7 @@ fi
   && pass "no work-log is shared with, or written for, the sibling" \
   || fail "unexpected work-logs: $(ls "$RUN" | grep '^work-log' | tr '\n' ' ')"
 
-# session-close deletes only its own thread's state (session-close/mechanics.md, step E).
+# A close retires only its own thread's state (session-end finish, the billing archive).
 kA="$(keyin "$WORK" "${T3ENV[@]}" CLAUDE_CODE_SESSION_ID="$SID_A")"
 rm -f "$RUN/session-start-$kA" "$RUN/work-log-$kA"
 [ ! -e "$RUN/session-start-t3-$SID_A" ] && [ -f "$RUN/session-start-t3-$SID_B" ] \

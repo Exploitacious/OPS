@@ -141,7 +141,7 @@ hook_core_rule_matches() {
 # under ~/.claude-compact-cycle/ (session-start stamp, work-log; the directory
 # name predates the retired tmux typer and is kept so existing state stays
 # readable). The hooks (session-work-init, pre-compact, session-briefing) and
-# the skills (session-close, pre-compact-synthesis) all derive the key here, so
+# session-end and the agent's own reads all derive the key here, so
 # every surface agrees on one name for a session. Every input must be one a hook
 # and a Bash tool call both see (Claude Code sets CLAUDE_CODE_SESSION_ID in the
 # environment of hook and Bash subprocesses alike).
@@ -152,7 +152,7 @@ hook_core_rule_matches() {
 #   t3: under T3 Code every thread in one directory has the same cwd, so the cwd
 #     key below made all of them share ONE stamp and ONE work-log: a thread opened
 #     within the 7-day refresh window inherited an old t0, one work-log mixed
-#     several threads (an elapsed time of a week), and one thread's session-close
+#     several threads (an elapsed time of a week), and one thread's close
 #     deleted its siblings' stamp. CLAUDE_CODE_SESSION_ID is per thread, an env
 #     read, and stable across /compact and resume, so the key is
 #     t3-<id sanitized to [A-Za-z0-9-]>. Reached only once tmux is ruled out, by
@@ -205,7 +205,7 @@ ops_backend() {
 # Leftover session stamps: judged by evidence, off the boot path.
 #
 # session-work-init.sh writes ~/.claude-compact-cycle/session-start-<KEY> once
-# per session and session-close deletes it, so a stamp that is still there after
+# per session and a close archives it (session-end finish), so a stamp still there after
 # its session is gone marks a session that ended without a work-tracking
 # reconciliation. Counting leftovers is not the check: a chat-only thread leaves
 # one too, and under T3 every thread (and every delegated lane) leaves its own.
@@ -218,7 +218,7 @@ ops_backend() {
 #          housekeeping commits in the window. Nothing is owed; no nag. A quiet
 #          stamp is LEFT IN PLACE: nothing here deletes or moves a stamp.
 #   flag   at least one repo with real commits in the window. The boot Hygiene
-#          line names how many; session-close finishes the judgment, because a
+#          line names how many; a close finishes the judgment, because a
 #          hook has no work-tracking access and must never block boot on a
 #          network call.
 #
@@ -419,7 +419,7 @@ orphan_stamp_verdict() {
 #
 # WHY. Judging every leftover stamp inline made boot grow with the set. A quiet or
 # flag verdict never removes its stamp, and under T3 every thread that never runs
-# session-close leaves one, so the set only grows: on one box 126 stamps cost 49 s
+# a close leaves one, so the set only grows: on one box 126 stamps cost 49 s
 # of a 51 s boot, and every new session waits on the briefing hook before its first
 # model call. The boot path now only checks a throttle and starts a detached scan;
 # the scan does the sweep and leaves its result in the state dir:
@@ -770,7 +770,7 @@ orphan_scan_report() {
       [ -e "$RUN/session-start-$k" ] && nflag=$((nflag + 1))
     done 2>/dev/null < "$STATE/orphan-flags"
   fi
-  [ "$nflag" -gt 0 ] && ORPHAN_SCAN_HYG=" ${nflag} session(s) abandoned without a work-tracking reconciliation; work may be unlogged (run session-close to reconcile) ·"
+  [ "$nflag" -gt 0 ] && ORPHAN_SCAN_HYG=" ${nflag} session(s) abandoned without a work-tracking reconciliation; work may be unlogged (reconcile it at a close: .claude-config/bin/README.md, session-end) ·"
   if [ -n "${ORPHAN_SCAN_NOTE:-}" ]; then
     ORPHAN_SCAN_HYG="$ORPHAN_SCAN_HYG $ORPHAN_SCAN_NOTE ·"
   elif [ -e "$STATE/orphan-scan.error" ]; then

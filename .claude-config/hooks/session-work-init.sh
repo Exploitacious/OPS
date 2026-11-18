@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # session-work-init.sh: SessionStart hook: stamp the session's start for the
-# session-close WIP/work-tracking reconciliation gate.
+# close's WIP/work-tracking reconciliation (session-end close).
 #
 # Writes ~/.claude-compact-cycle/session-start-<KEY> ONCE per session so the
-# session-close gate can bound "what did this session touch / how long did it
+# close can bound "what did this session touch / how long did it
 # run" for time entry: even for a session that NEVER compacts (the common
 # case, and the one that gets forgotten). The compact-time work-log is only
 # bonus context on top of this stamp.
@@ -36,7 +36,7 @@ STAMP="$RUNDIR/session-start-$KEY"
 # must not be re-stamped. A continuing session always still has its original
 # stamp, so it exits here. Reaching PAST this point means NO stamp exists: a
 # genuinely new work session: either a fresh startup OR a revived archived
-# session (session-close deletes the stamp on close, so a revive starts clean).
+# session (a close archives the stamp with session-end finish, so a revive starts clean).
 # Both MUST be stamped, so we do NOT gate on the SessionStart source. (Gating on
 # source was a bug: a revived session fires source=resume for its whole life, so
 # it would never stamp: silently disabling the gate for the Archive close path.

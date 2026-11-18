@@ -369,7 +369,14 @@ hand from three skills run the same way every time. Python standard library only
 - **Settle (close).** The remainder names T3's own settle tool first (`t3_thread_organize`
   with action `settle`, as the last tool call of the turn) and `t3-api.sh settle-when-idle
   <thread>` only as the fallback when that tool is not available, never both. Outside T3 there
-  is no settle step.
+  is no settle step: a tmux session registered by `remote-sessions/` is archived or forgotten
+  and killed by hand, as the last tool call (`remote-sessions/README.md`, "Closing a session
+  from inside it"); a plain terminal or IDE has nothing to kill. Archiving or settling a thread
+  in T3's own UI is not a close: none of the ending ran.
+- **Cleanup the output lists.** The scratch files, worktrees and Docker objects the thread
+  created are listed, never removed: remove each by the exact path, name or id the thread's own
+  commands used (`docker rm -f`, `docker image rm`, `docker volume rm`). Never `docker system
+  prune` or `docker image prune -a`: other threads' images and containers share the daemon.
 - **`finish`.** Runs after the agent has saved lessons, fixed documents and written the resume
   note. It reads the receipt `<state>/session-end/<key>.json`, refuses a receipt of another
   thread, a failed run, or a GC run still going or failed, and then advances
@@ -391,8 +398,18 @@ hand from three skills run the same way every time. Python standard library only
   and sha256. The report prints the `mv -n <archived> <live>` that restores a file while its
   live name is free. It archives only a key from the T3 session-id branch (`t3-<session id>`,
   with `ops_backend` saying t3code): a shared-cwd key or a tmux key is refused, and the stamps
-  are then handled by hand per `SKILLS/session-close/mechanics.md`. If a new work-log appears
-  during archival, or a step fails after a move, the session-start flag stays live.
+  are then archived by hand the same way: `mv -n` both files into a fresh
+  `~/.claude-compact-cycle/reaped/<key>-<UTC stamp>/`, the work-log first, never `rm`. If a new
+  work-log appears during archival, or a step fails after a move, the session-start flag stays
+  live.
+- **A leftover stamp the briefing flags.** The briefing's background scan (at most every 30
+  minutes) flags another session's stamp only when commits landed in its window and it was never
+  archived: its work may be unlogged. Read its `session-start-<key>` and `work-log-<key>`, compare
+  the window with what is already on the tickets, and then: hours already cover it, name the
+  covering entry and archive the two files as above; real work with zero hours, report the
+  evidence (start time, repos, commit subjects, narrative) in chat and let the Operator set the
+  hours, never an automated write; nothing owed (a personal repo, a fixture, a parallel session),
+  say so in one line and archive them.
 - **Scope.** Claude sessions only: under Codex or OpenCode the transcript, time and billing
   steps print "unsupported provider" and `finish` archives nothing. Main thread only: a
   T3-delegated lane (thread id `thread:delegated-task:` or `thread:provider:`, or `lane-class
@@ -561,8 +578,8 @@ header says which event.
   preview of an oversized hook output that still opens with the heading, and
   `core.md` tells a foreman with no "Foreman doctrine" block to read the file
   itself. The root is the script's own checkout, so a worktree reads its own
-  copy. Test: `hooks/foreman-context-selftest.sh`. `harness-update` syncs
-  `foreman.md` with `core.md`, which points at it.
+  copy. Test: `hooks/foreman-context-selftest.sh`. A template sync
+  (`harness-update-scan.sh`) carries `foreman.md` with `core.md`, which points at it.
 
 ## `origin-private-check`: the push gate
 
@@ -709,13 +726,22 @@ context-watch hook never names the cycle to one.
 `hooks/context-watch.sh` names the cycle in its nags only when the session is a
 T3 thread on Linux and both scripts and a readable, non-empty token are present;
 while a fresh (under 30 min) baton for the thread exists it stays silent, since
-the agent ended its turn on purpose. Tests: `tests/t3-api-test.sh`,
+the agent ended its turn on purpose. A compact is proven only by T3's completion
+record for that request; a completed chat reply proves nothing. Tests: `tests/t3-api-test.sh`,
 `tests/t3-api-v2-safety-test.py` and `tests/compact-cycle-t3-test.sh`, all against
 loopback stubs and the recorded frames in `tests/fixtures/t3-v2/`; each starts
 with the sandbox guard and refuses to run unless loopback is its only interface
 and 127.0.0.1:3773 (T3 Code's default port) refuses, so it can never reach a
 live server (`verify-ops.sh` lists them in `OPS_SANDBOX_SUITES`). The hook's
 route cases are in `hooks/context-watch-selftest.sh`.
+
+Manual compact, everywhere else. T3 Code and a Codex terminal take bare
+`/compact`: T3 sends `/compact <text>` as ordinary chat, so what must survive
+goes into the resume note first. A Claude Code terminal takes `/compact
+<instruction>`; give the Operator this text so a manual compact keeps the detail
+a default summary drops:
+
+> Be sure to preserve: (1) any difficulties or problems that came up, and how they were handled or resolved; (2) any possibilities, options, or approaches that were raised, tried, or set aside, and why; (3) anything that was asked for, decided, agreed, ruled out, or established as a preference, constraint, or boundary, stated exactly; (4) exactly where things stand now; (5) anything still open, unresolved, promised, or expected to happen next; (6) specific details that would be hard to reconstruct: names, numbers, dates, exact wording, links or references, kept exactly. Weight the two voices differently: keep what the user said, asked for, shared, or established carefully and close to their own words; your own explanations and reasoning can be condensed much further.
 
 ## `wf-resume`: lanes of a workflow that never returned
 
@@ -883,6 +909,55 @@ One file, one command: no second copy here to drift.
 your HOME (nvm, fnm), which the sandbox hides, and says so; run it bare then.
 In GitHub Actions a missing `node` fails it instead.
 
+## `harness-update-scan.sh`: template sync for a copy
+
+A copy of OPS shares no git history with the public template, so `git merge`
+has no common ancestor; this scan is the safe path across that gap. Run it from
+inside the copy (it scans the working directory's repo and refuses any repo that
+is not an OPS copy with `ERR_NOREPO`): report only by default, `--apply-safe`
+copies the NEW and UPDATE classes, `--verbose` also lists IDENTICAL files. The
+header is the full reference (flags, environment overrides, exit codes). An agent
+reports first and applies (`--apply-safe`, a hand port, the commit) only after
+the Operator says so, each CONFLICT decided on its own.
+
+| Class | Meaning | Applied by `--apply-safe` |
+|---|---|---|
+| NEW | upstream has it, the copy does not | yes |
+| UPDATE | upstream changed it; the copy still matches the last synced version | yes |
+| CONFLICT | changed upstream and locally, or a first sync with no baseline | never: port the mechanic by hand, or skip |
+| MODE | same content, the exec bit differs | never: `chmod` by hand if it was not on purpose |
+| IDENTICAL | same on both sides | nothing to do |
+| REMOVED | upstream deleted it; the copy still has it | never: deleting is the owner's call |
+
+- **The marker.** `.claude-config/ops-upstream-ref` holds `upstream=<owner/repo>`
+  and `last_synced=<sha>`. The scan never writes it: the commit that lands a sync
+  sets `last_synced` to the fetched sha (`git -C ~/OPS rev-parse
+  ops-template/main`; the scan prints it). Without a marker every difference is a
+  CONFLICT; a sync that lands files but not the marker turns the next scan back
+  into that. A marker from before 2026-10-19 names a commit from before the
+  template's history rewrite; the scan translates it to its same-tree twin and
+  prints a NOTE.
+- **Never synced, either way, and never named in the report:** the identity files
+  (`is_excluded` in the script is the list), `CONTEXT/projects/`, `.claude-memory/`,
+  `.claude-handoffs/`, `NOTES/`, `DELIVERABLES/`, `PROJECTS/` and `ARCHIVE/`.
+  Local-only files are never listed.
+- **A copy older than the scan** runs it straight from the template, from inside
+  the copy: `git -C ~/OPS remote add ops-template
+  https://github.com/Exploitacious/OPS.git` (once), `git -C ~/OPS fetch
+  ops-template`, then `git -C ~/OPS show
+  ops-template/main:.claude-config/bin/harness-update-scan.sh > "$f"` and `(cd
+  ~/OPS && bash "$f")`. It loads no helper file, so a temp copy works.
+- **A renamed copy** (a root other than `~/OPS`, other `ops-*` names) needs every
+  applied file swept for `~/OPS`, `ops-template` and `ops-*` names: a verbatim
+  upstream path is a silent breakage there.
+- **Before the commit:** `verify-ops.sh`, `secrets-scan.sh` on the changed files,
+  and `bash -n` on changed shell scripts, all green. A hand-ported CONFLICT gets a
+  CHANGELOG line; routine NEW and UPDATE copies do not. A template change the
+  Operator should hear about is read from the upstream CHANGELOG (`git -C ~/OPS
+  diff <last_synced>..ops-template/main -- CHANGELOG.md`).
+
+Test: `tests/harness-update-scan-test.sh`.
+
 ## `grabit`: file transfer over Tailscale
 
 Moves files between a (usually headless) OPS box and whatever machine you're
@@ -894,7 +969,7 @@ driving it from, without SFTP or cloud. Everything rides the tailnet
 grabit FILE...              push file(s) to the machine you're SSH'd in from (auto-detected)
 grabit --to DEVICE FILE...  push to a specific tailnet device (name or 100.x IP)
 grabit --serve PATH...      stage path(s) + expose over tailnet HTTPS; prints browser URLs
-grabit --serve-off          tear the serve endpoint down
+grabit --serve-off          remove grabit's own serve path (nothing else)
 grabit --inbox [DIR]        pull files someone sent TO this box (default ~/grabit-inbox)
 grabit --list               list tailnet devices
 grabit -h
@@ -911,14 +986,29 @@ in from, the file comes back to you: no flags.
 - **Push (default):** one-shot, no sudo, lands in your inbox. Best for grabbing
   a file or two.
 - **Serve (`--serve`):** stages the named files into `~/.cache/grabit-serve` and
-  serves *only those* over tailnet HTTPS. Best for browsing/grabbing several
+  serves *only those* over tailnet HTTPS, under grabit's own path
+  (`https://<box>/grabit/<file>`). Best for browsing/grabbing several
   files, or when the target isn't a Tailscale device. Needs sudo (serving a path
-  is privileged): that's why push is the default.
+  is privileged): that's why push is the default. It leaves an endpoint
+  standing until `--serve-off`.
 
 ### Safety
 `--serve` only ever exposes files you explicitly name (staged into a scratch
 dir), so a neighbouring `.env` or secret can't leak. The serve endpoint is
 tailnet-scoped (your own devices), not the public internet.
+
+grabit never runs `tailscale serve reset`. Reset removes every serve handler on
+the box, and a box that serves T3 Code over the tailnet once lost that endpoint
+(its phone app included) when `--serve-off` ran it. So `--serve` mounts under
+`/grabit` on port 443, never the root (which would replace another handler), and
+`--serve-off` turns off only that path; a refused turn-off prints a WARN and
+touches nothing else. Test: `tests/grabit-test.sh` (stub `tailscale` and `sudo`;
+it fails if reset is ever invoked).
+
+### Receiving
+`grabit --inbox` pulls everything waiting in this box's Tailscale inbox into
+`~/grabit-inbox` and lists it; an empty inbox means nothing arrived. An image
+attached in a T3 message is not a receive: it arrives as a saved path to read.
 
 ### One-time setup per new box
 ```

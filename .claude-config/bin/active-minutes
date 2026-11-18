@@ -56,7 +56,7 @@ by its UTC start, any prefix such as 2026-11-06T22:10) to COUNTED or EXCLUDED
 when the operator gives evidence the transcript cannot see. --strict drops every
 gap over --gap with no classification, for a session with no operator in it.
 
-Bill to the minute as decimal hours, two places; never round.
+Bill to the minute as decimal hours to the nearest hundredth; never round to a block.
 
 The contiguous work blocks print in one display zone, each timestamp converted
 on its own, so a block that spans a daylight-saving change prints each end with
@@ -479,10 +479,11 @@ print("events            : %d" % len(ts))
 print("first (UTC)       : %s" % ts[0].isoformat())
 print("last  (UTC)       : %s" % ts[-1].isoformat())
 print("raw span          : %.1f min (%.2f h)" % (span/60, span/3600))
-# Truncate the billing display: %.2f alone rounds 40 minutes up to 0.67 hours.
-# Keep the measured minutes and higher-precision hours beside it as evidence.
-billable_hundredths = int(active // 36)
-print("ACTIVE (bill this): %.1f min = %.4f h -> %.2f h" % (active/60, active/3600, billable_hundredths/100))
+# The billing figure is the measured time in hours to the nearest hundredth
+# (40 minutes bills as 0.67 h), the same on every copy; the owner ruled on
+# 2026-11-17 that hours round. The minutes and four-place hours beside it are
+# the evidence.
+print("ACTIVE (bill this): %.1f min = %.4f h -> %.2f h" % (active/60, active/3600, active/3600))
 print("counted gaps      : %d, total %.1f min" % (len(counted), sum(g[2] for g in counted)/60))
 print("excluded gaps     : %d, total %.1f min" % (len(excluded), sum(g[2] for g in excluded)/60))
 

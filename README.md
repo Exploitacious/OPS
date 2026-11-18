@@ -171,7 +171,7 @@ specific to T3:
 1. In T3 Code, add `~/OPS` as a project and open a thread on it. The first
    thread finds no bootstrap marker and runs `BOOTSTRAP.md` (step 3).
 2. Run T3's browser setup once per host. T3's page previews and browser tools
-   (the `t3-html-render` skill checks each inline page with `html_preview`)
+   (the `harness` skill checks each inline page with `html_preview`)
    run a headless Chrome that needs system libraries and, on Ubuntu 23.10 and
    later, an AppArmor profile:
 
@@ -312,10 +312,9 @@ adapts is listed with its license in
 ## Template sync
 
 A copy made from the template shares no git history with it, so `git merge` has
-no common ancestor. The `harness-update` skill (type `/harness-update`; it is
-slash-only, so an agent never starts a template sync on its own) is the
-safe path across that gap, and `.claude-config/bin/harness-update-scan.sh` is
-its mechanical half. Run from inside your copy (`cd ~/OPS`), the scan adds an
+no common ancestor. `.claude-config/bin/harness-update-scan.sh` is the safe
+path across that gap; ask an agent to update the harness, or run it yourself
+(its facts are in `.claude-config/bin/README.md`). Run from inside your copy (`cd ~/OPS`), the scan adds an
 `ops-template` remote, fetches it, and classifies every file as NEW, UPDATE,
 CONFLICT, MODE, REMOVED, or IDENTICAL. By default it reports and touches
 nothing. `--apply-safe` copies NEW and UPDATE files only, never a CONFLICT, a
@@ -431,7 +430,7 @@ For a forker, this means:
 
 - **Your identity is not in the boot.** `USER.md`, `voice.md`, and
   `standing-orders.md` load on demand, through the core's "Where to look"
-  table. BOOTSTRAP fills them, and `harness-update` never syncs them, so a
+  table. BOOTSTRAP fills them, and the template sync never touches them, so a
   template refresh never clobbers them.
 - **Keep the core small and generic.** It is paid on every turn of every
   session and lane, and the template sync updates it. Put your rulings in
@@ -442,7 +441,7 @@ For a forker, this means:
 - **The drift gate checks it.** `verify-ops.sh` fails if the core is missing,
   over budget, or not linked (check 16), if a root `CLAUDE.md` would hide
   `AGENTS.md` (1b), if `USER.md` is still the template on a bootstrapped copy
-  (21), or if `harness-update` stops excluding an identity file (23).
+  (21), or if `harness-update-scan.sh` stops excluding an identity file (23).
 
 ## Posture
 

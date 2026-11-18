@@ -72,7 +72,7 @@ current task allows.
   separately by that organization, not through this repo.
 - `.claude-config/`, `.claude-memory/`, and `.claude-handoffs/` are literal
   names; do not rename them.
-- Personalization lives only in the files `harness-update` never syncs:
+- Personalization lives only in the files the template sync never touches:
   `USER.md`, `voice.md`, `standing-orders.md`, the `work-tracking.md`,
   `team.md`, and `tools.md` slots, `.bootstrapped`, and `CONTEXT/projects/`.
   The doctrine files (`core.md`, `foreman.md`, `how-i-work.md`,
@@ -81,7 +81,7 @@ current task allows.
   edit there.
 - The template adds and offers; it never takes away what a copy's owner
   chose (`CONTEXT/how-i-work.md`, "The template and a copy's owner"). A change
-  to deploy, `harness-update`, or a gate that would delete, cap, or block an
+  to deploy, the template sync, or a gate that would delete, cap, or block an
   owner's content (a plugin, a memory pool, a retired skill, a hook, a pin, a
   remote, a backup) ships as a warning or an offer, never a FAIL, a block, or
   an automatic removal. Only an unsafe thing is overruled. One stated
@@ -110,7 +110,7 @@ current task allows.
 | What exists, the folder tree | `README.md` |
 | Deploy (Stage 1 and 2), migration, T3 Code hosts | `DEPLOYMENT.md` |
 | First launch | `BOOTSTRAP.md` |
-| Template sync from upstream | the `harness-update` skill (slash-only: the Operator types `/harness-update`) |
+| Template sync from upstream | `.claude-config/bin/harness-update-scan.sh` (`.claude-config/bin/README.md`) |
 | Scripts, tests, and the gate | `.claude-config/bin/README.md` |
 | Porting rules, the CI gate, local test commands | `CONTRIBUTING.md`, `.github/workflows/gate.yml` |
 | Licenses of adapted third-party work | `SKILLS/THIRD_PARTY_NOTICES.md` |

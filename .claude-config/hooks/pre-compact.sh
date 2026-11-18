@@ -9,9 +9,9 @@
 # env var) so post-compact self-recovery has something to read.
 #
 # This is the SAFETY-NET layer: fires no matter what, even if the
-# user never says "compact". The thoughtful AI synthesis lives in the
-# `pre-compact-synthesis` skill (~/OPS/SKILLS/), which Claude
-# invokes when the user signals wrap-up.
+# user never says "compact". The thoughtful part (lessons, documents,
+# the resume note) is the agent's, after `session-end pause` (the
+# harness skill, "Ending a thread").
 #
 # Implements how-i-work.md P2 ("Compaction is a pause, not death") as
 # automation. Pairs with the post-compact-resume.sh SessionStart hook for
@@ -182,13 +182,13 @@ fi
 
 dbg "snapshot written: $SNAPSHOT_FILE"
 
-# ── Session work-log (feeds the session-close reconciliation gate) ──────────
+# ── Session work-log (feeds the close's time reconciliation) ───────────────
 # Append a compact-time segment so a multi-compact session's full activity is
 # reconstructable at CLOSE for time entry. This is the MECHANICAL spine (git
-# delta + elapsed since session start); the pre-compact-synthesis skill adds a
-# narrative line separately. Best-effort: a failure here never blocks the
+# delta + elapsed since session start); an agent may add a narrative line
+# separately. Best-effort: a failure here never blocks the
 # compact. NOTE: this only records; it never reconciles. WIP/work-tracking
-# reconciliation is a session-CLOSE act (session-close skill), never a compact.
+# reconciliation is a CLOSE act (session-end close, then finish), never a compact.
 command -v work_session_key >/dev/null 2>&1 \
   || . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooklib.sh" 2>/dev/null || true
 WORK_KEY="$(work_session_key 2>/dev/null || true)"

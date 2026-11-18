@@ -195,7 +195,7 @@ deleter on `/` and `$HOME` and wiped most of a home directory. A throwaway
   ≤ 72 chars). Body explains *why* when it isn't obvious.
 - The template adds and offers; it never takes away what a copy's owner
   chose (`CONTEXT/how-i-work.md`, "The template and a copy's owner"). A change
-  to deploy, `harness-update`, or a gate that would delete, cap, or block an
+  to deploy, the template sync, or a gate that would delete, cap, or block an
   owner's content (a plugin, a memory pool, a hook, a pin, a remote) ships as
   a warning or an offer, never a FAIL, a block, or an automatic removal. The
   one stated exception is the drift gate's FAIL on a banned or retired model

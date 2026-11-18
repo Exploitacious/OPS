@@ -149,7 +149,7 @@ gets the AI-tells catalog, `CONTEXT/ai-tells.md`. Writing as a person or on
 their behalf follows that person's own voice file; the Operator's is
 `CONTEXT/voice.md`. This writing style is the template's default; each copy's
 owner may change theirs. Formats follow the task: in T3 Code,
-an inline page (`t3-html-render`) for data, reports, and breakdowns, shown
+an inline page (the `harness` skill) for data, reports, and breakdowns, shown
 without asking; `.docx` for client deliverables, `.md` for notes and docs,
 `.csv` for data, native extensions for code. Outputs land in the active
 project's directory, never the OPS root; scratch and tool logs go to
@@ -162,8 +162,8 @@ in reasoning and then repeat it in the reply.
 
 Compaction, batons, rest stops, and teardown are the foreman's:
 `CONTEXT/foreman.md`. A lane returns its result; it never compacts, closes a
-thread, or runs `session-close`: a lane inherits the foreman's session id, so
-a close run from a lane settles the foreman's session.
+thread, or runs `session-end` (which refuses a lane): a lane inherits the
+foreman's session id, so a close run from a lane settles the foreman's session.
 
 ## Memory and where knowledge goes
 
@@ -207,7 +207,7 @@ Operator to fetch data. Project repos live under `PROJECTS/<org>/<repo>`.
 | Machines, deploy, hooks | `CONTEXT/machines.md` (when the Operator keeps one); `DEPLOYMENT.md` |
 | The OPS repo itself | `AGENTS.md`, `README.md` |
 | Delegation or review | `CONTEXT/foreman.md`; `CONTEXT/how-i-work.md` P8, P12, Review pickup |
-| Compact, handoff, close | `pre-compact-synthesis`, `session-handoff`, `session-close` |
+| Pause, move, close; T3, waiting, helpers, the box | the `harness` skill; `session-end` |
 
 The MCP tools and skills in this harness are self-built by the people who use
 them. A surprising tool result is a defect in that tool: file it with the

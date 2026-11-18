@@ -372,7 +372,7 @@ def billing_key_ok(idn):
     branch of work_session_key, else why not. Positive check, fail closed: a
     shared-cwd fallback key would clear another thread's unbilled-work flag."""
     if idn["provider"] != "claude":
-        return UNSUPPORTED + "; billing stamps are not archived (archive them by hand per session-close mechanics.md)"
+        return UNSUPPORTED + "; billing stamps are not archived (archive them by hand: .claude-config/bin/README.md, session-end)"
     if not idn["key"]:
         return "no stamp key: %s" % (idn["key_error"] or "unknown")
     want = "t3-" + sanitized_sid(idn["session_id"])
@@ -380,7 +380,7 @@ def billing_key_ok(idn):
         return None
     if idn["backend"] == "tmux":  # ops_backend's one session-name backend
         return ("the %s backend keys stamps by session name, which this version does not verify; "
-                "archive the stamps by hand per session-close mechanics.md" % idn["backend"])
+                "archive the stamps by hand (.claude-config/bin/README.md, session-end)" % idn["backend"])
     return ("key %s is not this thread's own (the T3 session-id branch did not apply, so "
             "work_session_key fell back to the shared cwd key); refusing to archive" % idn["key"])
 
@@ -497,8 +497,8 @@ def load_transcript(path, sid):
 
 
 def named_paths(tx, cwd=None):
-    """Paths under $HOME named by this thread's tool calls (the candidate logic of
-    session-close mechanics.md). Transcript text is data: nothing is executed."""
+    """Paths under $HOME named by this thread's tool calls (read-only candidates,
+    never selections). Transcript text is data: nothing is executed."""
     home = os.path.expanduser("~")
     pat = re.compile(re.escape(home) + r"/[\w.@+-]+(?:/[\w.@+-]+)*")
     out = set()
@@ -1603,6 +1603,8 @@ def remainder(rep, mode, idn, tx, pool):
         cc = sibling("compact-cycle.sh")
         if tid and cc:
             out.append("Pause: compact with %s --target %s" % (cc, tid))
+            out.append("  It needs this box's T3 harness token (DEPLOYMENT.md, \"T3 Code hosts\"); without one it stops "
+                       "with ERR_T3API before sending anything, and the Operator fires /compact.")
         else:
             out.append("Pause: no compact line (%s)" % ("no T3 thread id" if not tid else "compact-cycle.sh not installed"))
         out.append("  Never compact over an unanswered question.")
@@ -1635,7 +1637,8 @@ def remainder(rep, mode, idn, tx, pool):
                        " (a failed turn or a queued message leaves the thread active). Only if that tool is not available: "
                        "%s settle-when-idle %s. Never both." % (sibling("t3-api.sh") or "t3-api.sh", tid))
         else:
-            out.append("Settle: not a T3 thread; no settle step (see session-close teardown for tmux or a plain terminal).")
+            out.append("Settle: not a T3 thread; no settle step (a tmux session: .claude-config/remote-sessions/README.md, "
+                       "\"Closing a session from inside it\"; a plain terminal has nothing to kill).")
 
 
 def time_block(rep, tx, idn):

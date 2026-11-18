@@ -4,6 +4,48 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-17: one `harness` skill replaces six
+
+`active-minutes` bills to the nearest hundredth of an hour again (40 minutes shows 0.67 h), the owner's ruling the same day; the truncation added earlier today is reverted, so every copy reads the same.
+
+The owner's test for a skill: it holds only what a capable agent with a fresh context could
+not know (facts, house rulings, traps), and the machinery lives in hooks and scripts. With
+`session-end` doing the mechanical steps of every ending, the three session skills and three
+other template skills were mostly procedure. One `harness` skill, the same page on every box,
+now carries the facts about the box and T3 Code.
+
+- **Added `SKILLS/harness/`**: how a thread pauses, moves and closes (`session-end`, the
+  compact line and the harness-token condition, the baton, the settle route, billing only when
+  a ticket was worked), talking to the Operator, waiting, helper agents, the second-vendor
+  review, and the box's guards and commands. The inline-page starter, worked example and
+  palette moved with it to `SKILLS/harness/assets/` and `references/palette.md`; the T3
+  frame rules (fluid width, render height, the saved-page link, theme injection) are a comment
+  at the top of the starter. `tests/t3-html-render-test.py` reads the new path and now fails
+  if either page is missing instead of passing with nothing checked.
+- **Removed** `pre-compact-synthesis`, `session-close`, `session-handoff`, `grabit`,
+  `t3-html-render` and `harness-update`. Facts that pass the test and that no command prints
+  moved beside their commands: `bin/README.md` (session-end: archiving stamps by hand, the
+  leftover-stamp judgment, cleanup traps, a close outside T3; compact-cycle: the manual
+  `/compact` per host and its preservation text; a new `harness-update-scan.sh` section:
+  classes, marker, exclusions, older and renamed copies, apply only on the Operator's word;
+  grabit: receiving), `remote-sessions/README.md` ("Closing a session from inside it": the
+  single name capture and the tmux traps) and `.claude-handoffs/README.md` (the flow through
+  `session-end move`, the colon-free archive name, consuming a baton). Procedure the commands
+  now run is dropped. A template sync never deletes, so an older copy keeps the six folders
+  until its owner removes them; `SKILLS/README.md` names them so the skills-index check stays
+  quiet, and `DEPLOYMENT.md` ("Leftovers from the six retired skills") says what to keep.
+- **Fixed `grabit --serve-off`**: it ran `tailscale serve reset`, which removes every serve
+  handler on the box and once took a box's T3 endpoint (and its phone app) offline. `--serve`
+  now mounts under `/grabit` on port 443, never the root, and `--serve-off` turns off only
+  that path, warning when the turn-off is refused. New `tests/grabit-test.sh` (stub
+  `tailscale` and `sudo`) fails if reset is ever invoked.
+- **Repointed** every hook, command and doc that named the six: `context-watch.sh` route text
+  now says "run session-end pause and finish what it lists (the harness skill)" (text only),
+  `session-end` prints where the by-hand archive and the tmux close are documented and, on a
+  pause, that the compact line needs the box's T3 harness token, `handoff-check.sh` and the
+  briefing's leftover-stamp line no longer name a skill, and `CONTEXT/core.md` "Where to look"
+  routes pause, move and close to the `harness` skill and `session-end`.
+
 ## 2026-11-17: the skill mounts retire
 
 The template mounted no skills once `SKILLS/VENDORED.tsv` lost its last row, yet the
@@ -29,6 +71,7 @@ delivered separately by that organization.
   preserve local work before optional removal. Staging remains gitignored so the
   daily backup does not commit it, and `verify-ops.sh` warns that the clone is
   missing from `projects-map.md` until it is gone.
+
 
 ## 2026-11-17: one command starts every thread ending
 

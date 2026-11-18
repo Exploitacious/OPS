@@ -109,11 +109,38 @@ warns until it is gone).
 - **`archive-remote-claude.sh sweep`** flags each row: `GONE` (registered but not
   running), `STALE` (transcript older than `RC_STALE_DAYS`, a likely finished
   purpose), `IDLE` (running, detached), `OK`. It also scans for name
-  **collisions**. Park what is finished; `session-close` does it at the end of a
-  session's purpose.
+  **collisions**. Park what is finished; a session's close does it at the end
+  of its purpose ("Closing a session from inside it" below).
 - **Collision guard:** names normalize case and separators, so `dev` and `Dev`
   both map to registry name `Dev`; a stray differently-cased tmux session could
   otherwise be mistaken for the real one. `sweep` surfaces live collisions.
+
+## Closing a session from inside it
+
+The last tool call of a close in tmux, after the receipt is printed (nothing
+printed after it arrives anywhere). `session-end close` runs first; it has no
+settle step outside T3.
+
+- Capture the name exactly once, before anything dies, and use it for both
+  steps: `SN="$(tmux display-message -p '#S')" &&
+  ~/OPS/.claude-config/remote-sessions/archive-remote-claude.sh archive "$SN";
+  tmux kill-session -t "=$SN" 2>/dev/null` (`archive` kills the session itself;
+  the second kill covers a session it could not reach). Asked again from a pane
+  whose session is already gone, `display-message` answers with ANOTHER live session's name, and the
+  exact-match kill then kills that innocent session (observed once). The `=` is
+  mandatory too: a bare `-t <name>` prefix-matches a sibling.
+- Before the kill, confirm the captured name is this session and matches the
+  registry row you mean to park (tmux names are often lowercase, registry names
+  Title-Case, and names get reused). `archive` matches names in their normalized
+  form, so trust `sweep` over a hand-written grep of the registry file. If the
+  mapping looks inconsistent, stop and say so.
+- Archive (the default) keeps the row's session id, directory and profile;
+  `archive-remote-claude.sh revive <Name>` brings it back with full history.
+  Forget deregisters with no archive row (the "End a session for good" line
+  above); the transcript stays on disk. A session with no row (`archive`
+  refuses with `ERR_NOT_FOUND` before touching anything) needs only the kill.
+- To close a different session by name, archive or forget its row from here, but
+  its own close (lessons, time, cleanup) can only run inside it.
 
 ## One owner of the tmux server
 

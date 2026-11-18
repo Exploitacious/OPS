@@ -1,7 +1,7 @@
 # Standing orders
 
 <!--
-This file is yours. harness-update never syncs it in either direction
+This file is yours. The template sync never touches it in either direction
 (harness-update-scan.sh is_excluded), so a template refresh never overwrites
 a ruling. BOOTSTRAP.md writes the first entries.
 -->

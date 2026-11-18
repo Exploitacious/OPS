@@ -75,8 +75,8 @@ are read on demand when their `description` matches the work at hand.
   session digest (`--digest`), the prompt hint (`--hint`), and a search by
   hand (`--find <words>`); `.claude-config/bin/README.md` has the details. A
   pool over 60 entries draws a warning and nothing else.
-- **Pruning**: the thread that closes prunes the memory it touched
-  (`session-close`, `pre-compact-synthesis`); deletes of content that has not
+- **Pruning**: the thread that ends prunes the memory it touched
+  (`session-end` lists the entries; the `harness` skill, "Ending a thread"); deletes of content that has not
   landed elsewhere stay operator-gated. The template retired its periodic
   `memory-prune` audit skill on 2026-11-17. (The fleet-era `ac-memory-gc`
   inventory and its weekly `ops-memory-gc` timer are retired too.)

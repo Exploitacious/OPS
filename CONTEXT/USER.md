@@ -5,7 +5,7 @@ USER-TEMPLATE: unfilled. This line is the verify-ops.sh identity canary
 (check 21): on a bootstrapped copy it must be gone. Remove it once every
 EXAMPLE block below holds your own facts.
 
-harness-update never syncs this file in either direction
+The template sync never touches this file in either direction
 (harness-update-scan.sh is_excluded): it is your identity, never the public
 template's. BOOTSTRAP.md writes it on first launch.
 -->

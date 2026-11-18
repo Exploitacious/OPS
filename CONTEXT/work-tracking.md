@@ -10,8 +10,8 @@
 > Replace every EXAMPLE block with your own systems, or delete the blocks you
 > don't need. Delete this banner once the file is real.
 >
-> Why this matters: the `session-close` skill reads this file at close time to
-> run its **WIP & work-tracking reconciliation gate**, the step that makes your
+> Why this matters: a thread's close (`session-end close`, the `harness` skill)
+> reads this file to run its **WIP & work-tracking reconciliation gate**, the step that makes your
 > tickets / time / board reflect what the session actually did before the
 > session is gone. This file is the *only* place that gate learns your systems;
 > it hardcodes nothing. If a section is empty, the gate degrades gracefully for

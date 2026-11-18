@@ -2,8 +2,8 @@
 # key.sh: the single source of truth for the handoff PROJECT KEY.
 #
 # Emits a stable, filesystem-safe key for the current project so the WRITE
-# (session-handoff skill), the READ (same skill), and the notifier
-# (handoff-check.sh) all agree on the baton filename and never drift.
+# (session-end move prints the path), the READ (the resuming agent), and the
+# notifier (handoff-check.sh) all agree on the baton filename and never drift.
 #
 # Key = git repo toplevel if inside a repo, else the current working dir;
 # slashes → dashes, leading dashes stripped. handoff-check.sh inlines this
