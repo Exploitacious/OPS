@@ -4,6 +4,15 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-24: shared systems answer to their owners
+
+- **`core.md` says a teammate's go is not a design ruling on a system they do not own.** On a team
+  box the Operator is the person the copy serves, so a build that person approved passed every
+  check even when it cut across the direction of an organization repo owned by someone else (an
+  alert-pipeline change built in the wrong workflow, then closed unmerged after a full session).
+  Now a new path, component or overlapping mechanism in a system the Operator does not own needs
+  its owner's answer first, and that case counts as a genuine fork.
+
 ## 2026-11-18: a key-safe client, a caller-bound waiter, the model-fallback flag, and honest suites
 
 - **`mcp-http-call.py` redacts before it clips.** Five error paths sliced server text first and
