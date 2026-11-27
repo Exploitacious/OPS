@@ -11,15 +11,20 @@ temporary directory, so nothing here reads a real session transcript. Every run
 gets TZ=UTC unless a case says otherwise, so no result depends on the box's own
 zone.
 
-Three groups. The display zone of the contiguous work blocks: the blocks print on
+Four groups. The display zone of the contiguous work blocks: the blocks print on
 a time entry's Time line, so a wrong offset puts a wrong window on a billed
 entry. The defect these tests pin: a fixed UTC-4 display read every block an hour
 late once US Eastern went back to UTC-5 (an 18:05 ET start printed as 19:05).
 The ACTIVE total never depended on the display zone, and one case holds that so
 a later change cannot make it start to. The gap rule: every silent stretch over
 the threshold is classified and printed with its cause, because a billed
-figure that silently drops or silently adds an hour is a wrong bill. And the
-hook mode (--since-last-entry --brief) with its --time-tool option.
+figure that silently drops or silently adds an hour is a wrong bill. The work
+hours default for a long pause the operator's prompt ends: a transcript cannot
+tell a person working the task outside the chat from an agent parked on an
+approval, so the hour of day sets the default (counts wholly inside Monday to
+Friday 07:00 to 18:00, assumed idle otherwise) and the agent overturns it with
+--keep or --drop. And the hook mode (--since-last-entry --brief) with its
+--time-tool option.
 
 The two Eastern changes the zone cases straddle (UTC instants):
   fall back   2026-11-01 06:00Z  02:00 EDT -> 01:00 EST
@@ -28,6 +33,7 @@ The two Eastern changes the zone cases straddle (UTC instants):
 import json
 import os
 import re
+import datetime
 import subprocess
 import sys
 import tempfile
@@ -133,6 +139,21 @@ def overnight_task_records():
     # next morning: the transcript holds a launch record and nothing else.
     return [human("11-05 20:00", "watch the build"), launch("11-05 20:05", "toolu_NIGHT"), assistant("11-05 20:06", "Watching in the background."),
             queued("11-06 10:00", notice("toolu_NIGHT")), assistant("11-06 10:01", "It exited.")]
+
+
+def at_utc(stamp, kind="assistant", text="ok"):
+    """A record at a full UTC stamp (the helpers above pin 2026 and a month-day)."""
+    if kind == "human":
+        return {"timestamp": stamp, "type": "user", "promptSource": "sdk", "message": {"role": "user", "content": text}}
+    return {"timestamp": stamp, "type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+
+def pause_records(start, end, text="the portal shows two failures"):
+    """The agent goes quiet at START and the operator types TEXT at END (both full
+    UTC stamps), then the agent answers five minutes later. Nothing else sits in
+    the gap, so it is a typed-prompt pause with no other evidence."""
+    reply = datetime.datetime.fromisoformat(end.replace("Z", "+00:00")) + datetime.timedelta(minutes=5)
+    return [at_utc(start), at_utc(end, "human", text), at_utc(reply.strftime("%Y-%m-%dT%H:%M:%SZ"))]
 
 
 class ActiveMinutesTest(unittest.TestCase):
@@ -397,6 +418,8 @@ class ActiveMinutesTest(unittest.TestCase):
         self.assertIn("$TZ", flat)
         self.assertIn("daylight saving", flat)
         self.assertIn("--time-tool NAME", flat)
+        self.assertIn("--work-hours HH:MM-HH:MM", flat)
+        self.assertIn("default 07:00-18:00", flat)
         self.assertNotIn("default -4", flat)   # the old fixed default
         self.assertNotIn("US Eastern DST", flat)
         doc = " ".join(SCRIPT.read_text().split('"""')[1].split())
@@ -461,7 +484,7 @@ class ActiveMinutesTest(unittest.TestCase):
         proc = self.run_records(records)
         [(verdict, mins, _, _, key, cause)] = self.gaps_of(proc)
         self.assertEqual(verdict, "EXCLUDED")
-        self.assertIn("over 4 h", cause)
+        self.assertIn("outside work hours", cause)         # 21:00 is after the window; 08:10 the next day is not the cause
         self.assertIn("Morning, next one", cause)
         self.assertEqual(self.active_minutes(proc), 30.0)
         # --keep, given by the operator's evidence, counts exactly that gap.
@@ -469,14 +492,16 @@ class ActiveMinutesTest(unittest.TestCase):
         self.assertEqual([g[0] for g in self.gaps_of(kept)], ["COUNTED"])
         self.assertEqual(self.active_minutes(kept), 30.0 + float(mins))
         self.assertIn("kept", self.gaps_of(kept)[0][5])
-        # So does a higher ceiling.
-        self.assertEqual([g[0] for g in self.gaps_of(self.run_records(records, "--attended-max", "12"))], ["COUNTED"])
+        # A higher ceiling does not: the hour of day decides this gap, not its length.
+        self.assertEqual([g[0] for g in self.gaps_of(self.run_records(records, "--attended-max", "12"))], ["EXCLUDED"])
 
     def test_the_ceiling_is_inclusive_at_exactly_four_hours(self):
         records = [assistant("11-06 10:00"), human("11-06 14:00", "back at it"), assistant("11-06 14:05")]
         self.assertEqual([g[0] for g in self.gaps_of(self.run_records(records))], ["COUNTED"])
         records = [assistant("11-06 10:00"), human("11-06 14:01", "back at it"), assistant("11-06 14:05")]
-        self.assertEqual([g[0] for g in self.gaps_of(self.run_records(records))], ["EXCLUDED"])
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(self.run_records(records))
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("in work hours but over 4 h", cause)
 
     def test_a_stated_break_before_the_gap_is_excluded_and_quoted(self):
         records = [human("11-06 12:00", "Going to lunch, back in an hour"), assistant("11-06 12:05", "Understood."),
@@ -668,6 +693,208 @@ class ActiveMinutesTest(unittest.TestCase):
         [(verdict, _, _, _, _, cause)] = self.gaps_of(self.run_records(records))
         self.assertTrue(verdict == "COUNTED" and cause.startswith("attended pause"))
 
+    # --- work hours: the hour of day sets the default for a typed-prompt pause ---
+    #
+    # 2026-11-02 is a Monday, 11-06 a Friday, 11-07 a Saturday, 11-08 a Sunday.
+    # The runs use TZ=UTC, so the window reads in UTC unless a case names a zone.
+
+    def one_gap(self, start, end, *args, env=None):
+        proc = self.run_records(pause_records(start, end), *args, env=env)
+        [gap] = self.gaps_of(proc)
+        return proc, gap
+
+    def test_a_pause_wholly_inside_work_hours_counts_and_says_how_to_overturn_it(self):
+        proc, (verdict, mins, _, _, _, cause) = self.one_gap("2026-11-02T10:00:00Z", "2026-11-02T10:50:00Z")
+        self.assertEqual((verdict, mins), ("COUNTED", "50.0"))
+        self.assertIn("in work hours", cause)
+        self.assertIn("--drop", cause)
+        self.assertIn("the portal shows two failures", cause)
+        self.assertEqual(self.active_minutes(proc), 55.0)
+
+    def test_a_weekend_pause_is_excluded_and_the_cause_says_why(self):
+        for day, name in (("2026-11-07", "Sat"), ("2026-11-08", "Sun")):
+            with self.subTest(day=name):
+                proc, (verdict, _, _, _, _, cause) = self.one_gap(f"{day}T10:00:00Z", f"{day}T10:50:00Z")
+                self.assertEqual(verdict, "EXCLUDED")
+                self.assertIn("outside work hours", cause)
+                self.assertIn(f"{name} ", cause)
+                self.assertIn("--keep", cause)
+                self.assertEqual(self.active_minutes(proc), 5.0)      # only the closing reply's own five minutes
+
+    def test_a_pause_that_ends_after_the_window_is_excluded_and_names_the_end(self):
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-06T17:40:00Z", "2026-11-06T18:20:00Z")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("it ends at Fri 11-06 18:20", cause)
+        self.assertIn("outside work hours", cause)
+        self.assertNotIn("it starts", cause)
+
+    def test_a_pause_that_starts_before_the_window_is_excluded_and_names_the_start(self):
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-06T06:30:00Z", "2026-11-06T07:20:00Z")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("it starts at Fri 11-06 06:30", cause)
+        self.assertNotIn("it ends", cause)
+
+    def test_a_pause_with_both_ends_outside_the_window_names_both(self):
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-06T05:00:00Z", "2026-11-06T06:00:00Z")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("both ends fall outside work hours", cause)
+        self.assertIn("05:00", cause)
+        self.assertIn("06:00", cause)
+
+    def test_a_pause_that_crosses_midnight_is_excluded_even_when_the_window_covers_both_ends(self):
+        # Default hours: 23:30 and 00:10 are both outside, so the ends say so. A
+        # window wide enough to hold both ends still must not count a pause across
+        # midnight: it is not one working stretch of one day.
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-02T23:30:00Z", "2026-11-03T00:10:00Z")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("outside work hours", cause)
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-02T23:30:00Z", "2026-11-03T00:10:00Z", "--work-hours", "00:00-23:59")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("crosses midnight", cause)
+        self.assertIn("--keep", cause)
+
+    def test_a_friday_to_monday_pause_is_excluded_even_when_both_ends_are_in_hours(self):
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-06T17:00:00Z", "2026-11-09T08:00:00Z", "--attended-max", "100")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("crosses midnight", cause)
+
+    def test_the_window_boundaries_are_inclusive_at_0700_and_1800(self):
+        # (start, end, counted): exactly 07:00 and exactly 18:00 are inside; a
+        # minute (or a second) beyond either is outside.
+        cases = [("2026-11-06T07:00:00Z", "2026-11-06T07:40:00Z", "COUNTED"),
+                 ("2026-11-06T06:59:00Z", "2026-11-06T07:40:00Z", "EXCLUDED"),
+                 ("2026-11-06T17:20:00Z", "2026-11-06T18:00:00Z", "COUNTED"),
+                 ("2026-11-06T17:20:00Z", "2026-11-06T18:01:00Z", "EXCLUDED"),
+                 ("2026-11-06T17:20:00Z", "2026-11-06T18:00:30Z", "EXCLUDED")]
+        for start, end, want in cases:
+            with self.subTest(start=start, end=end):
+                _, gap = self.one_gap(start, end)
+                self.assertEqual(gap[0], want)
+
+    def test_the_attended_max_ceiling_still_applies_inside_work_hours(self):
+        # 07:30 to 11:30 is exactly 4 h and counts; a minute more is listed with the
+        # ceiling named; a higher --attended-max counts it again.
+        _, gap = self.one_gap("2026-11-02T07:30:00Z", "2026-11-02T11:30:00Z")
+        self.assertEqual(gap[0], "COUNTED")
+        _, (verdict, _, _, _, key, cause) = self.one_gap("2026-11-02T07:30:00Z", "2026-11-02T11:31:00Z")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("in work hours but over 4 h", cause)
+        self.assertNotIn("outside work hours", cause)
+        _, gap = self.one_gap("2026-11-02T07:30:00Z", "2026-11-02T11:31:00Z", "--attended-max", "5")
+        self.assertEqual(gap[0], "COUNTED")
+
+    def test_keep_counts_an_out_of_hours_pause_and_drop_excludes_an_in_hours_one(self):
+        out = pause_records("2026-11-07T10:00:00Z", "2026-11-07T10:50:00Z")
+        [(verdict, _, _, _, key, cause)] = self.gaps_of(self.run_records(out))
+        self.assertEqual(verdict, "EXCLUDED")                    # the default the agent overturns
+        self.assertIn("outside work hours", cause)
+        kept = self.run_records(out, "--keep", key)
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(kept)
+        self.assertEqual(verdict, "COUNTED")
+        self.assertIn("--keep", cause)
+        self.assertEqual(self.active_minutes(kept), 55.0)
+        inside = pause_records("2026-11-02T10:00:00Z", "2026-11-02T10:50:00Z")
+        [(verdict, _, _, _, key, cause)] = self.gaps_of(self.run_records(inside))
+        self.assertEqual(verdict, "COUNTED")                     # the default the agent overturns
+        self.assertIn("in work hours", cause)
+        dropped = self.run_records(inside, "--drop", key)
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(dropped)
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("--drop", cause)
+        self.assertEqual(self.active_minutes(dropped), 5.0)
+
+    def test_work_hours_option_moves_the_window(self):
+        early = ("2026-11-02T08:00:00Z", "2026-11-02T08:50:00Z")      # inside 07:00-18:00
+        self.assertEqual(self.one_gap(*early)[1][0], "COUNTED")
+        self.assertEqual(self.one_gap(*early, "--work-hours", "09:00-17:00")[1][0], "EXCLUDED")
+        before = ("2026-11-02T06:00:00Z", "2026-11-02T06:50:00Z")     # outside 07:00-18:00
+        self.assertEqual(self.one_gap(*before)[1][0], "EXCLUDED")
+        self.assertEqual(self.one_gap(*before, "--work-hours", "05:00-23:00")[1][0], "COUNTED")
+        # A one-digit hour reads the same as its padded form.
+        self.assertEqual(self.one_gap("2026-11-02T07:00:00Z", "2026-11-02T07:40:00Z", "--work-hours", "7:00-18:00")[1][0], "COUNTED")
+
+    def test_work_hours_never_reach_the_weekdays(self):
+        # The option sets hours only: a wide window does not make a Saturday a work day.
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-07T10:00:00Z", "2026-11-07T10:50:00Z", "--work-hours", "00:00-23:59")
+        self.assertEqual(verdict, "EXCLUDED")
+        self.assertIn("Sat", cause)
+
+    def test_a_bad_work_hours_value_exits_2_with_a_clear_message_even_on_a_short_transcript(self):
+        for bad in ["25:00-26:00", "18:00-07:00", "07:00-07:00", "07:00", "7-18", "07:00-18:60", "07:00-24:00", "abc", " ", "07:00-18:00-19:00"]:
+            with self.subTest(bad=bad):
+                proc = self.run_records(pause_records("2026-11-02T10:00:00Z", "2026-11-02T10:50:00Z"), f"--work-hours={bad}")
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn("--work-hours: need HH:MM-HH:MM with the start before the end", proc.stderr)
+                self.assertNotIn("ACTIVE", proc.stdout)
+        # Checked before the transcript is read, like the zone options: exit 2, not the short-transcript exit 1.
+        short = self.run_records([assistant("11-06 09:00")], "--work-hours=18:00-07:00")
+        self.assertEqual(short.returncode, 2)
+        self.assertIn("--work-hours", short.stderr)
+
+    def test_brief_follows_the_same_line(self):
+        # The hook mode measures with the same classifier, so a weekend pause is
+        # not counted into the unlogged minutes and a weekday one is.
+        brief = ("--since-last-entry", "--brief")
+        inside = self.run_records(pause_records("2026-11-02T10:00:00Z", "2026-11-02T10:50:00Z"), *brief)
+        self.assertIn("unlogged_min=55.0", inside.stdout)
+        weekend = self.run_records(pause_records("2026-11-07T10:00:00Z", "2026-11-07T10:50:00Z"), *brief)
+        self.assertIn("unlogged_min=5.0", weekend.stdout)
+        moved = self.run_records(pause_records("2026-11-07T10:00:00Z", "2026-11-07T10:50:00Z"), *brief, "--keep", "2026-11-07T10:00")
+        self.assertIn("unlogged_min=55.0", moved.stdout)
+        late = self.run_records(pause_records("2026-11-02T17:40:00Z", "2026-11-02T18:20:00Z"), *brief, "--work-hours", "07:00-19:00")
+        self.assertIn("unlogged_min=45.0", late.stdout)
+
+    def test_other_gap_causes_do_not_depend_on_the_hour_of_day(self):
+        # A background task that ran, a limit hold, a stated break, a harness-ended
+        # gap and --strict behave the same on a Saturday night as on a Monday morning.
+        sat = "2026-11-07T"
+        task = [at_utc(sat + "02:00:00Z", "human", "run the sweep"), launch("11-07 02:05", "toolu_SAT"), at_utc(sat + "02:06:00Z"),
+                queued("11-07 03:10", notice("toolu_SAT")), at_utc(sat + "03:11:00Z")]
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(self.run_records(task))
+        self.assertTrue(verdict == "COUNTED" and cause.startswith("background task"), cause)
+        hold = [at_utc(sat + "02:00:00Z"), api_error("11-07 02:05"), at_utc(sat + "04:00:00Z", "human", "continue"), at_utc(sat + "04:05:00Z")]
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(self.run_records(hold))
+        self.assertTrue(verdict == "EXCLUDED" and cause.startswith("usage-limit hold"), cause)
+        stated = [at_utc(sat + "02:00:00Z", "human", "going to lunch"), at_utc(sat + "02:05:00Z"), at_utc(sat + "03:20:00Z", "human", "ok"), at_utc(sat + "03:25:00Z")]
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(self.run_records(stated))
+        self.assertTrue(verdict == "EXCLUDED" and "operator-stated break" in cause, cause)
+        strict = self.run_records(pause_records("2026-11-02T10:00:00Z", "2026-11-02T10:50:00Z"), "--strict")
+        [(verdict, _, _, _, _, cause)] = self.gaps_of(strict)
+        self.assertTrue(verdict == "EXCLUDED" and "--strict" in cause, cause)
+
+    # --- work hours and daylight saving: the window is read per timestamp --------
+
+    def test_the_window_follows_daylight_saving_either_side_of_the_fall_change(self):
+        # After the change (EST, UTC-5): Monday 21:50Z to 22:50Z is 16:50 to 17:50,
+        # inside. Read at the old EDT offset it would end at 18:50, outside.
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-11-02T21:50:00Z", "2026-11-02T22:50:00Z", *NY)
+        self.assertEqual(verdict, "COUNTED", cause)
+        # Before the change (EDT, UTC-4): Friday 21:40Z to 22:20Z is 17:40 to 18:20,
+        # so it ends outside. Read at EST it would be 16:40 to 17:20, inside.
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2026-10-30T21:40:00Z", "2026-10-30T22:20:00Z", *NY)
+        self.assertEqual(verdict, "EXCLUDED", cause)
+        self.assertIn("it ends at Fri 10-30 18:20 EDT", cause)
+
+    def test_the_window_follows_daylight_saving_across_the_spring_change(self):
+        # After the change (EDT): Monday 11:00Z is 07:00, the window's first minute.
+        # Read at the old EST offset it would be 06:00, outside.
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2027-03-15T11:00:00Z", "2027-03-15T11:40:00Z", *NY)
+        self.assertEqual(verdict, "COUNTED", cause)
+        # Before the change (EST): Friday 11:00Z is 06:00, outside.
+        _, (verdict, _, _, _, _, cause) = self.one_gap("2027-03-12T11:00:00Z", "2027-03-12T11:40:00Z", *NY)
+        self.assertEqual(verdict, "EXCLUDED", cause)
+        self.assertIn("it starts at Fri 03-12 06:00 EST", cause)
+
+    def test_the_window_is_read_in_the_default_zone_and_in_a_fixed_offset(self):
+        # Same instants as the first fall-change case, reached through TZ and through --tz-offset.
+        start, end = "2026-11-02T21:50:00Z", "2026-11-02T22:50:00Z"
+        self.assertEqual(self.one_gap(start, end, env=base_env(TZ="America/New_York"))[1][0], "COUNTED")
+        self.assertEqual(self.one_gap(start, end, "--tz-offset", "-5")[1][0], "COUNTED")
+        # A fixed -4 is a deliberate override and gives the old EDT reading: 17:50 to 18:50.
+        self.assertEqual(self.one_gap(start, end, "--tz-offset", "-4")[1][0], "EXCLUDED")
+        # With no zone given at all the window reads in UTC (TZ=UTC): 21:50 is after 18:00.
+        self.assertEqual(self.one_gap(start, end)[1][0], "EXCLUDED")
+
     # --- hook mode: --since-last-entry --brief ---------------------------------
 
     def test_brief_reports_unlogged_minutes_since_the_last_time_create(self):
@@ -808,7 +1035,7 @@ class ActiveMinutesTest(unittest.TestCase):
         text = SCRIPT.read_text()
         doc = " ".join(text.split('"""')[1].split())
         for needle in ("30 minutes or less", "Unattended agent time counts like attended time", "usage-limit hold",
-                       "--keep", "--also", "--strict"):
+                       "--keep", "--also", "--strict", "work hours", "--work-hours", "inside work hours"):
             self.assertIn(needle, doc, needle)
         self.assertNotIn(chr(0x2014), text)    # no em or en dashes
         self.assertNotIn(chr(0x2013), text)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Billable working minutes from a Claude session transcript.
 
-Two rules set the measure, and the code follows both.
+Three rules set the measure, and the code follows all three.
 
   A silent stretch of 30 minutes or less between transcript events is working
   time (the operator reads, takes a portal step, works the same task outside
@@ -14,14 +14,25 @@ Two rules set the measure, and the code follows both.
   (a usage limit, an overnight stop) is not work and needs evidence too:
   counting a limit hold as work would bill hours in which nothing happened.
 
+  A pause is judged by the hour of day. A session transcript cannot tell a person
+  working the task outside the chat from an agent parked on an approval, so a long
+  pause that ends with a prompt the operator typed counts when it lies wholly
+  inside work hours and is assumed idle when any part falls outside them. Both
+  sides are defaults: the agent decides from what the pause was waiting on.
+
 So every gap over --gap seconds (default 1800) is classified by its evidence and
 printed with its cause, COUNTED or EXCLUDED:
 
-  COUNTED   attended pause: the gap ends with a prompt the operator typed, and
-            lasted no longer than --attended-max hours (default 4).
+  COUNTED   attended pause in work hours: the gap ends with a prompt the operator
+            typed, lies wholly inside work hours (start and end on the same
+            weekday date, both inside the window), and lasted no longer than
+            --attended-max hours (default 4).
   COUNTED   background task: the gap ends with a task notification whose task was
             launched before the gap began, so agent work ran through it, and the
             gap lasted no longer than --attended-max hours (default 4).
+  EXCLUDED  pause outside work hours: the same typed-prompt gap, but it starts or
+            ends outside the window, falls on a weekend, or crosses midnight. The
+            cause names which end fell outside. Assumed idle.
   EXCLUDED  usage-limit hold or other provider error: an API error record sits
             just before the gap.
   EXCLUDED  operator-stated break: the last prompt before the gap, or the one
@@ -30,12 +41,11 @@ printed with its cause, COUNTED or EXCLUDED:
   EXCLUDED  idle until a harness message: a scheduled check, fleet notice,
             context handoff, resume message, compact command or cross-thread
             message ended the gap, so nobody is shown present.
-  EXCLUDED  long attended pause: over --attended-max hours with no other
-            evidence (overnight, away). The 4 hours sit between the pauses
+  EXCLUDED  long attended pause: inside work hours but over --attended-max hours
+            with no other evidence (away). The 4 hours sit between the pauses
             seen in practice (an hour or two while the operator works a console
-            or a report) and the stops that mean overnight or a weekend. The
-            line only decides counted versus listed; --keep overrides it with
-            evidence.
+            or a report) and the stops that mean away for the day. The line only
+            decides counted versus listed; --keep overrides it with evidence.
   EXCLUDED  long background-task gap: the same task notification, but the gap
             is over --attended-max hours and nothing shows work inside it. A
             launch record is not work: a watcher or an idle poll that exits the
@@ -49,11 +59,23 @@ printed with its cause, COUNTED or EXCLUDED:
             listed (with that said in its cause) until --also lane transcripts
             or --keep give evidence.
 
+Work hours default to Monday to Friday 07:00 to 18:00, both ends inside (07:00
+and 18:00 exactly are inside), read in the display zone (see below) one timestamp
+at a time, so a daylight-saving change moves the window against UTC with no
+special case. --work-hours HH:MM-HH:MM changes the hours; the weekdays stay fixed,
+and a value that is not a start before an end exits 2. The hour of day only sets
+the default for a typed-prompt pause: --keep ISO and --drop ISO are how the agent
+records its own call from the record (what the pause was waiting on, what the
+operator said on returning), and each printed cause says which flag to use.
+Gaps of 30 minutes or less, background-task gaps, holds, stated breaks and
+harness-ended gaps do not depend on the hour.
+
 --also FILE... adds other transcripts (a thread's subagent and workflow lane
 files) as work trace: an event in any of them inside a gap means work was
 running, so the gap is not one. --keep ISO / --drop ISO force one gap (matched
 by its UTC start, any prefix such as 2026-11-06T22:10) to COUNTED or EXCLUDED
-when the operator gives evidence the transcript cannot see. --strict drops every
+when the record or the operator gives evidence the transcript's timing cannot
+show. --strict drops every
 gap over --gap with no classification, for a session with no operator in it.
 
 Bill to the minute as decimal hours to the nearest hundredth; never round to a block.
@@ -85,7 +107,7 @@ naming a ticket in the other form, ticket number versus numeric id
 
 Usage:
   active-minutes <transcript.jsonl> [--gap SECONDS] [--attended-max HOURS]
-      [--since ISO] [--until ISO] [--zone NAME | --tz-offset H] [--also FILE ...]
+      [--work-hours HH:MM-HH:MM] [--since ISO] [--until ISO] [--zone NAME | --tz-offset H] [--also FILE ...]
       [--keep ISO ...] [--drop ISO ...] [--strict] [--time-tool NAME]
       [--since-last-entry [--ticket T] [--now ISO] --brief]
 
@@ -98,7 +120,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 p = argparse.ArgumentParser()
 p.add_argument("transcript")
 p.add_argument("--gap", type=float, default=1800.0, help="seconds of silence above which a gap is classified instead of counted (default 1800 = 30 min)")
-p.add_argument("--attended-max", type=float, default=4.0, help="hours an attended pause may last and still count without other evidence (default 4)")
+p.add_argument("--attended-max", type=float, default=4.0, help="hours an attended pause or a background-task gap may last and still count without other evidence (default 4)")
+p.add_argument("--work-hours", default="07:00-18:00", metavar="HH:MM-HH:MM", help="work hours, Monday to Friday, both ends inside, read in the display zone (default 07:00-18:00): a pause a typed prompt ends counts inside them and is assumed idle outside them")
 p.add_argument("--since", default=None, help="ignore events before this ISO time (no offset = UTC)")
 p.add_argument("--until", default=None, help="ignore events after this ISO time (no offset = UTC)")
 zone_group = p.add_mutually_exclusive_group()
@@ -125,6 +148,19 @@ if a.brief and not a.since_last_entry:
 if not a.time_tool.strip():
     p.error("--time-tool: need a tool name, got an empty one")
 TIME_TOOL = a.time_tool.strip()
+
+def work_window(text):
+    # An unusable window must stop the run: guessing one would count or drop
+    # pauses by hours nobody asked for. Checked before the transcript is read,
+    # like the zone options, so a bad value exits 2 whatever the transcript holds.
+    m = re.fullmatch(r"(\d{1,2}):(\d\d)-(\d{1,2}):(\d\d)", text.strip())
+    if m:
+        h1, m1, h2, m2 = map(int, m.groups())
+        if h1 < 24 and h2 < 24 and m1 < 60 and m2 < 60 and (h1, m1) < (h2, m2):
+            return datetime.time(h1, m1), datetime.time(h2, m2)
+    p.error("--work-hours: need HH:MM-HH:MM with the start before the end, got %r" % text)
+
+work_start, work_end = work_window(a.work_hours)
 
 def parse(t):
     # Transcript stamps are UTC. A naive time is read as UTC too, because
@@ -402,6 +438,11 @@ def api_error_before(i):
         if ev[j].kind in ("human", "harness", "assistant"): return None
     return None
 
+def in_work_hours(local):
+    """True when a local timestamp is on a weekday and inside the window, both
+    ends inclusive (07:00 and 18:00 exactly are inside)."""
+    return local.weekday() < 5 and work_start <= local.time() <= work_end
+
 def classify(i):
     """(counted, cause) for the gap between ev[i] and ev[i+1]."""
     x, y = ev[i], ev[i + 1]
@@ -449,9 +490,27 @@ def classify(i):
                 return True, "background task: launched %s, still running through the gap, finished at its end (unattended agent work counts)" % loc(launched)
             return False, "task notification ended the gap but its launch is not in this transcript: pass the lane transcripts with --also, or --keep with evidence"
         return False, "idle until %s (nobody shown present): \"%s\"" % (end.label, one_line(end.text, 50))
+    # Only a typed prompt is left here: the assistant and harness ends returned
+    # above. A transcript cannot tell a person working the task outside the chat
+    # from an agent parked on an approval, so the hour of day sets the default:
+    # wholly inside work hours the pause is assumed worked, any part outside them
+    # (a weekend, before or after the window, across midnight) it is assumed
+    # idle. Both are defaults, not findings, so each cause names the flag that
+    # overturns it from the record. Start and end are read in the display zone,
+    # one timestamp at a time, so a daylight-saving change needs no special case.
+    quote = one_line(end.text, 50)
+    ls, le = x.ts.astimezone(zone), y.ts.astimezone(zone)
+    outside = [(what, t_) for what, t_, ok in (("starts", ls, in_work_hours(ls)), ("ends", le, in_work_hours(le))) if not ok]
+    if outside or ls.date() != le.date():
+        if outside:
+            parts = ["it %s at %s %s" % (what, t_.strftime("%a %m-%d %H:%M"), t_.strftime("%Z") or zone_label) for what, t_ in outside]
+            where = parts[0] + ", outside work hours" if len(parts) == 1 else "both ends fall outside work hours (%s)" % ", ".join(parts)
+        else:
+            where = "it crosses midnight (%s to %s)" % (loc(x.ts), loc(y.ts))
+        return False, 'pause outside work hours, assumed idle: %s; the operator typed next ("%s"); --keep if the record shows the task was being worked (what the pause waited on, what the operator said on returning)' % (where, quote)
     if d > a.attended_max * 3600:
-        return False, 'attended pause over %g h with no other evidence (overnight or away): next prompt "%s"' % (a.attended_max, one_line(end.text, 50))
-    return True, 'attended pause: the operator typed next ("%s"), assumed working' % one_line(end.text, 50)
+        return False, 'attended pause in work hours but over %g h with no other evidence: the operator typed next ("%s"); --keep if the record shows the task was being worked' % (a.attended_max, quote)
+    return True, 'attended pause in work hours, assumed working: the operator typed next ("%s"); --drop if the record shows the time was idle (what the pause waited on, what the operator said on returning)' % quote
 
 active = 0.0
 gaps = []   # (start, end, seconds, counted, cause)

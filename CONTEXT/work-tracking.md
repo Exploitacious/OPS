@@ -45,6 +45,12 @@
 - **"Already logged today" check:** before proposing anything, ask my time
   system what's already recorded for today (tool `psa__time_overview` for my
   user id) so a day captured elsewhere never gets double-logged.
+- **Measuring the time:** `active-minutes` computes it from the session transcript. A pause
+  over 30 minutes that ends with a prompt the Operator typed counts when it lies wholly inside
+  work hours (Monday to Friday 07:00 to 18:00, `--work-hours` changes the hours) and is assumed
+  idle when any part falls outside them. Both are defaults, because a transcript cannot tell a
+  person working the task outside the chat from an agent parked on an approval: the agent
+  decides from what the pause was waiting on and records the call with `--keep` or `--drop`.
 - **Billable vs not:** client work is billable; internal/overhead work is
   logged for tracking but not billed; personal-side work takes no entry, so note
   "personal, skipped" and move on. Some work is genuinely non-trackable, so ask,

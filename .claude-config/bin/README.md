@@ -287,15 +287,25 @@ transcript, before that time is billed to a ticket. Python standard library only
 
 - **The rule.** A silent stretch of 30 minutes or less between events is working time. A longer
   gap is classified from its evidence and printed with its cause, COUNTED or EXCLUDED: an
-  attended pause (the Operator typed next) counts up to `--attended-max` hours (default 4);
-  unattended agent time (a background task that ran through the gap) counts to the same
-  limit; a usage-limit or provider-error hold, a stated break, a wait ended by a harness message
-  (scheduled check, context handoff, resume message, `/compact`), a gap with no prompt
-  evidence and a gap past the limit are excluded. `--keep ISO` and `--drop ISO` settle one
-  gap on evidence the transcript cannot show; `--also FILE...` adds lane transcripts as work
+  attended pause (the Operator typed next) counts when it lies wholly inside work hours
+  (Monday to Friday 07:00 to 18:00 in the display zone, start and end on the same date, both
+  ends inclusive) and lasts no longer than `--attended-max` hours (default 4), and is assumed
+  idle when any part falls outside them (a weekend, before or after the window, across
+  midnight). A session transcript cannot tell a person working the task outside the chat from
+  an agent parked on an approval, so the hour of day only sets the default: the agent decides
+  from what the pause was waiting on and overturns it with `--keep` or `--drop`, and each
+  printed cause names the flag. Unattended agent time (a background task that ran through the
+  gap) counts to the same `--attended-max` limit; a usage-limit or provider-error hold, a
+  stated break, a wait ended by a harness message (scheduled check, context handoff, resume
+  message, `/compact`), a gap with no prompt evidence and a gap past the limit are excluded
+  whatever the hour. `--keep ISO` and `--drop ISO` settle one gap on evidence the
+  transcript's timing cannot show; `--also FILE...` adds lane transcripts as work
   trace; `--strict` excludes every gap over `--gap` seconds (default 1800). The figure to bill
   is the `ACTIVE (bill this)` line, decimal hours to two places, never rounded.
-- **Options.** `--gap SECONDS`, `--attended-max HOURS`, `--since ISO`, `--until ISO` (no offset
+- **Options.** `--gap SECONDS`, `--attended-max HOURS`, `--work-hours HH:MM-HH:MM` (default
+  `07:00-18:00`, Monday to Friday only, read in the display zone one timestamp at a time so a
+  daylight-saving change needs no special case; a value that is not a start before an end
+  exits 2), `--since ISO`, `--until ISO` (no offset
   means UTC), `--zone NAME`, `--tz-offset H`, `--also FILE...`, `--keep ISO`, `--drop ISO`,
   `--strict`, `--time-tool NAME`, and the hook mode `--since-last-entry [--ticket T] [--now ISO]
   --brief`, which prints one `key=value` line (unlogged minutes since the transcript's last
