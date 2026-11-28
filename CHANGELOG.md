@@ -4,6 +4,26 @@ Notable changes to OPS, newest first. Format: the date, then what changed and wh
 matters. This file starts fresh at the public release; the harness's private
 prehistory is deliberately not part of it.
 
+## 2026-11-27: `active-minutes` judges a long pause by the hour of day
+
+- **A pause over 30 minutes that ends with a prompt the Operator typed now counts only inside
+  work hours.** A session transcript cannot tell a person working the task outside the chat
+  from an agent parked on an approval, and counting every such pause up to `--attended-max`
+  billed approval waits as work. Now a pause that lies wholly inside work hours (Monday to
+  Friday 07:00 to 18:00, both ends inclusive, start and end on the same date) counts, and one
+  with any part outside them (a weekend, before or after the window, across midnight) is
+  assumed idle. Both are defaults the agent overturns from the record with `--keep` and
+  `--drop`, and each printed cause names the flag. New `--work-hours HH:MM-HH:MM` moves the
+  hours (weekdays stay fixed; a bad value exits 2); the window is read in the display zone per
+  timestamp, so a daylight-saving change needs no special case. Gaps of 30 minutes or less,
+  background-task gaps, holds, stated breaks, harness-ended gaps, `--also`, `--strict` and
+  `--brief` behave as before.
+- **Tests**: 18 new cases in `bin/tests/active-minutes-test.py` (in-hours, weekend, before and
+  after the window, midnight, the 07:00 and 18:00 boundaries, the ceiling, `--keep` and `--drop`,
+  `--work-hours`, `--brief`, daylight saving); two existing cases changed because the rule
+  changes their cause and what a higher `--attended-max` does. `bin/README.md` and
+  `CONTEXT/work-tracking.md` state the rule.
+
 ## 2026-11-24: shared systems answer to their owners
 
 - **`core.md` says a teammate's go is not a design ruling on a system they do not own.** On a team
